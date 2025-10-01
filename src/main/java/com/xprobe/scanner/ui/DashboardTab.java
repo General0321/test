@@ -116,14 +116,15 @@ public class DashboardTab {
         collectionModeLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
         collectionModeLabel.setForeground(Color.GRAY);
         
-        // === 活动日志 ===
+        // === 活动日志（性能优化）===
         activityLogArea = new JTextArea(10, 40);
         activityLogArea.setEditable(false);
         activityLogArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
         activityLogArea.setLineWrap(true);
         activityLogArea.setWrapStyleWord(true);
+        activityLogArea.setDoubleBuffered(true);  // ✅ 启用双缓冲
         
-        // === 最近发现表格 ===
+        // === 最近发现表格（性能优化）===
         recentFindingsModel = new DefaultTableModel(
             new Object[]{"时间", "类型", "目标", "详情"}, 0) {
             @Override
@@ -134,8 +135,14 @@ public class DashboardTab {
         recentFindingsTable = new JTable(recentFindingsModel);
         recentFindingsTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         recentFindingsTable.setRowHeight(25);
+        recentFindingsTable.setDoubleBuffered(true);  // ✅ 启用双缓冲
+        recentFindingsTable.setFillsViewportHeight(false);  // ✅ 优化渲染
+        
+        // ✅ 列宽优化
         recentFindingsTable.getColumnModel().getColumn(0).setPreferredWidth(80);
+        recentFindingsTable.getColumnModel().getColumn(0).setMaxWidth(100);
         recentFindingsTable.getColumnModel().getColumn(1).setPreferredWidth(80);
+        recentFindingsTable.getColumnModel().getColumn(1).setMaxWidth(120);
         recentFindingsTable.getColumnModel().getColumn(2).setPreferredWidth(200);
         
         // 设置表格样式
@@ -144,11 +151,12 @@ public class DashboardTab {
         recentFindingsTable.getColumnModel().getColumn(0).setCellRenderer(centerRenderer);
         recentFindingsTable.getColumnModel().getColumn(1).setCellRenderer(centerRenderer);
         
-        // === 参数统计区域 ===
+        // === 参数统计区域（性能优化）===
         paramStatsArea = new JTextArea(10, 30);
         paramStatsArea.setEditable(false);
         paramStatsArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
         paramStatsArea.setBackground(CARD_BG);
+        paramStatsArea.setDoubleBuffered(true);  // ✅ 启用双缓冲
     }
     
     private void setupLayout() {
@@ -186,10 +194,20 @@ public class DashboardTab {
         // === 底部：最近发现 ===
         mainContent.add(createRecentFindingsPanel());
         
-        // 添加到滚动面板
-        JScrollPane scrollPane = new JScrollPane(mainContent);
+        // 添加到滚动面板（性能优化）
+        JScrollPane scrollPane = new JScrollPane(mainContent,
+            JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
+            JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
         scrollPane.setBorder(null);
-        scrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        
+        // ✅ 优化滚动性能
+        scrollPane.getVerticalScrollBar().setUnitIncrement(32);        // 增加滚动速度
+        scrollPane.getVerticalScrollBar().setBlockIncrement(128);      // 增加翻页速度
+        scrollPane.getViewport().setScrollMode(JViewport.BACKINGSTORE_SCROLL_MODE); // 使用缓冲模式
+        
+        // ✅ 启用硬件加速和双缓冲
+        scrollPane.getViewport().setDoubleBuffered(true);
+        mainContent.setDoubleBuffered(true);
         
         panel.add(scrollPane, BorderLayout.CENTER);
     }
@@ -263,36 +281,50 @@ public class DashboardTab {
     }
     
     /**
-     * 创建现代化统计卡片
+     * 创建现代化统计卡片（性能优化版）
      */
     private JPanel createModernStatCard(String title, JLabel valueLabel, 
                                        String icon, Color themeColor) {
         JPanel cardPanel = new JPanel() {
+            private boolean painted = false;
+            
             @Override
             protected void paintComponent(Graphics g) {
                 super.paintComponent(g);
-                Graphics2D g2d = (Graphics2D) g.create();
-                g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, 
-                                    RenderingHints.VALUE_ANTIALIAS_ON);
                 
-                // 白色背景with圆角
-                g2d.setColor(Color.WHITE);
-                g2d.fillRoundRect(0, 0, getWidth(), getHeight(), 12, 12);
-                
-                // 左侧彩色条
-                g2d.setColor(themeColor);
-                g2d.fillRoundRect(0, 0, 5, getHeight(), 12, 12);
-                
-                // 微妙阴影
-                g2d.setColor(new Color(0, 0, 0, 10));
-                g2d.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 12, 12);
-                
-                g2d.dispose();
+                // ✅ 优化：减少重绘次数
+                if (!painted || !isOpaque()) {
+                    Graphics2D g2d = (Graphics2D) g.create();
+                    
+                    // ✅ 优化渲染质量
+                    g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, 
+                                        RenderingHints.VALUE_ANTIALIAS_ON);
+                    g2d.setRenderingHint(RenderingHints.KEY_RENDERING,
+                                        RenderingHints.VALUE_RENDER_QUALITY);
+                    g2d.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL,
+                                        RenderingHints.VALUE_STROKE_PURE);
+                    
+                    // 白色背景with圆角
+                    g2d.setColor(Color.WHITE);
+                    g2d.fillRoundRect(0, 0, getWidth(), getHeight(), 12, 12);
+                    
+                    // 左侧彩色条
+                    g2d.setColor(themeColor);
+                    g2d.fillRoundRect(0, 0, 5, getHeight(), 12, 12);
+                    
+                    // 微妙阴影
+                    g2d.setColor(new Color(0, 0, 0, 10));
+                    g2d.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 12, 12);
+                    
+                    g2d.dispose();
+                    painted = true;
+                }
             }
         };
         
         cardPanel.setLayout(new BorderLayout(10, 5));
         cardPanel.setOpaque(false);
+        cardPanel.setDoubleBuffered(true);  // ✅ 启用双缓冲
         cardPanel.setBorder(new EmptyBorder(15, 20, 15, 20));
         
         // 图标
@@ -321,13 +353,16 @@ public class DashboardTab {
     }
     
     /**
-     * 创建参数统计面板
+     * 创建参数统计面板（性能优化）
      */
     private JPanel createParamStatsPanel() {
         JPanel panel = createCardPanel("参数收集统计");
         
         JScrollPane scrollPane = new JScrollPane(paramStatsArea);
         scrollPane.setBorder(null);
+        // ✅ 优化滚动性能
+        scrollPane.getVerticalScrollBar().setUnitIncrement(20);
+        scrollPane.setDoubleBuffered(true);
         
         panel.add(scrollPane, BorderLayout.CENTER);
         
@@ -335,13 +370,16 @@ public class DashboardTab {
     }
     
     /**
-     * 创建活动日志面板
+     * 创建活动日志面板（性能优化）
      */
     private JPanel createActivityLogPanel() {
         JPanel panel = createCardPanel("活动日志");
         
         JScrollPane scrollPane = new JScrollPane(activityLogArea);
         scrollPane.setBorder(null);
+        // ✅ 优化滚动性能
+        scrollPane.getVerticalScrollBar().setUnitIncrement(20);
+        scrollPane.setDoubleBuffered(true);
         
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
         buttonPanel.setOpaque(false);
@@ -362,7 +400,7 @@ public class DashboardTab {
     }
     
     /**
-     * 创建最近发现面板
+     * 创建最近发现面板（性能优化）
      */
     private JPanel createRecentFindingsPanel() {
         JPanel panel = createCardPanel("最近发现");
@@ -370,6 +408,9 @@ public class DashboardTab {
         
         JScrollPane scrollPane = new JScrollPane(recentFindingsTable);
         scrollPane.setBorder(null);
+        // ✅ 优化滚动性能
+        scrollPane.getVerticalScrollBar().setUnitIncrement(25);  // 行高25像素
+        scrollPane.setDoubleBuffered(true);
         
         panel.add(scrollPane, BorderLayout.CENTER);
         
@@ -377,30 +418,42 @@ public class DashboardTab {
     }
     
     /**
-     * 创建基础卡片面板
+     * 创建基础卡片面板（性能优化版）
      */
     private JPanel createCardPanel(String title) {
         JPanel cardPanel = new JPanel(new BorderLayout(10, 10)) {
+            private boolean painted = false;
+            
             @Override
             protected void paintComponent(Graphics g) {
                 super.paintComponent(g);
-                Graphics2D g2d = (Graphics2D) g.create();
-                g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, 
-                                    RenderingHints.VALUE_ANTIALIAS_ON);
                 
-                // 白色背景
-                g2d.setColor(Color.WHITE);
-                g2d.fillRoundRect(0, 0, getWidth(), getHeight(), 12, 12);
-                
-                // 边框
-                g2d.setColor(new Color(0, 0, 0, 10));
-                g2d.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 12, 12);
-                
-                g2d.dispose();
+                // ✅ 优化：减少重绘次数
+                if (!painted || !isOpaque()) {
+                    Graphics2D g2d = (Graphics2D) g.create();
+                    
+                    // ✅ 优化渲染质量
+                    g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, 
+                                        RenderingHints.VALUE_ANTIALIAS_ON);
+                    g2d.setRenderingHint(RenderingHints.KEY_RENDERING,
+                                        RenderingHints.VALUE_RENDER_QUALITY);
+                    
+                    // 白色背景
+                    g2d.setColor(Color.WHITE);
+                    g2d.fillRoundRect(0, 0, getWidth(), getHeight(), 12, 12);
+                    
+                    // 边框
+                    g2d.setColor(new Color(0, 0, 0, 10));
+                    g2d.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 12, 12);
+                    
+                    g2d.dispose();
+                    painted = true;
+                }
             }
         };
         
         cardPanel.setOpaque(false);
+        cardPanel.setDoubleBuffered(true);  // ✅ 启用双缓冲
         cardPanel.setBorder(new EmptyBorder(15, 15, 15, 15));
         
         // 标题
@@ -435,7 +488,10 @@ public class DashboardTab {
         autoRefreshTimer.scheduleAtFixedRate(new TimerTask() {
             @Override
             public void run() {
-                SwingUtilities.invokeLater(() -> updateStatistics());
+                // ✅ 优化：检查面板是否可见再刷新
+                if (panel.isVisible() && panel.isShowing()) {
+                    SwingUtilities.invokeLater(() -> updateStatistics());
+                }
             }
         }, 5000, 5000); // 每5秒刷新一次
     }

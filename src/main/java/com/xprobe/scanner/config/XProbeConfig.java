@@ -41,7 +41,12 @@ public class XProbeConfig implements Serializable {
     // 被动扫描规则
     private List<Configuration> scanConfigurations = new ArrayList<>();
     
+    // 被动扫描配置
+    private boolean enablePassiveScan = true;  // 被动扫描总开关（默认启用）
+    private Configuration.InjectionMode globalInjectionMode = Configuration.InjectionMode.BATCH;  // 全局注入模式（默认批量）
+    
     // 主动探测配置
+    private boolean enableActiveScan = false;
     private int bruteforceInterval = 300;
     private int minParameterCount = 5;
     private int maxConcurrentHosts = 3;
@@ -178,6 +183,30 @@ public class XProbeConfig implements Serializable {
     
     public void setScanConfigurations(List<Configuration> scanConfigurations) {
         this.scanConfigurations = scanConfigurations != null ? scanConfigurations : new ArrayList<>();
+    }
+    
+    public boolean isEnablePassiveScan() {
+        return enablePassiveScan;
+    }
+    
+    public void setEnablePassiveScan(boolean enablePassiveScan) {
+        this.enablePassiveScan = enablePassiveScan;
+    }
+    
+    public Configuration.InjectionMode getGlobalInjectionMode() {
+        return globalInjectionMode != null ? globalInjectionMode : Configuration.InjectionMode.BATCH;
+    }
+    
+    public void setGlobalInjectionMode(Configuration.InjectionMode globalInjectionMode) {
+        this.globalInjectionMode = globalInjectionMode;
+    }
+    
+    public boolean isEnableActiveScan() {
+        return enableActiveScan;
+    }
+    
+    public void setEnableActiveScan(boolean enableActiveScan) {
+        this.enableActiveScan = enableActiveScan;
     }
     
     public int getBruteforceInterval() {

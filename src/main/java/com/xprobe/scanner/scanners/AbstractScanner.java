@@ -36,6 +36,17 @@ public abstract class AbstractScanner implements Scanner {
     
     @Override
     public boolean canScan(ScanTask task) {
+        // ✅ 旧Scanner跳过配对架构的任务（由UniversalScanner处理）
+        if (task.getConfiguration().getPairs() != null && 
+            !task.getConfiguration().getPairs().isEmpty()) {
+            return false;
+        }
+        
+        // ✅ 检查参数是否为null（旧架构必须有parameter）
+        if (task.getParameter() == null) {
+            return false;
+        }
+        
         // 默认检查：参数类型和扫描类型匹配
         if (task.getParameter().type() == HttpParameterType.COOKIE) {
             return false;

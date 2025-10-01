@@ -5,6 +5,8 @@ import burp.api.montoya.http.handler.*;
 import burp.api.montoya.http.message.params.ParsedHttpParameter;
 import com.xprobe.scanner.config.Configuration;
 import com.xprobe.scanner.config.ConfigurationManager;
+import com.xprobe.scanner.config.ConfigPersistence;
+import com.xprobe.scanner.config.XProbeConfig;
 import com.xprobe.scanner.models.RequestContext;
 import com.xprobe.scanner.models.ScanTask;
 
@@ -24,19 +26,34 @@ public class RequestHandler implements HttpHandler {
     private final RequestFilter requestFilter;
     private final TaskScheduler taskScheduler;
     private final com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner;
+    private final ConfigPersistence configPersistence;  // ✅ 添加
     
     public RequestHandler(MontoyaApi api, ConfigurationManager configManager, 
                          RequestFilter requestFilter, TaskScheduler taskScheduler, 
-                         com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner) {
+                         com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner,
+                         ConfigPersistence configPersistence) {
         this.api = api;
         this.configManager = configManager;
         this.requestFilter = requestFilter;
         this.taskScheduler = taskScheduler;
         this.realtimeScanner = realtimeScanner;
+        this.configPersistence = configPersistence;  // ✅ 添加
     }
     
     @Override
     public RequestToBeSentAction handleHttpRequestToBeSent(HttpRequestToBeSent requestToBeSent) {
+        // 0. 检查被动扫描总开关
+        try {
+            XProbeConfig config = configPersistence.load();
+            if (!config.isEnablePassiveScan()) {
+                // 被动扫描已禁用，直接返回
+                return RequestToBeSentAction.continueWith(requestToBeSent);
+            }
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("检查被动扫描开关时出错: " + e.getMessage());
+            // 出错时默认允许扫描
+        }
+        
         // 1. 使用过滤器检查是否应该扫描
         if (!requestFilter.shouldScan(requestToBeSent)) {
             return RequestToBeSentAction.continueWith(requestToBeSent);
@@ -73,6 +90,7 @@ public class RequestHandler implements HttpHandler {
     
     /**
      * 收集所有需要扫描的任务
+     * ✅ 支持新旧两种架构
      */
     private List<ScanTask> collectScanTasks(HttpRequestToBeSent request, RequestContext context) {
         List<ScanTask> tasks = new ArrayList<>();
@@ -83,17 +101,26 @@ public class RequestHandler implements HttpHandler {
         // 获取Content-Type
         String contentType = getContentType(request);
         
-        // 遍历参数和配置，创建扫描任务
-        for (ParsedHttpParameter param : parameters) {
-            for (Configuration config : configManager.getEnabledConfigurations()) {
-                if (isParameterMatch(param.name(), config)) {
-                    // 原子性检查并标记为扫描中（避免并发重复扫描）
-                    if (checkAndMarkParameterAsScanning(request, param, config, contentType)) {
-                        continue; // 跳过已扫描或正在扫描的参数
+        // 遍历所有启用的配置
+        for (Configuration config : configManager.getEnabledConfigurations()) {
+            // 检查是否是配对架构
+            if (config.getPairs() != null && !config.getPairs().isEmpty()) {
+                // 新架构：配对架构
+                // 创建一个基于整个请求的扫描任务
+                ScanTask task = new ScanTask(null, config, request, context);
+                tasks.add(task);
+            } else {
+                // 旧架构：按参数匹配
+                for (ParsedHttpParameter param : parameters) {
+                    if (isParameterMatch(param.name(), config)) {
+                        // 原子性检查并标记为扫描中（避免并发重复扫描）
+                        if (checkAndMarkParameterAsScanning(request, param, config, contentType)) {
+                            continue; // 跳过已扫描或正在扫描的参数
+                        }
+                        
+                        ScanTask task = new ScanTask(param, config, request, context);
+                        tasks.add(task);
                     }
-                    
-                    ScanTask task = new ScanTask(param, config, request, context);
-                    tasks.add(task);
                 }
             }
         }
@@ -130,12 +157,15 @@ public class RequestHandler implements HttpHandler {
             String host = uri.getHost();
             String path = uri.getPath();
             
-            // 生成扫描类型标识 (使用 customLabel，如: "lfi", "sql", "ssrf")
-            String scanType = config.getCustomLabel();
-            
-            // ✅ 使用原子性方法：一次调用完成检查和标记，避免竞态条件
+            // ✅ 使用新的去重逻辑：支持颗粒度控制
+            // 使用 DeduplicationKeyGenerator 生成去重key
             boolean alreadyProcessed = realtimeScanner.checkAndMarkPassiveScanProcessed(
-                request.method(), host, path, contentType, param.name(), scanType);
+                request.method(), 
+                host, 
+                path, 
+                contentType, 
+                param.name(),  // targetIdentifier
+                config);       // 传递完整配置，支持颗粒度控制
             
             return alreadyProcessed;
         } catch (URISyntaxException | IllegalArgumentException e) {

@@ -3,6 +3,8 @@ package com.xprobe.scanner.ui;
 import burp.api.montoya.MontoyaApi;
 import com.xprobe.scanner.config.Configuration;
 import com.xprobe.scanner.config.ConfigurationManager;
+import com.xprobe.scanner.config.ConfigPersistence;
+import com.xprobe.scanner.config.XProbeConfig;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
@@ -18,6 +20,7 @@ public class PassiveScanConfigTab {
     private JPanel panel;
     private final MontoyaApi api;
     private final ConfigurationManager configManager;
+    private final ConfigPersistence configPersistence;
     
     // 配置表格
     private JTable configurationTable;
@@ -31,19 +34,25 @@ public class PassiveScanConfigTab {
     private JButton saveButton;
     private JButton refreshButton;
     
-    public PassiveScanConfigTab(MontoyaApi api, ConfigurationManager configManager) {
+    // 总开关和全局设置
+    private JToggleButton passiveScanToggleButton;  // ✅ 改为按钮形式
+    private JComboBox<Configuration.InjectionMode> globalInjectionModeCombo;  // ✅ 全局注入模式
+    
+    public PassiveScanConfigTab(MontoyaApi api, ConfigurationManager configManager, ConfigPersistence configPersistence) {
         this.api = api;
         this.configManager = configManager;
+        this.configPersistence = configPersistence;
         
         initializeComponents();
         setupLayout();
         setupEventListeners();
         loadConfigurations();
+        loadSavedSettings();  // ✅ 加载保存的设置（包括开关状态和全局注入模式）
     }
     
     private void initializeComponents() {
-        // 配置表格
-        tableModel = new DefaultTableModel(new Object[]{"规则名称", "规则类型", "启用状态", "参数数量"}, 0) {
+        // 配置表格 - 更新列名以反映新架构
+        tableModel = new DefaultTableModel(new Object[]{"规则名称", "启用状态", "注入点数", "Payload数", "匹配规则数"}, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
                 return false;
@@ -68,11 +77,57 @@ public class PassiveScanConfigTab {
         deleteButton = new JButton("删除规则");
         saveButton = new JButton("保存配置");
         refreshButton = new JButton("刷新");
+        
+        // ✅ 被动扫描总开关（按钮形式）
+        passiveScanToggleButton = new JToggleButton("🟢 被动扫描已启用", true);
+        passiveScanToggleButton.setFont(passiveScanToggleButton.getFont().deriveFont(Font.BOLD, 14f));
+        passiveScanToggleButton.setForeground(new Color(0, 120, 0));
+        passiveScanToggleButton.setBackground(new Color(230, 255, 230));
+        passiveScanToggleButton.setFocusPainted(false);
+        passiveScanToggleButton.setBorderPainted(true);
+        
+        // ✅ 全局注入模式选择
+        globalInjectionModeCombo = new JComboBox<>(Configuration.InjectionMode.values());
+        globalInjectionModeCombo.setSelectedItem(Configuration.InjectionMode.BATCH);
+        globalInjectionModeCombo.setFont(globalInjectionModeCombo.getFont().deriveFont(13f));
+        globalInjectionModeCombo.setToolTipText("<html>" +
+            "<b>全局注入模式（可在单个规则中覆盖）</b><br>" +
+            "• 批量模式：所有匹配参数同时注入，速度快<br>" +
+            "• 逐个模式：每次只注入一个参数，精确定位" +
+            "</html>");
     }
     
     private void setupLayout() {
         panel = new JPanel(new BorderLayout(10, 10));
         panel.setBorder(BorderFactory.createEmptyBorder(15, 15, 15, 15));
+        
+        // ✅ 顶部总开关和全局设置面板
+        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 15, 8));
+        topPanel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
+        topPanel.setBackground(new Color(245, 250, 255));  // 淡蓝色背景
+        
+        // 添加总开关按钮
+        topPanel.add(passiveScanToggleButton);
+        
+        // 添加分隔符
+        JSeparator separator1 = new JSeparator(SwingConstants.VERTICAL);
+        separator1.setPreferredSize(new Dimension(1, 30));
+        topPanel.add(separator1);
+        
+        // 添加注入模式标签和选择框
+        JLabel modeLabel = new JLabel("全局注入模式:");
+        modeLabel.setFont(modeLabel.getFont().deriveFont(Font.BOLD, 13f));
+        topPanel.add(modeLabel);
+        
+        topPanel.add(globalInjectionModeCombo);
+        
+        // 添加说明标签
+        JLabel infoLabel = new JLabel("(单个规则可覆盖)");
+        infoLabel.setForeground(Color.GRAY);
+        infoLabel.setFont(infoLabel.getFont().deriveFont(Font.ITALIC, 11f));
+        topPanel.add(infoLabel);
+        
+        panel.add(topPanel, BorderLayout.NORTH);
         
         // 创建主面板
         JPanel mainPanel = new JPanel(new BorderLayout(10, 10));
@@ -115,11 +170,12 @@ public class PassiveScanConfigTab {
         mainPanel.add(splitPane, BorderLayout.CENTER);
         
         // 说明文本
-        JTextArea helpText = new JTextArea(3, 80);
-        helpText.setText("被动扫描配置说明:\n" +
-            "• 这里配置的是被动扫描的检测规则，决定对哪些请求进行安全检测\n" +
-            "• 规则类型包括: LFI、SQL注入、SSRF等安全漏洞检测\n" +
-            "• 只有启用的规则才会对匹配的请求进行检测");
+        JTextArea helpText = new JTextArea(4, 80);
+        helpText.setText("【灵活规则系统】被动扫描配置说明:\n" +
+            "• 基于全新的灵活规则系统，支持自定义请求条件、注入点、Payload和响应匹配\n" +
+            "• 支持多种注入点类型：参数值、URL路径、请求头、请求体、Cookie等\n" +
+            "• 支持动态Payload变量：{{COLLABORATOR}}、{{RANDOM_STRING}}、{{BASE64:xxx}}等\n" +
+            "• 支持Burp Collaborator集成进行外带检测，支持灵活的去重策略");
         helpText.setEditable(false);
         helpText.setBackground(panel.getBackground());
         helpText.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
@@ -134,6 +190,15 @@ public class PassiveScanConfigTab {
         deleteButton.addActionListener(e -> deleteConfiguration());
         saveButton.addActionListener(e -> saveConfiguration());
         refreshButton.addActionListener(e -> loadConfigurations());
+        
+        // ✅ 被动扫描开关状态变化时自动保存并更新UI
+        passiveScanToggleButton.addActionListener(e -> {
+            updateToggleButtonAppearance();
+            savePassiveScanEnabled();
+        });
+        
+        // ✅ 全局注入模式变化时自动保存
+        globalInjectionModeCombo.addActionListener(e -> saveGlobalInjectionMode());
     }
     
     private void loadConfigurations() {
@@ -142,9 +207,36 @@ public class PassiveScanConfigTab {
         List<Configuration> configurations = configManager.getAllConfigurations();
         for (int i = 0; i < configurations.size(); i++) {
             Configuration config = configurations.get(i);
-            String ruleType = getRuleTypeDisplayName(config.getParameterNameType());
-            String enabledStatus = config.isEnabled() ? "启用" : "禁用";
-            int parameterCount = config.getParameterValues().size();
+            String enabledStatus = config.isEnabled() ? "✓ 启用" : "✗ 禁用";
+            
+            // ✅ 从配对架构中统计注入点、payload和响应匹配规则数量
+            int injectionPointCount = 0;
+            int payloadCount = 0;
+            int matchRuleCount = 0;
+            
+            if (config.getPairs() != null && !config.getPairs().isEmpty()) {
+                // 新架构：从配对中统计
+                for (var pair : config.getPairs()) {
+                    if (pair.getRequestConfig() != null && pair.getRequestConfig().getElements() != null) {
+                        for (var element : pair.getRequestConfig().getElements()) {
+                            if (element.isUseForInjection()) {
+                                injectionPointCount++;
+                                if (element.getPayloads() != null) {
+                                    payloadCount += element.getPayloads().size();
+                                }
+                            }
+                        }
+                    }
+                    if (pair.getResponseConfig() != null && pair.getResponseConfig().getElements() != null) {
+                        matchRuleCount += pair.getResponseConfig().getElements().size();
+                    }
+                }
+            } else {
+                // 旧架构（兼容）
+                injectionPointCount = config.getInjectionPoints() != null ? config.getInjectionPoints().size() : 0;
+                payloadCount = config.getPayloads() != null ? config.getPayloads().size() : 0;
+                matchRuleCount = config.getMatchRules() != null ? config.getMatchRules().size() : 0;
+            }
             
             // 使用customLabel作为规则名称，如果为空则使用默认名称
             String ruleName = config.getCustomLabel();
@@ -154,9 +246,10 @@ public class PassiveScanConfigTab {
             
             tableModel.addRow(new Object[]{
                 ruleName,
-                ruleType,
                 enabledStatus,
-                parameterCount
+                injectionPointCount,
+                payloadCount,
+                matchRuleCount
             });
         }
     }
@@ -182,14 +275,102 @@ public class PassiveScanConfigTab {
                 if (ruleName == null || ruleName.trim().isEmpty()) {
                     ruleName = "规则 " + (selectedRow + 1);
                 }
-                details.append("规则名称: ").append(ruleName).append("\n");
-                details.append("规则类型: ").append(config.getParameterNameType()).append("\n");
-                details.append("启用状态: ").append(config.isEnabled() ? "启用" : "禁用").append("\n");
-                details.append("参数数量: ").append(config.getParameterValues().size()).append("\n\n");
                 
-                details.append("检测参数:\n");
-                for (String param : config.getParameterValues()) {
-                    details.append("  • ").append(param).append("\n");
+                details.append("═══════════════════════════════════════\n");
+                details.append("规则名称: ").append(ruleName).append("\n");
+                details.append("规则ID: ").append(config.getRuleId() != null ? config.getRuleId().substring(0, 8) + "..." : "N/A").append("\n");
+                details.append("启用状态: ").append(config.isEnabled() ? "✓ 启用" : "✗ 禁用").append("\n");
+                if (config.getDescription() != null && !config.getDescription().isEmpty()) {
+                    details.append("描述: ").append(config.getDescription()).append("\n");
+                }
+                details.append("═══════════════════════════════════════\n\n");
+                
+                // ✅ 显示配对架构信息
+                if (config.getPairs() != null && !config.getPairs().isEmpty()) {
+                    details.append("【请求-响应配对】(共 ").append(config.getPairs().size()).append(" 个)\n\n");
+                    
+                    int pairIndex = 1;
+                    for (var pair : config.getPairs()) {
+                        details.append("配对 ").append(pairIndex++).append(": ")
+                               .append(pair.getName() != null ? pair.getName() : "未命名")
+                               .append(pair.isEnabled() ? " ✓" : " ✗").append("\n");
+                        
+                        // 请求配置摘要
+                        if (pair.getRequestConfig() != null) {
+                            details.append("  ├─ 请求: ").append(pair.getRequestConfig().getDisplaySummary()).append("\n");
+                        }
+                        
+                        // 响应配置摘要
+                        if (pair.getResponseConfig() != null) {
+                            details.append("  └─ 响应: ").append(pair.getResponseConfig().getDisplaySummary()).append("\n");
+                        }
+                        
+                        details.append("\n");
+                    }
+                    
+                    // 配对表达式
+                    if (config.getPairExpression() != null && !config.getPairExpression().isEmpty()) {
+                        details.append("配对逻辑: ").append(config.getPairExpression()).append("\n\n");
+                    }
+                } else {
+                    // ✅ 兼容旧架构显示
+                    // 请求条件
+                    if (config.getRequestConditions() != null && !config.getRequestConditions().isEmpty()) {
+                        details.append("【请求条件】\n");
+                        for (Configuration.RequestCondition condition : config.getRequestConditions()) {
+                            details.append("  • ").append(condition.getConditionType())
+                                   .append(" ").append(condition.getMatchType())
+                                   .append(" '").append(condition.getValue()).append("'")
+                                   .append(" [").append(condition.getOperator()).append("]\n");
+                        }
+                        details.append("\n");
+                    } else {
+                        details.append("【请求条件】匹配所有请求\n\n");
+                    }
+                    
+                    // 注入点
+                    if (config.getInjectionPoints() != null && !config.getInjectionPoints().isEmpty()) {
+                        details.append("【注入点】(共 ").append(config.getInjectionPoints().size()).append(" 个)\n");
+                        for (Configuration.InjectionPoint point : config.getInjectionPoints()) {
+                            details.append("  • ").append(point.getPointType())
+                                   .append(" → ").append(point.getTargetName())
+                                   .append(" (").append(point.getInjectionStrategy()).append(")\n");
+                        }
+                        details.append("\n");
+                    }
+                    
+                    // Payload
+                    if (config.getPayloads() != null && !config.getPayloads().isEmpty()) {
+                        details.append("【Payload】(共 ").append(config.getPayloads().size()).append(" 个)\n");
+                        int count = 0;
+                        for (String payload : config.getPayloads()) {
+                            count++;
+                            if (count <= 5) {
+                                details.append("  ").append(count).append(". ").append(payload).append("\n");
+                            } else if (count == 6) {
+                                details.append("  ... 还有 ").append(config.getPayloads().size() - 5).append(" 个payload\n");
+                                break;
+                            }
+                        }
+                        details.append("\n");
+                    }
+                    
+                    // 响应匹配规则
+                    if (config.getMatchRules() != null && !config.getMatchRules().isEmpty()) {
+                        details.append("【响应匹配规则】\n");
+                        for (Configuration.MatchRule rule : config.getMatchRules()) {
+                            details.append("  • ").append(rule.getLocation())
+                                   .append(" ").append(rule.getMatchType())
+                                   .append(" '").append(rule.getRule()).append("'")
+                                   .append(" [").append(rule.getOperator()).append("]\n");
+                        }
+                        details.append("\n");
+                    }
+                }
+                
+                // 去重颗粒度
+                if (config.getDeduplicationGranularity() != null) {
+                    details.append("【去重颗粒度】").append(config.getDeduplicationGranularity()).append("\n");
                 }
                 
                 detailTextArea.setText(details.toString());
@@ -200,13 +381,15 @@ public class PassiveScanConfigTab {
     }
     
     private void addConfiguration() {
-        // 创建新配置对话框
-        ConfigurationDialog dialog = new ConfigurationDialog(panel, "添加规则", null, configManager);
-        dialog.setVisible(true);
+        // 使用基于配对的规则配置对话框
+        Window owner = SwingUtilities.getWindowAncestor(panel);
+        PairBasedRuleConfigDialog dialog = new PairBasedRuleConfigDialog(owner, api, configManager, null);
         
-        if (dialog.isConfigurationSaved()) {
+        if (dialog.showDialog()) {
+            Configuration newConfig = dialog.getConfiguration();
+            configManager.addConfiguration(newConfig);
             loadConfigurations();
-            api.logging().raiseInfoEvent("新规则已添加");
+            api.logging().raiseInfoEvent("新规则已添加: " + newConfig.getCustomLabel());
         }
     }
     
@@ -217,12 +400,13 @@ public class PassiveScanConfigTab {
             if (selectedRow < configurations.size()) {
                 Configuration config = configurations.get(selectedRow);
                 
-                ConfigurationDialog dialog = new ConfigurationDialog(panel, "编辑规则", config, configManager);
-                dialog.setVisible(true);
+                // 使用基于配对的规则配置对话框
+                Window owner = SwingUtilities.getWindowAncestor(panel);
+                PairBasedRuleConfigDialog dialog = new PairBasedRuleConfigDialog(owner, api, configManager, config);
                 
-                if (dialog.isConfigurationSaved()) {
+                if (dialog.showDialog()) {
                     loadConfigurations();
-                    api.logging().raiseInfoEvent("规则已更新");
+                    api.logging().raiseInfoEvent("规则已更新: " + config.getCustomLabel());
                 }
             }
         } else {
@@ -251,6 +435,78 @@ public class PassiveScanConfigTab {
     
     private void saveConfiguration() {
         JOptionPane.showMessageDialog(panel, "配置已保存", "成功", JOptionPane.INFORMATION_MESSAGE);
+    }
+    
+    /**
+     * ✅ 更新开关按钮外观
+     */
+    private void updateToggleButtonAppearance() {
+        if (passiveScanToggleButton.isSelected()) {
+            // 启用状态：绿色
+            passiveScanToggleButton.setText("🟢 被动扫描已启用");
+            passiveScanToggleButton.setForeground(new Color(0, 120, 0));
+            passiveScanToggleButton.setBackground(new Color(230, 255, 230));
+        } else {
+            // 禁用状态：红色
+            passiveScanToggleButton.setText("🔴 被动扫描已禁用");
+            passiveScanToggleButton.setForeground(new Color(180, 0, 0));
+            passiveScanToggleButton.setBackground(new Color(255, 230, 230));
+        }
+    }
+    
+    /**
+     * ✅ 保存被动扫描开关状态
+     */
+    private void savePassiveScanEnabled() {
+        try {
+            XProbeConfig config = configPersistence.load();
+            config.setEnablePassiveScan(passiveScanToggleButton.isSelected());
+            configPersistence.save(config);
+            
+            if (passiveScanToggleButton.isSelected()) {
+                api.logging().raiseInfoEvent("✅ 被动扫描已启用");
+            } else {
+                api.logging().raiseInfoEvent("❌ 被动扫描已禁用");
+            }
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("保存被动扫描开关状态失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * ✅ 保存全局注入模式
+     */
+    private void saveGlobalInjectionMode() {
+        try {
+            XProbeConfig config = configPersistence.load();
+            Configuration.InjectionMode mode = (Configuration.InjectionMode) globalInjectionModeCombo.getSelectedItem();
+            config.setGlobalInjectionMode(mode);
+            configPersistence.save(config);
+            
+            api.logging().raiseInfoEvent("全局注入模式已设置为: " + mode.getDisplayName());
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("保存全局注入模式失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * ✅ 加载保存的设置
+     */
+    public void loadSavedSettings() {
+        try {
+            XProbeConfig config = configPersistence.load();
+            
+            // 加载被动扫描开关状态
+            passiveScanToggleButton.setSelected(config.isEnablePassiveScan());
+            updateToggleButtonAppearance();
+            
+            // 加载全局注入模式
+            if (config.getGlobalInjectionMode() != null) {
+                globalInjectionModeCombo.setSelectedItem(config.getGlobalInjectionMode());
+            }
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("加载设置失败: " + e.getMessage());
+        }
     }
     
     public Component getComponent() {

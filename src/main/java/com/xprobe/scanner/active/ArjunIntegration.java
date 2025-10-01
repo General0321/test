@@ -9,19 +9,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Arjun参数探测工具集成
+ * Arjun集成类，用于调用Arjun工具进行参数爆破
  * 
- * 核心特性：
- * 1. 使用 -oB 参数将探测结果直接发送到Burp代理
- * 2. 自动继承原始请求的headers和方法
- * 3. 支持主域名级别的参数字典管理
- * 4. 🔴 使用 --include 保留原始请求的参数（认证、会话等）
- * 5. 🔴 使用 -w 指定测试参数字典（新增探测参数）
- * 
- * 参数合并机制：
- * - 原始参数（--include）：在每次探测时保持不变
- * - 测试参数（-w）：逐个测试，寻找隐藏参数
- * - 最终请求 = 原始参数 + 当前测试参数
+ * ✅ 完整重构版本 - 更强大、更可靠
  */
 public class ArjunIntegration {
     private final MontoyaApi api;
@@ -33,59 +23,113 @@ public class ArjunIntegration {
     }
     
     /**
-     * 对单个URL执行Arjun探测
+     * 扫描URL查找隐藏参数（异步）
      * 
-     * @param request 原始HTTP请求
-     * @param customParams 自定义参数字典（会合并到默认字典）
-     * @return 异步执行结果
+     * @param request HTTP请求对象
+     * @param customDictionary 自定义参数字典（可选）
+     * @return CompletableFuture<ArjunResult> 异步扫描结果
      */
-    public CompletableFuture<ArjunResult> scan(HttpRequest request, Set<String> customParams) {
+    public CompletableFuture<ArjunResult> scan(HttpRequest request, Set<String> customDictionary) {
         return CompletableFuture.supplyAsync(() -> {
-            String dictFile = null;
+            String url = request.url();
+            api.logging().raiseInfoEvent("开始Arjun扫描: " + url);
             
+            String dictFile = null;
             try {
-                String arjunPath = getArjunPath();
-                if (arjunPath == null) {
-                    return ArjunResult.error("未找到arjun工具，请确保arjun已安装");
+                // 创建自定义字典文件
+                if (customDictionary != null && !customDictionary.isEmpty()) {
+                    dictFile = createDictionary(customDictionary);
                 }
-                
-                // 创建临时字典文件
-                dictFile = createDictionary(customParams);
                 
                 // 构建Arjun命令
                 List<String> command = buildArjunCommand(request, dictFile);
                 
                 // 执行Arjun
-                ArjunResult result = executeArjun(command, request.url());
+                List<String> output = executeArjun(command);
                 
-                return result;
+                // 解析结果
+                Set<String> foundParams = parseArjunOutput(output);
+                
+                api.logging().raiseInfoEvent(String.format(
+                    "✅ Arjun扫描完成: %s (发现 %d 个参数)", 
+                    url, foundParams.size()
+                ));
+                
+                return ArjunResult.success(url, foundParams, output);
                 
             } catch (Exception e) {
-                api.logging().raiseErrorEvent("Arjun扫描失败: " + e.getMessage());
-                return ArjunResult.error(e.getMessage());
+                String errorMsg = "Arjun扫描失败: " + e.getMessage();
+                api.logging().raiseErrorEvent(errorMsg);
+                return ArjunResult.error(errorMsg);
             } finally {
-                // ✅ 确保临时文件被清理（即使发生异常）
+                // 清理临时文件
                 if (dictFile != null) {
-                    cleanupTempFile(dictFile);
+                    try {
+                        new File(dictFile).delete();
+                    } catch (Exception e) {
+                        // Ignore cleanup errors
+                    }
                 }
             }
         });
     }
     
     /**
-     * 批量扫描多个URL
+     * 测试Arjun连接
      */
-    public CompletableFuture<List<ArjunResult>> scanBatch(List<HttpRequest> requests, Set<String> customParams) {
-        List<CompletableFuture<ArjunResult>> futures = new ArrayList<>();
-        
-        for (HttpRequest request : requests) {
-            futures.add(scan(request, customParams));
+    public boolean testConnection() {
+        try {
+            List<String> command = new ArrayList<>();
+            String arjunPath = config.getArjunPath();
+            
+            // 处理不同的配置方式
+            if (arjunPath == null || arjunPath.trim().isEmpty()) {
+                arjunPath = "arjun";
+            }
+            
+            if (arjunPath.equals("python") || arjunPath.equals("python3")) {
+                command.add(arjunPath);
+                command.add("-m");
+                command.add("arjun");
+            } else {
+                // 检查是否是Python脚本并获取解释器
+                String[] scriptInfo = checkPythonScriptAndGetInterpreter(arjunPath);
+                boolean isPythonScript = "true".equals(scriptInfo[0]);
+                String shebangInterpreter = scriptInfo[1];
+                
+                if (isPythonScript) {
+                    String pythonInterpreter;
+                    if (shebangInterpreter != null && !shebangInterpreter.isEmpty()) {
+                        pythonInterpreter = shebangInterpreter;
+                    } else {
+                        pythonInterpreter = extractPythonInterpreter(arjunPath);
+                    }
+                    command.add(pythonInterpreter);
+                    command.add(arjunPath);
+                } else {
+                    command.add(arjunPath);
+                }
+            }
+            
+            command.add("--help");
+            
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            
+            boolean finished = process.waitFor(5, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return false;
+            }
+            
+            int exitCode = process.exitValue();
+            return exitCode == 0 || exitCode == 1; // Arjun --help可能返回0或1
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("Arjun连接测试失败: " + e.getMessage());
+            return false;
         }
-        
-        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-            .thenApply(v -> futures.stream()
-                .map(CompletableFuture::join)
-                .toList());
     }
     
     /**
@@ -117,8 +161,49 @@ public class ArjunIntegration {
             api.logging().raiseDebugEvent("Arjun: 原始请求无参数，仅探测新参数");
         }
         
-        // 基础命令
-        command.add(config.getArjunPath());
+        // ✅ 智能处理Arjun命令
+        String arjunPath = config.getArjunPath();
+        if (arjunPath == null || arjunPath.trim().isEmpty()) {
+            arjunPath = "arjun";  // 默认值
+        }
+        
+        if (arjunPath.equals("python") || arjunPath.equals("python3")) {
+            // ✅ 用户配置的是Python解释器，使用 python -m arjun
+            api.logging().raiseDebugEvent("使用配置的Python解释器: " + arjunPath + " -m arjun");
+            command.add(arjunPath);
+            command.add("-m");
+            command.add("arjun");
+        } else {
+            // ✅ 完整路径：检查是否是Python脚本并获取解释器
+            api.logging().raiseDebugEvent("检测Arjun路径类型: " + arjunPath);
+            
+            String[] scriptInfo = checkPythonScriptAndGetInterpreter(arjunPath);
+            boolean isPythonScript = "true".equals(scriptInfo[0]);
+            String shebangInterpreter = scriptInfo[1];
+            
+            if (isPythonScript) {
+                // ✅ 是Python脚本，需要用Python解释器执行
+                String pythonInterpreter;
+                
+                if (shebangInterpreter != null && !shebangInterpreter.isEmpty()) {
+                    // 优先使用shebang中指定的解释器
+                    pythonInterpreter = shebangInterpreter;
+                    api.logging().raiseDebugEvent("使用shebang解释器: " + pythonInterpreter);
+                } else {
+                    // 没有shebang，尝试智能提取
+                    pythonInterpreter = extractPythonInterpreter(arjunPath);
+                    api.logging().raiseDebugEvent("使用提取的解释器: " + pythonInterpreter);
+                }
+                
+                command.add(pythonInterpreter);
+                command.add(arjunPath);
+            } else {
+                // 直接可执行文件
+                api.logging().raiseDebugEvent("使用Arjun可执行文件: " + arjunPath);
+                command.add(arjunPath);
+            }
+        }
+        
         command.add("-u");
         command.add(url);
         
@@ -144,22 +229,27 @@ public class ArjunIntegration {
             command.add(headers);
         }
         
-        // 🔴 关键：保留原始请求的参数（--include）
-        // 这些参数会在每次探测时保持不变，确保认证、会话等参数不丢失
+        // 字典文件
+        if (dictFile != null) {
+            command.add("-w");
+            command.add(dictFile);
+        }
+        
+        // 保留原始参数
         if (!existingParams.isEmpty()) {
             command.add("--include");
             command.add(existingParams);
         }
         
-        // 🔴 测试参数字典（-w）
-        // 这些参数会被逐个测试，寻找隐藏参数
-        command.add("-w");
-        command.add(dictFile);
-        
-        // 最重要：输出到Burp代理（探测结果会自动进入被动扫描）
+        // 通过Burp代理
         if (config.isSendToBurp()) {
-            command.add("-oB");
+            command.add("--proxy-url");
             command.add(config.getBurpProxyAddress());
+        }
+        
+        // 可选：JSON输出
+        if (config.isEnableJsonOutput()) {
+            command.add("-oJ");
         }
         
         // 可选：禁用重定向
@@ -175,54 +265,38 @@ public class ArjunIntegration {
     
     /**
      * 映射HTTP方法到Arjun支持的格式
-     * 
-     * ✅ 改进点：
-     * 1. 支持PUT、PATCH、DELETE等RESTful方法
-     * 2. 根据方法和Content-Type智能映射
-     * 3. 提供未知方法的降级处理
      */
     private String mapMethod(String method, String contentType) {
-        // 标准化方法名
         String upperMethod = method.toUpperCase();
         
-        // 检查Content-Type
         boolean isJson = contentType != null && contentType.toLowerCase().contains("json");
         boolean isXml = contentType != null && contentType.toLowerCase().contains("xml");
         
-        // 根据方法和Content-Type映射
         switch (upperMethod) {
             case "POST":
             case "PUT":
             case "PATCH":
-                // POST/PUT/PATCH支持不同的Content-Type
                 if (isJson) {
                     return "JSON";
                 } else if (isXml) {
                     return "XML";
                 }
-                return "POST"; // 默认表单
+                return "POST";
             
             case "GET":
                 return "GET";
             
             case "DELETE":
-                // DELETE通常用GET方式传参（URL参数）
-                return "GET";
-            
             case "HEAD":
             case "OPTIONS":
-                // HEAD/OPTIONS使用GET方式
                 return "GET";
             
             default:
-                // 未知方法，尝试根据Content-Type判断
-                api.logging().raiseDebugEvent("未知HTTP方法: " + method + ", 尝试智能映射");
                 if (isJson) {
                     return "JSON";
                 } else if (isXml) {
                     return "XML";
                 }
-                // 默认使用GET
                 return "GET";
         }
     }
@@ -235,7 +309,6 @@ public class ArjunIntegration {
         
         for (var header : request.headers()) {
             String name = header.name();
-            // 跳过由Arjun自动处理的headers
             if ("Content-Length".equalsIgnoreCase(name) || 
                 "Host".equalsIgnoreCase(name)) {
                 continue;
@@ -243,7 +316,6 @@ public class ArjunIntegration {
             headersBuilder.append(name).append(": ").append(header.value()).append("\n");
         }
         
-        // 添加标记头，用于识别Arjun流量
         headersBuilder.append("X-XProbe-Arjun: 1\n");
         
         return headersBuilder.toString().trim();
@@ -262,20 +334,12 @@ public class ArjunIntegration {
     }
     
     /**
-     * 提取原始请求中的所有参数名（用于 --include）
-     * 
-     * 作用：
-     * 1. 保留认证参数（token, session_id等）
-     * 2. 保留业务参数（user_id, order_id等）
-     * 3. 确保Arjun探测时这些参数始终存在
-     * 
-     * 格式：逗号分隔的参数名列表，例如 "user_id,token,page"
+     * 提取原始请求中的所有参数名
      */
     private String extractExistingParameters(HttpRequest request) {
         Set<String> paramNames = new LinkedHashSet<>();
         
         try {
-            // 1. 提取URL参数（Query String）
             var urlParams = request.parameters();
             for (var param : urlParams) {
                 String name = param.name();
@@ -284,14 +348,7 @@ public class ArjunIntegration {
                 }
             }
             
-            // 2. 提取Body参数（仅针对POST表单）
             String contentType = getContentType(request);
-            if (contentType != null && contentType.contains("application/x-www-form-urlencoded")) {
-                // Body参数已经包含在 request.parameters() 中
-                // Montoya API会自动解析
-            }
-            
-            // 3. 提取JSON字段（如果是JSON请求）
             if (contentType != null && contentType.contains("application/json")) {
                 String body = request.bodyToString();
                 if (body != null && !body.isEmpty()) {
@@ -299,62 +356,36 @@ public class ArjunIntegration {
                 }
             }
             
-            // 4. 提取Cookie参数（可选，根据需要）
-            // Cookie通常不需要加入--include，因为会通过headers传递
-            
         } catch (Exception e) {
             api.logging().raiseDebugEvent("提取参数时出错: " + e.getMessage());
         }
         
-        // 转换为逗号分隔的字符串
         return String.join(",", paramNames);
     }
     
     /**
      * 从JSON字符串中递归提取所有字段名
-     * 
-     * ✅ 改进点：
-     * 1. 使用Jackson库递归解析JSON
-     * 2. 支持嵌套对象
-     * 3. 支持数组
-     * 4. 降级到简单实现如果JSON解析失败
-     * 
-     * 示例：
-     * {
-     *   "user": {
-     *     "id": 123,
-     *     "name": "test"
-     *   }
-     * }
-     * → user, id, name
      */
     private void extractJsonFieldNames(String jsonBody, Set<String> paramNames) {
         try {
-            // 使用Jackson解析JSON
             com.fasterxml.jackson.databind.ObjectMapper mapper = 
                 new com.fasterxml.jackson.databind.ObjectMapper();
             com.fasterxml.jackson.databind.JsonNode rootNode = mapper.readTree(jsonBody);
             
-            // 递归提取字段名
             extractFieldNamesRecursive(rootNode, paramNames);
             
         } catch (Exception e) {
             api.logging().raiseDebugEvent("JSON解析失败，使用简单提取: " + e.getMessage());
-            // 降级到简单实现
             extractJsonFieldNamesSimple(jsonBody, paramNames);
         }
     }
     
     /**
      * 递归提取JSON字段名
-     * 
-     * @param node 当前节点
-     * @param paramNames 参数名集合
      */
     private void extractFieldNamesRecursive(com.fasterxml.jackson.databind.JsonNode node, 
                                            Set<String> paramNames) {
         if (node.isObject()) {
-            // 对象节点：遍历所有字段
             java.util.Iterator<java.util.Map.Entry<String, com.fasterxml.jackson.databind.JsonNode>> fields = 
                 node.fields();
             
@@ -363,33 +394,26 @@ public class ArjunIntegration {
                 String fieldName = field.getKey();
                 com.fasterxml.jackson.databind.JsonNode fieldValue = field.getValue();
                 
-                // 添加当前字段名
                 paramNames.add(fieldName);
                 
-                // 递归处理子节点
                 if (fieldValue.isObject() || fieldValue.isArray()) {
                     extractFieldNamesRecursive(fieldValue, paramNames);
                 }
             }
         } else if (node.isArray()) {
-            // 数组节点：遍历所有元素
             for (com.fasterxml.jackson.databind.JsonNode element : node) {
                 if (element.isObject() || element.isArray()) {
                     extractFieldNamesRecursive(element, paramNames);
                 }
             }
         }
-        // 对于基本类型（字符串、数字等），不做处理
     }
     
     /**
-     * 简单实现（降级方案，当Jackson解析失败时使用）
-     * 
-     * 使用正则表达式提取字段名，不支持嵌套
+     * 简单实现（降级方案）
      */
     private void extractJsonFieldNamesSimple(String jsonBody, Set<String> paramNames) {
         try {
-            // 匹配模式: "字段名":\s*值
             java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("\"([^\"]+)\"\\s*:");
             java.util.regex.Matcher matcher = pattern.matcher(jsonBody);
             
@@ -413,15 +437,12 @@ public class ArjunIntegration {
         
         Set<String> allParams = new LinkedHashSet<>();
         
-        // 1. 自定义参数（优先级最高）
         if (customParams != null) {
             allParams.addAll(customParams);
         }
         
-        // 2. 配置中的自定义字典
         allParams.addAll(config.getCustomDictionary());
         
-        // 写入文件
         try (PrintWriter writer = new PrintWriter(new FileWriter(dictFile))) {
             for (String param : allParams) {
                 writer.println(param);
@@ -436,104 +457,72 @@ public class ArjunIntegration {
     
     /**
      * 执行Arjun命令
-     * 
-     * ✅ 改进点：
-     * 1. 添加超时机制（5分钟）
-     * 2. finally块确保进程清理
-     * 3. 合并错误输出到标准输出，避免阻塞
      */
-    private ArjunResult executeArjun(List<String> command, String url) {
+    private List<String> executeArjun(List<String> command) throws Exception {
+        List<String> output = new ArrayList<>();
         Process process = null;
         
         try {
-            api.logging().raiseInfoEvent("执行Arjun: " + url);
+            api.logging().raiseDebugEvent("执行Arjun命令: " + String.join(" ", command));
             
-            // 创建进程，合并错误输出到标准输出（避免进程阻塞）
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.redirectErrorStream(true);
+            
             process = pb.start();
             
-            // ✅ 使用超时等待（5分钟）
-            boolean finished = process.waitFor(300, TimeUnit.SECONDS);
+            BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream())
+            );
+            
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.add(line);
+                if (config.isEnableVerboseOutput()) {
+                    api.logging().raiseDebugEvent("Arjun: " + line);
+                }
+            }
+            
+            boolean finished = process.waitFor(5, TimeUnit.MINUTES);
             
             if (!finished) {
-                // 超时，强制终止进程
-                api.logging().raiseErrorEvent("Arjun执行超时: " + url);
-                process.destroyForcibly();
-                return ArjunResult.error("Arjun执行超时（超过5分钟）");
+                throw new Exception("Arjun执行超时（5分钟）");
             }
             
-            // 读取输出（进程已结束，不会阻塞）
-            List<String> outputLines = new ArrayList<>();
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    outputLines.add(line);
-                    api.logging().raiseDebugEvent("Arjun输出: " + line);
-                }
-            }
-            
-            // 获取退出码
             int exitCode = process.exitValue();
-            
-            if (exitCode == 0) {
-                // 解析发现的参数
-                Set<String> foundParams = parseArjunOutput(outputLines);
-                
-                api.logging().raiseInfoEvent("Arjun扫描完成: " + url + 
-                    " - 发现 " + foundParams.size() + " 个参数");
-                
-                return ArjunResult.success(url, foundParams, outputLines);
-            } else {
-                String errorMsg = String.join("\n", outputLines);
-                api.logging().raiseErrorEvent("Arjun执行失败 (退出码 " + exitCode + "): " + errorMsg);
-                return ArjunResult.error("Arjun执行失败: " + errorMsg);
+            if (exitCode != 0) {
+                api.logging().raiseErrorEvent("Arjun退出码: " + exitCode);
             }
             
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt(); // 恢复中断状态
-            api.logging().raiseErrorEvent("Arjun执行被中断: " + e.getMessage());
-            return ArjunResult.error("Arjun执行被中断");
-        } catch (Exception e) {
-            api.logging().raiseErrorEvent("执行Arjun时出错: " + e.getMessage());
-            return ArjunResult.error(e.getMessage());
+            return output;
+            
         } finally {
-            // ✅ 确保进程被清理
             if (process != null && process.isAlive()) {
-                api.logging().raiseDebugEvent("强制终止Arjun进程");
                 process.destroyForcibly();
-                try {
-                    // 等待进程真正结束（最多5秒）
-                    process.waitFor(5, TimeUnit.SECONDS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
             }
         }
     }
     
     /**
-     * 解析Arjun输出，提取发现的参数
+     * 解析Arjun输出
      */
-    private Set<String> parseArjunOutput(List<String> outputLines) {
+    private Set<String> parseArjunOutput(List<String> output) {
         Set<String> foundParams = new LinkedHashSet<>();
         
-        // Arjun的输出格式通常是：
-        // [FOUND] parameter_name
-        // 或者在详细模式下会有更多信息
-        
-        for (String line : outputLines) {
-            if (line.contains("[FOUND]") || line.contains("Valid parameter")) {
-                // 提取参数名
-                String[] parts = line.split("\\s+");
-                for (String part : parts) {
-                    if (!part.isEmpty() && 
-                        !part.equals("[FOUND]") && 
-                        !part.equals("Valid") && 
-                        !part.equals("parameter")) {
-                        foundParams.add(part);
+        for (String line : output) {
+            if (line.contains("Valid parameter found:") || 
+                line.contains("Parameter discovered:")) {
+                
+                String[] parts = line.split(":");
+                if (parts.length >= 2) {
+                    String param = parts[1].trim();
+                    if (!param.isEmpty()) {
+                        foundParams.add(param);
                     }
+                }
+            } else if (line.contains("[+]")) {
+                String cleaned = line.replaceAll("\\[\\+\\]", "").trim();
+                if (!cleaned.isEmpty() && !cleaned.contains(" ")) {
+                    foundParams.add(cleaned);
                 }
             }
         }
@@ -542,73 +531,335 @@ public class ArjunIntegration {
     }
     
     /**
-     * 获取Arjun路径
+     * ✅ 判断文件是否是Python脚本并提取shebang解释器（跨平台）
+     * 
+     * 逻辑：
+     * 1. Windows: .exe/.bat 文件直接执行，.py 文件需要Python
+     * 2. Unix: 检查shebang，无扩展名文件检查是否是脚本
+     * 
+     * @param filePath 文件路径
+     * @return String数组 [isPythonScript, shebangInterpreter]
      */
-    private String getArjunPath() {
-        // 首先检查配置中的路径
-        if (config.getArjunPath() != null && isExecutable(config.getArjunPath())) {
-            return config.getArjunPath();
+    private String[] checkPythonScriptAndGetInterpreter(String filePath) {
+        try {
+            boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+            File file = new File(filePath);
+            
+            if (!file.exists()) {
+                api.logging().raiseDebugEvent("文件不存在: " + filePath);
+                return new String[]{null, null};
+            }
+            
+            String lowerPath = filePath.toLowerCase();
+            
+            // ✅ Windows特殊处理
+            if (isWindows) {
+                // Windows: .exe/.bat/.cmd 可以直接执行
+                if (lowerPath.endsWith(".exe") || lowerPath.endsWith(".bat") || lowerPath.endsWith(".cmd")) {
+                    api.logging().raiseDebugEvent("Windows可执行文件，直接执行: " + filePath);
+                    return new String[]{null, null};  // 不是Python脚本
+                }
+                
+                // Windows: .py 文件需要Python解释器
+                if (lowerPath.endsWith(".py")) {
+                    api.logging().raiseDebugEvent("Windows Python脚本，需要解释器: " + filePath);
+                    return new String[]{"true", null};  // 是Python脚本，但没有shebang
+                }
+                
+                // Windows: Scripts目录下的无扩展名文件通常是包装器脚本
+                if (lowerPath.contains("\\scripts\\") && !lowerPath.contains(".")) {
+                    api.logging().raiseDebugEvent("Windows Scripts目录下的文件，尝试直接执行: " + filePath);
+                    return new String[]{null, null};
+                }
+                
+                api.logging().raiseDebugEvent("Windows未知文件类型，尝试直接执行: " + filePath);
+                return new String[]{null, null};
+            }
+            
+            // ✅ Unix/Linux/macOS 处理
+            if (!file.canRead()) {
+                api.logging().raiseDebugEvent("文件无读取权限: " + filePath);
+                return new String[]{null, null};
+            }
+            
+            // Unix: 先检查扩展名
+            if (lowerPath.endsWith(".py")) {
+                api.logging().raiseDebugEvent("Unix Python脚本(.py): " + filePath);
+                return new String[]{"true", null};
+            }
+            
+            // Unix: 读取文件第一行检查shebang
+            try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+                String firstLine = reader.readLine();
+                if (firstLine != null && firstLine.startsWith("#!") && firstLine.contains("python")) {
+                    // 提取shebang中的解释器路径
+                    String interpreter = firstLine.substring(2).trim(); // 去掉 #!
+                    
+                    // 处理带参数的情况，如 #!/usr/bin/env python
+                    String[] parts = interpreter.split("\\s+");
+                    if (parts.length > 0) {
+                        String interpreterPath = parts[0];
+                        
+                        // 如果是 /usr/bin/env python，提取实际的python命令
+                        if (interpreterPath.endsWith("/env") && parts.length > 1) {
+                            interpreterPath = parts[1]; // python3 或 python
+                        }
+                        
+                        api.logging().raiseDebugEvent("从shebang提取解释器: " + interpreterPath);
+                        return new String[]{"true", interpreterPath};
+                    }
+                }
+            }
+            
+            // Unix: 如果没有shebang但路径包含python/anaconda，可能是脚本
+            if (lowerPath.contains("anaconda/bin/") || lowerPath.contains("python")) {
+                api.logging().raiseDebugEvent("Unix可能的Python环境路径: " + filePath);
+                // 尝试直接执行（可能有执行权限）
+                if (file.canExecute()) {
+                    api.logging().raiseDebugEvent("文件有执行权限，尝试直接执行");
+                    return new String[]{null, null};
+                }
+                // 否则当作Python脚本
+                api.logging().raiseDebugEvent("文件无执行权限，当作Python脚本处理");
+                return new String[]{"true", null};
+            }
+            
+            // Unix: 默认认为可以直接执行
+            api.logging().raiseDebugEvent("Unix默认直接执行: " + filePath);
+            return new String[]{null, null};
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("检测Python脚本时出错: " + e.getMessage());
+            // 出错时保守处理：.py 文件认为是脚本，其他直接执行
+            if (filePath.toLowerCase().endsWith(".py")) {
+                return new String[]{"true", null};
+            }
+            return new String[]{null, null};
+        }
+    }
+    
+    /**
+     * ✅ 从Arjun路径中智能提取Python解释器（通用版本）
+     * 
+     * 通用策略（不依赖特定环境名称）：
+     * 1. Windows: 从Scripts目录向上查找python.exe
+     * 2. Unix: 从bin目录查找python/python3
+     * 3. 兜底：使用系统默认Python
+     */
+    private String extractPythonInterpreter(String arjunPath) {
+        try {
+            boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+            File arjunFile = new File(arjunPath);
+            
+            if (isWindows) {
+                // ========== Windows 通用策略 ==========
+                // 策略：从arjun所在目录向上查找，直到找到python.exe
+                
+                File currentDir = arjunFile.getParentFile();
+                
+                // 1️⃣ 如果arjun在Scripts目录下，向上一级查找python.exe
+                if (currentDir != null && "Scripts".equalsIgnoreCase(currentDir.getName())) {
+                    File pythonRoot = currentDir.getParentFile();
+                    if (pythonRoot != null) {
+                        File pythonExe = new File(pythonRoot, "python.exe");
+                        if (pythonExe.exists()) {
+                            api.logging().raiseDebugEvent("✅ 找到Python解释器 (Scripts目录): " + pythonExe.getAbsolutePath());
+                            return pythonExe.getAbsolutePath();
+                        }
+                    }
+                }
+                
+                // 2️⃣ 在当前目录及其父目录中查找python.exe（最多向上3级）
+                File searchDir = currentDir;
+                for (int i = 0; i < 3 && searchDir != null; i++) {
+                    File pythonExe = new File(searchDir, "python.exe");
+                    if (pythonExe.exists()) {
+                        api.logging().raiseDebugEvent("✅ 找到Python解释器 (向上" + i + "级): " + pythonExe.getAbsolutePath());
+                        return pythonExe.getAbsolutePath();
+                    }
+                    searchDir = searchDir.getParentFile();
+                }
+                
+                // 3️⃣ 尝试在同目录查找python3.exe
+                if (currentDir != null) {
+                    File python3Exe = new File(currentDir, "python3.exe");
+                    if (python3Exe.exists()) {
+                        api.logging().raiseDebugEvent("✅ 找到Python解释器 (同目录): " + python3Exe.getAbsolutePath());
+                        return python3Exe.getAbsolutePath();
+                    }
+                }
+                
+                // 4️⃣ 兜底：使用系统PATH中的python
+                api.logging().raiseDebugEvent("⚠️ 未在本地找到Python，使用系统默认: python");
+                return "python";
+                
+            } else {
+                // ========== Unix/Linux/macOS 通用策略 ==========
+                // 策略：从arjun所在目录查找python/python3
+                
+                File binDir = arjunFile.getParentFile();
+                
+                if (binDir != null) {
+                    // 1️⃣ 优先在同一bin目录下查找python
+                    File pythonBin = new File(binDir, "python");
+                    if (pythonBin.exists() && pythonBin.canExecute()) {
+                        api.logging().raiseDebugEvent("✅ 找到Python解释器 (同bin目录): " + pythonBin.getAbsolutePath());
+                        return pythonBin.getAbsolutePath();
+                    }
+                    
+                    // 2️⃣ 在同一bin目录下查找python3
+                    File python3Bin = new File(binDir, "python3");
+                    if (python3Bin.exists() && python3Bin.canExecute()) {
+                        api.logging().raiseDebugEvent("✅ 找到Python解释器 (同bin目录): " + python3Bin.getAbsolutePath());
+                        return python3Bin.getAbsolutePath();
+                    }
+                    
+                    // 3️⃣ 向上查找可能的Python环境根目录（如虚拟环境）
+                    File envRoot = binDir.getParentFile();
+                    if (envRoot != null) {
+                        File envPython = new File(new File(envRoot, "bin"), "python");
+                        if (envPython.exists() && envPython.canExecute()) {
+                            api.logging().raiseDebugEvent("✅ 找到Python解释器 (环境根目录): " + envPython.getAbsolutePath());
+                            return envPython.getAbsolutePath();
+                        }
+                    }
+                }
+                
+                // 4️⃣ 兜底：使用系统PATH中的python3
+                api.logging().raiseDebugEvent("⚠️ 未在本地找到Python，使用系统默认: python3");
+                return "python3";
+            }
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("提取Python解释器失败: " + e.getMessage());
+            boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+            return isWindows ? "python" : "python3";
+        }
+    }
+    
+    /**
+     * ✅ 自动检测系统中的Arjun路径
+     */
+    public static String autoDetectArjunPath() {
+        boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+        
+        // 1️⃣ 最优先：尝试 python -m arjun
+        String pythonCmd = isWindows ? "python" : "python3";
+        if (testPythonModule(pythonCmd)) {
+            return pythonCmd;
         }
         
-        // 检查常见路径
-        String[] possiblePaths = {
-            "arjun",
-            "/usr/local/bin/arjun",
-            "/opt/homebrew/bin/arjun",
-            "/usr/bin/arjun",
-            System.getProperty("user.home") + "/.local/bin/arjun"
-        };
+        // 2️⃣ 检查常见路径
+        List<String> commonPaths = new ArrayList<>();
         
-        for (String path : possiblePaths) {
-            if (isExecutable(path)) {
+        if (isWindows) {
+            String userHome = System.getProperty("user.home");
+            commonPaths.add("C:\\Python39\\Scripts\\arjun.exe");
+            commonPaths.add("C:\\Python310\\Scripts\\arjun.exe");
+            commonPaths.add("C:\\Python311\\Scripts\\arjun.exe");
+            commonPaths.add("C:\\Python312\\Scripts\\arjun.exe");
+            commonPaths.add(userHome + "\\AppData\\Local\\Programs\\Python\\Python39\\Scripts\\arjun.exe");
+            commonPaths.add(userHome + "\\AppData\\Local\\Programs\\Python\\Python310\\Scripts\\arjun.exe");
+            commonPaths.add(userHome + "\\AppData\\Local\\Programs\\Python\\Python311\\Scripts\\arjun.exe");
+            commonPaths.add(userHome + "\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\arjun.exe");
+            commonPaths.add(userHome + "\\anaconda3\\Scripts\\arjun.exe");
+            commonPaths.add(userHome + "\\miniconda3\\Scripts\\arjun.exe");
+            commonPaths.add("C:\\ProgramData\\Anaconda3\\Scripts\\arjun.exe");
+            commonPaths.add("C:\\ProgramData\\Miniconda3\\Scripts\\arjun.exe");
+        } else {
+            String userHome = System.getProperty("user.home");
+            commonPaths.add("/usr/local/bin/arjun");
+            commonPaths.add("/usr/bin/arjun");
+            commonPaths.add("/opt/homebrew/bin/arjun");
+            commonPaths.add("/opt/anaconda3/bin/arjun");
+            commonPaths.add("/opt/miniconda3/bin/arjun");
+            commonPaths.add(userHome + "/.local/bin/arjun");
+            commonPaths.add(userHome + "/anaconda3/bin/arjun");
+            commonPaths.add(userHome + "/miniconda3/bin/arjun");
+            commonPaths.add(userHome + "/.pyenv/shims/arjun");
+        }
+        
+        for (String path : commonPaths) {
+            File file = new File(path);
+            if (file.exists() && (isWindows || file.canRead())) {
                 return path;
             }
+        }
+        
+        // 3️⃣ 尝试使用系统命令查找
+        String foundPath = findArjunUsingSystemCommand();
+        if (foundPath != null) {
+            return foundPath;
         }
         
         return null;
     }
     
     /**
-     * 检查文件是否可执行
+     * ✅ 测试Python模块是否可用
      */
-    private boolean isExecutable(String path) {
+    private static boolean testPythonModule(String pythonCmd) {
         try {
-            ProcessBuilder pb = new ProcessBuilder(path, "-h");
+            List<String> command = new ArrayList<>();
+            command.add(pythonCmd);
+            command.add("-m");
+            command.add("arjun");
+            command.add("--help");
+            
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.redirectErrorStream(true);
             Process process = pb.start();
-            int exitCode = process.waitFor();
-            return exitCode == 0 || exitCode == 1;  // -h 可能返回0或1
+            
+            boolean finished = process.waitFor(5, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return false;
+            }
+            
+            int exitCode = process.exitValue();
+            return exitCode == 0 || exitCode == 1;
+            
         } catch (Exception e) {
             return false;
         }
     }
     
     /**
-     * 清理临时文件
-     * 
-     * ✅ 改进点：
-     * 1. 检查删除是否成功
-     * 2. 如果删除失败，标记为退出时删除
+     * ✅ 使用系统命令查找Arjun
      */
-    private void cleanupTempFile(String filePath) {
-        if (filePath == null) {
-            return;
+    private static String findArjunUsingSystemCommand() {
+        try {
+            boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+            List<String> command = new ArrayList<>();
+            
+            if (isWindows) {
+                command.add("where");
+                command.add("arjun");
+            } else {
+                command.add("which");
+                command.add("arjun");
+            }
+            
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            
+            BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream())
+            );
+            
+            String line = reader.readLine();
+            process.waitFor(3, TimeUnit.SECONDS);
+            
+            if (line != null && !line.trim().isEmpty()) {
+                return line.trim();
+            }
+            
+        } catch (Exception e) {
+            // Ignore
         }
         
-        try {
-            File file = new File(filePath);
-            if (file.exists()) {
-                boolean deleted = file.delete();
-                if (!deleted) {
-                    // 删除失败，标记为退出时删除
-                    api.logging().raiseDebugEvent("临时文件删除失败，标记为退出时删除: " + filePath);
-                    file.deleteOnExit();
-                } else {
-                    api.logging().raiseDebugEvent("临时文件已清理: " + filePath);
-                }
-            }
-        } catch (Exception e) {
-            api.logging().raiseDebugEvent("清理临时文件失败: " + e.getMessage());
-        }
+        return null;
     }
     
     /**

@@ -1,6 +1,7 @@
 package com.xprobe.scanner.ui;
 
 import com.xprobe.scanner.active.ExternalToolConfig;
+import com.xprobe.scanner.active.ArjunIntegration;
 
 import javax.swing.*;
 import java.awt.*;
@@ -58,26 +59,43 @@ public class ExternalToolConfigDialog extends JDialog {
         gbc.insets = new Insets(5, 5, 5, 5);
         gbc.anchor = GridBagConstraints.WEST;
         
-        // Arjun路径
+        // Arjun路径（带自动检测按钮）
         gbc.gridx = 0; gbc.gridy = 0;
         mainPanel.add(new JLabel("Arjun工具路径:"), gbc);
+        
+        // 创建路径输入面板（包含输入框和自动检测按钮）
         gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL;
-        mainPanel.add(arjunPathField, gbc);
+        JPanel pathPanel = new JPanel(new BorderLayout(5, 0));
+        pathPanel.add(arjunPathField, BorderLayout.CENTER);
+        
+        JButton autoDetectButton = new JButton("🔍 自动检测");
+        autoDetectButton.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        autoDetectButton.setToolTipText("自动检测系统中的Arjun路径");
+        autoDetectButton.addActionListener(e -> autoDetectArjun());
+        pathPanel.add(autoDetectButton, BorderLayout.EAST);
+        
+        mainPanel.add(pathPanel, gbc);
+        
+        // 添加路径说明
+        gbc.gridx = 1; gbc.gridy = 1;
+        JLabel pathHint = new JLabel("<html><small>💡 支持: 完整路径、python3、arjun 等方式</small></html>");
+        pathHint.setForeground(Color.GRAY);
+        mainPanel.add(pathHint, gbc);
         
         // 线程数
-        gbc.gridx = 0; gbc.gridy = 1; gbc.fill = GridBagConstraints.NONE;
+        gbc.gridx = 0; gbc.gridy = 2; gbc.fill = GridBagConstraints.NONE;
         mainPanel.add(new JLabel("线程数:"), gbc);
         gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL;
         mainPanel.add(threadCountSpinner, gbc);
         
         // 超时时间
-        gbc.gridx = 0; gbc.gridy = 2; gbc.fill = GridBagConstraints.NONE;
+        gbc.gridx = 0; gbc.gridy = 3; gbc.fill = GridBagConstraints.NONE;
         mainPanel.add(new JLabel("超时时间(秒):"), gbc);
         gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL;
         mainPanel.add(timeoutSpinner, gbc);
         
         // 输出选项
-        gbc.gridx = 0; gbc.gridy = 3; gbc.fill = GridBagConstraints.NONE;
+        gbc.gridx = 0; gbc.gridy = 4; gbc.fill = GridBagConstraints.NONE;
         mainPanel.add(new JLabel("输出选项:"), gbc);
         gbc.gridx = 1;
         JPanel outputPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -86,7 +104,7 @@ public class ExternalToolConfigDialog extends JDialog {
         mainPanel.add(outputPanel, gbc);
         
         // 自定义字典
-        gbc.gridx = 0; gbc.gridy = 4; gbc.fill = GridBagConstraints.NONE;
+        gbc.gridx = 0; gbc.gridy = 5; gbc.fill = GridBagConstraints.NONE;
         mainPanel.add(new JLabel("自定义字典:"), gbc);
         gbc.gridx = 1; gbc.fill = GridBagConstraints.BOTH;
         gbc.weighty = 1.0;
@@ -166,6 +184,103 @@ public class ExternalToolConfigDialog extends JDialog {
     private void cancelConfig() {
         configUpdated = false;
         dispose();
+    }
+    
+    /**
+     * ✅ 自动检测Arjun路径
+     */
+    private void autoDetectArjun() {
+        // 显示检测中提示
+        JDialog progressDialog = new JDialog(this, "自动检测", true);
+        progressDialog.setLayout(new BorderLayout(10, 10));
+        progressDialog.add(new JLabel("  🔍 正在搜索系统中的Arjun...  "), BorderLayout.NORTH);
+        
+        JProgressBar progressBar = new JProgressBar();
+        progressBar.setIndeterminate(true);
+        progressDialog.add(progressBar, BorderLayout.CENTER);
+        
+        progressDialog.setSize(300, 100);
+        progressDialog.setLocationRelativeTo(this);
+        
+        // 异步执行检测
+        SwingWorker<String, Void> worker = new SwingWorker<String, Void>() {
+            @Override
+            protected String doInBackground() throws Exception {
+                return ArjunIntegration.autoDetectArjunPath();
+            }
+            
+            @Override
+            protected void done() {
+                progressDialog.dispose();
+                try {
+                    String detectedPath = get();
+                    if (detectedPath != null && !detectedPath.isEmpty()) {
+                        arjunPathField.setText(detectedPath);
+                        
+                        String osName = System.getProperty("os.name");
+                        String message = String.format(
+                            "✅ 自动检测成功！\n\n" +
+                            "检测到的路径: %s\n\n" +
+                            "系统: %s\n" +
+                            "提示: 如果需要更改，可以手动输入其他路径。",
+                            detectedPath,
+                            osName
+                        );
+                        
+                        JOptionPane.showMessageDialog(
+                            ExternalToolConfigDialog.this,
+                            message,
+                            "检测成功",
+                            JOptionPane.INFORMATION_MESSAGE
+                        );
+                    } else {
+                        showAutoDetectFailedDialog();
+                    }
+                } catch (Exception e) {
+                    showAutoDetectFailedDialog();
+                }
+            }
+        };
+        
+        worker.execute();
+        progressDialog.setVisible(true);
+    }
+    
+    /**
+     * ✅ 显示自动检测失败对话框
+     */
+    private void showAutoDetectFailedDialog() {
+        boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+        
+        StringBuilder message = new StringBuilder();
+        message.append("❌ 未能自动检测到Arjun\n\n");
+        message.append("请手动配置Arjun路径，支持以下方式：\n\n");
+        
+        if (isWindows) {
+            message.append("1️⃣ 填写 python 或 python3（推荐）\n");
+            message.append("   会自动使用: python -m arjun\n\n");
+            message.append("2️⃣ 填写完整路径，例如：\n");
+            message.append("   C:\\Python39\\Scripts\\arjun.exe\n");
+            message.append("   C:\\Users\\YourName\\anaconda3\\Scripts\\arjun.exe\n\n");
+            message.append("3️⃣ 如果Arjun未安装：\n");
+            message.append("   pip install arjun\n");
+        } else {
+            message.append("1️⃣ 填写 python3（推荐）\n");
+            message.append("   会自动使用: python3 -m arjun\n\n");
+            message.append("2️⃣ 填写完整路径，例如：\n");
+            message.append("   /usr/local/bin/arjun\n");
+            message.append("   /opt/anaconda3/bin/arjun\n");
+            message.append("   /home/user/anaconda3/bin/arjun\n\n");
+            message.append("3️⃣ 如果Arjun未安装：\n");
+            message.append("   pip3 install arjun\n");
+        }
+        
+        JOptionPane.showMessageDialog(
+            this,
+            message.toString(),
+            "检测失败",
+            JOptionPane.WARNING_MESSAGE
+        );
     }
     
     private void testConnection() {

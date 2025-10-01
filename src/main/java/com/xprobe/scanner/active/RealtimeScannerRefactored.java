@@ -730,10 +730,24 @@ public class RealtimeScannerRefactored {
      * @param scanType 扫描类型
      * @return true 如果已被处理过（应跳过扫描），false 如果首次处理（应继续扫描）
      */
+    /**
+     * 检查并标记被动扫描已处理（新版：支持颗粒度控制）
+     * 
+     * @param method HTTP方法
+     * @param host 主机名
+     * @param path 请求路径
+     * @param contentType Content-Type
+     * @param targetIdentifier 目标标识符（参数名、Header名等）
+     * @param config 扫描配置（包含颗粒度设置）
+     * @return true=已处理（跳过），false=未处理（继续扫描）
+     */
     public boolean checkAndMarkPassiveScanProcessed(String method, String host, String path, 
-                                                   String contentType, String parameterName, 
-                                                   String scanType) {
-        String key = generatePassiveScanKey(method, host, path, contentType, parameterName, scanType);
+                                                   String contentType, String targetIdentifier, 
+                                                   com.xprobe.scanner.config.Configuration config) {
+        // ✅ 使用 DeduplicationKeyGenerator 生成去重key，支持颗粒度控制
+        String key = com.xprobe.scanner.core.DeduplicationKeyGenerator.generateKey(
+            method, host, path, contentType, config, targetIdentifier
+        );
         
         // Set.add()对于ConcurrentHashMap.newKeySet()来说是原子操作
         // 如果key已存在，返回false；如果key不存在，添加并返回true
@@ -746,8 +760,25 @@ public class RealtimeScannerRefactored {
     }
     
     /**
-     * 生成被动扫描去重标识符
+     * 检查并标记被动扫描已处理（旧版：向后兼容）
+     * 
+     * @deprecated 使用 checkAndMarkPassiveScanProcessed(method, host, path, contentType, targetIdentifier, config)
      */
+    @Deprecated
+    public boolean checkAndMarkPassiveScanProcessed(String method, String host, String path, 
+                                                   String contentType, String parameterName, 
+                                                   String scanType) {
+        String key = generatePassiveScanKey(method, host, path, contentType, parameterName, scanType);
+        boolean wasAdded = passiveScanProcessedKeys.add(key);
+        return !wasAdded;
+    }
+    
+    /**
+     * 生成被动扫描去重标识符（旧版：向后兼容）
+     * 
+     * @deprecated 使用 DeduplicationKeyGenerator.generateKey()
+     */
+    @Deprecated
     private String generatePassiveScanKey(String method, String host, String path, 
                                          String contentType, String parameterName, 
                                          String scanType) {

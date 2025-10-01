@@ -103,14 +103,14 @@ public class XProbe implements BurpExtension {
         toolConfig.setSendToBurp(config.isSendToBurp());
         api.logging().raiseInfoEvent("✅ Arjun配置已应用: " + config.getArjunPath());
         
-        // 创建ScannerFactory (需要RealtimeScanner)
-        ScannerFactory scannerFactory = new ScannerFactory(api, realtimeScanner);
+        // 创建ScannerFactory (需要RealtimeScanner和ConfigPersistence以支持全局注入模式)
+        ScannerFactory scannerFactory = new ScannerFactory(api, realtimeScanner, configPersistence);
         
         // 创建任务调度器
         taskScheduler = new TaskScheduler(api, scannerFactory, logModel);
         
         // 创建请求处理器 (需要RealtimeScanner)
-        RequestHandler requestHandler = new RequestHandler(api, configManager, requestFilter, taskScheduler, realtimeScanner);
+        RequestHandler requestHandler = new RequestHandler(api, configManager, requestFilter, taskScheduler, realtimeScanner, configPersistence);
         
         // 注册HTTP处理器
         api.http().registerHttpHandler(requestHandler);
@@ -144,7 +144,7 @@ public class XProbe implements BurpExtension {
 
         // 3. 被动扫描规则 - 核心功能
         com.xprobe.scanner.ui.PassiveScanConfigTab passiveScanTab = 
-            new com.xprobe.scanner.ui.PassiveScanConfigTab(api, configManager);
+            new com.xprobe.scanner.ui.PassiveScanConfigTab(api, configManager, configPersistence);
         tabbedPane.addTab("🔍 被动扫描规则", passiveScanTab.getComponent());
 
         // 4. 主动探测 - 辅助功能（参数挖掘）
