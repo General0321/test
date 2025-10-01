@@ -1,0 +1,36 @@
+plugins {
+    id 'java'
+}
+
+group 'com.xprobe'
+version '1.0.0'
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+}
+
+dependencies {
+    compileOnly 'net.portswigger.burp.extensions:montoya-api:2023.1'
+
+    // 添加 JUnit 5
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.8.2'
+    testImplementation 'org.junit.jupiter:junit-jupiter-params:5.8.2'
+
+    // 添加 AssertJ
+    testImplementation 'org.assertj:assertj-core:3.21.0'
+
+    // 添加jackson 用于解析json格式的请求数据包
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.13.1'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+jar {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+}
