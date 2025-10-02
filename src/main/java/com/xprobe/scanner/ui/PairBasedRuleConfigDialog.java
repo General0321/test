@@ -325,14 +325,59 @@ public class PairBasedRuleConfigDialog extends JDialog {
         helpText.setBackground(panel.getBackground());
         helpText.setText(
             "去重颗粒度说明：\n\n" +
-            "• REQUEST（请求级）：同一个请求只测试一次\n" +
-            "  - 适用于：全局扫描，如路径扫描、整体body替换\n\n" +
-            "• PARAMETER（参数级）：同一个参数只测试一次\n" +
-            "  - 适用于：参数注入，如SQL注入、XSS\n\n" +
-            "• INJECTION_POINT（注入点级）：每个注入点都测试\n" +
-            "  - 适用于：需要测试所有位置，如fuzzing\n\n" +
-            "• AUTO（自动）：根据注入点类型自动选择\n" +
-            "  - 推荐选项，智能判断去重策略\n"
+            "━━━━━━━━ 推荐选项 ━━━━━━━━\n\n" +
+            "• AUTO（自动检测）\n" +
+            "  - 智能判断去重策略，根据注入点类型自动选择\n" +
+            "  - 参数注入 → PARAMETER，整体扫描 → REQUEST\n" +
+            "  - ✅ 推荐大多数场景使用\n\n" +
+            
+            "━━━━━━━━ 细粒度选项 ━━━━━━━━\n\n" +
+            "【全局级别】\n" +
+            "• GLOBAL（全局）\n" +
+            "  - 整个规则只测试一次，所有请求共享\n" +
+            "  - 适用：概念验证、快速检测\n\n" +
+            
+            "• HOST（主机级）\n" +
+            "  - 每个主机只测试一次\n" +
+            "  - 例：example.com测试一次，api.example.com再测试一次\n\n" +
+            
+            "• PATH（路径级）\n" +
+            "  - 每个路径只测试一次\n" +
+            "  - 例：/api/user测试一次，/api/post再测试一次\n\n" +
+            
+            "【请求级别】\n" +
+            "• REQUEST（请求级）\n" +
+            "  - 每个完整请求只测试一次（method+host+path+content-type）\n" +
+            "  - 适用：路径扫描、整体body替换\n\n" +
+            
+            "【参数级别】\n" +
+            "• PARAMETER_NAME_GLOBAL（参数名-全局）\n" +
+            "  - 相同参数名只测试一次（跨所有请求）\n" +
+            "  - 例：id参数在任何地方只测试一次\n\n" +
+            
+            "• PARAMETER_NAME_PER_PATH（参数名-路径）\n" +
+            "  - 每个路径下的参数名分别测试\n" +
+            "  - 例：/api/user?id=1测试id，/api/post?id=1再测试id\n\n" +
+            
+            "• PARAMETER（参数级）\n" +
+            "  - 每个请求中的参数分别测试\n" +
+            "  - 适用：参数注入（SQL注入、XSS、LFI等）\n\n" +
+            
+            "【特殊选项】\n" +
+            "• INJECTION_POINT（注入点级）\n" +
+            "  - 每个注入点都分别测试\n" +
+            "  - 适用：需要测试所有位置，如fuzzing\n\n" +
+            
+            "• NONE（无去重）\n" +
+            "  - 每次都测试，不进行去重\n" +
+            "  - 适用：Fuzzing模式、压力测试\n\n" +
+            
+            "━━━━━━━━ 选择建议 ━━━━━━━━\n\n" +
+            "✅ 一般场景 → AUTO\n" +
+            "✅ 参数注入 → PARAMETER 或 PARAMETER_NAME_PER_PATH\n" +
+            "✅ 路径扫描 → PATH 或 REQUEST\n" +
+            "✅ 快速验证 → GLOBAL 或 HOST\n" +
+            "✅ 完全测试 → INJECTION_POINT 或 NONE\n"
         );
         JScrollPane scrollPane = new JScrollPane(helpText);
         panel.add(scrollPane, gbc);
@@ -546,8 +591,14 @@ public class PairBasedRuleConfigDialog extends JDialog {
             "   其余配对将被丢弃。建议在只有1个配对时切换回简单模式。\n\n" +
             
             "Q: 去重颗粒度如何选择？\n" +
-            "A: 通常选择AUTO即可。参数注入选PARAMETER，全局扫描\n" +
-            "   选REQUEST，需要测试所有位置选INJECTION_POINT。\n\n" +
+            "A: • AUTO（推荐）- 智能选择，适合大多数场景\n" +
+            "   • PARAMETER_NAME_PER_PATH - 参数注入（每个路径分别测试）\n" +
+            "   • PARAMETER - 参数注入（每个请求分别测试）\n" +
+            "   • PATH - 路径扫描（每个路径一次）\n" +
+            "   • HOST - 主机扫描（每个主机一次）\n" +
+            "   • GLOBAL - 全局扫描（整个规则一次）\n" +
+            "   • NONE - 无去重（Fuzzing模式）\n" +
+            "   详见「⚙️ 高级选项」标签页的完整说明。\n\n" +
             
             "───────────────────────────────────────────────────────────\n" +
             "需要更多帮助？查看完整文档或联系支持。\n"
@@ -711,8 +762,14 @@ public class PairBasedRuleConfigDialog extends JDialog {
             "   OR表达式组合，任意一个成功即可。\n\n" +
             
             "Q: 去重颗粒度如何选择？\n" +
-            "A: 通常选择AUTO即可。参数注入选PARAMETER，全局扫描\n" +
-            "   选REQUEST，需要测试所有位置选INJECTION_POINT。\n\n" +
+            "A: • AUTO（推荐）- 智能选择，适合大多数场景\n" +
+            "   • PARAMETER_NAME_PER_PATH - 参数注入（每个路径分别测试）\n" +
+            "   • PARAMETER - 参数注入（每个请求分别测试）\n" +
+            "   • PATH - 路径扫描（每个路径一次）\n" +
+            "   • HOST - 主机扫描（每个主机一次）\n" +
+            "   • GLOBAL - 全局扫描（整个规则一次）\n" +
+            "   • NONE - 无去重（Fuzzing模式）\n" +
+            "   详见「⚙️ 高级选项」标签页的完整说明。\n\n" +
             
             "Q: Collaborator如何使用？\n" +
             "A: 在payload中使用{{COLLABORATOR}}变量，在响应配置中\n" +
@@ -770,8 +827,15 @@ public class PairBasedRuleConfigDialog extends JDialog {
         
         if (isSimpleMode) {
             // ✅ 简单模式：加载单个配对到请求/响应面板
-            // TODO: 需要实现面板的loadConfig方法后才能加载数据
-            // 当前版本先跳过数据加载，用户需要手动配置
+            if (configuration.getPairs() != null && !configuration.getPairs().isEmpty()) {
+                RuleMatchPair firstPair = configuration.getPairs().get(0);
+                if (firstPair.getRequestConfig() != null) {
+                    simpleRequestPanel.loadConfig(firstPair.getRequestConfig());
+                }
+                if (firstPair.getResponseConfig() != null) {
+                    simpleResponsePanel.loadConfig(firstPair.getResponseConfig());
+                }
+            }
         } else {
             // ✅ 高级模式：加载配对管理面板
             if (configuration.getPairs() != null && !configuration.getPairs().isEmpty()) {

@@ -37,6 +37,7 @@ public class PassiveScanConfigTab {
     // 总开关和全局设置
     private JToggleButton passiveScanToggleButton;  // ✅ 改为按钮形式
     private JComboBox<Configuration.InjectionMode> globalInjectionModeCombo;  // ✅ 全局注入模式
+    private JComboBox<XProbeConfig.ScanResultLogMode> logModeCombo;  // ✅ 扫描结果记录模式
     
     public PassiveScanConfigTab(MontoyaApi api, ConfigurationManager configManager, ConfigPersistence configPersistence) {
         this.api = api;
@@ -89,6 +90,21 @@ public class PassiveScanConfigTab {
         // ✅ 全局注入模式选择
         globalInjectionModeCombo = new JComboBox<>(Configuration.InjectionMode.values());
         globalInjectionModeCombo.setSelectedItem(Configuration.InjectionMode.BATCH);
+        
+        // ✅ 扫描结果记录模式选择
+        logModeCombo = new JComboBox<>(XProbeConfig.ScanResultLogMode.values());
+        logModeCombo.setSelectedItem(XProbeConfig.ScanResultLogMode.MATCHED_ONLY);
+        logModeCombo.setRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index,
+                                                         boolean isSelected, boolean cellHasFocus) {
+                super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                if (value instanceof XProbeConfig.ScanResultLogMode) {
+                    setText(((XProbeConfig.ScanResultLogMode) value).getDisplayName());
+                }
+                return this;
+            }
+        });
         globalInjectionModeCombo.setFont(globalInjectionModeCombo.getFont().deriveFont(13f));
         globalInjectionModeCombo.setToolTipText("<html>" +
             "<b>全局注入模式（可在单个规则中覆盖）</b><br>" +
@@ -126,6 +142,25 @@ public class PassiveScanConfigTab {
         infoLabel.setForeground(Color.GRAY);
         infoLabel.setFont(infoLabel.getFont().deriveFont(Font.ITALIC, 11f));
         topPanel.add(infoLabel);
+        
+        // ✅ 添加记录模式标签和选择框
+        JLabel logModeLabel = new JLabel("结果记录模式:");
+        logModeLabel.setFont(logModeLabel.getFont().deriveFont(Font.BOLD, 13f));
+        topPanel.add(logModeLabel);
+        
+        logModeCombo.setFont(logModeCombo.getFont().deriveFont(13f));
+        logModeCombo.setToolTipText("<html>" +
+            "<b>扫描结果记录模式</b><br>" +
+            "• <b>记录所有流量</b>：记录所有被动扫描发送的请求（便于调试，内存占用高）<br>" +
+            "• <b>仅记录命中</b>：只记录命中规则的请求（推荐，节省内存和性能）" +
+            "</html>");
+        topPanel.add(logModeCombo);
+        
+        // 添加性能提示标签
+        JLabel perfLabel = new JLabel("(影响性能和内存)");
+        perfLabel.setForeground(new Color(200, 100, 0));
+        perfLabel.setFont(perfLabel.getFont().deriveFont(Font.ITALIC, 11f));
+        topPanel.add(perfLabel);
         
         panel.add(topPanel, BorderLayout.NORTH);
         
@@ -199,6 +234,9 @@ public class PassiveScanConfigTab {
         
         // ✅ 全局注入模式变化时自动保存
         globalInjectionModeCombo.addActionListener(e -> saveGlobalInjectionMode());
+        
+        // ✅ 记录模式变化时自动保存
+        logModeCombo.addActionListener(e -> saveLogMode());
     }
     
     private void loadConfigurations() {
@@ -490,6 +528,25 @@ public class PassiveScanConfigTab {
     }
     
     /**
+     * ✅ 保存扫描结果记录模式
+     */
+    private void saveLogMode() {
+        try {
+            XProbeConfig config = configPersistence.load();
+            XProbeConfig.ScanResultLogMode mode = (XProbeConfig.ScanResultLogMode) logModeCombo.getSelectedItem();
+            config.setScanResultLogMode(mode);
+            configPersistence.save(config);
+            
+            String performanceNote = mode == XProbeConfig.ScanResultLogMode.ALL_REQUESTS 
+                ? " ⚠️ 注意：记录所有流量会增加内存和性能开销" 
+                : "";
+            api.logging().raiseInfoEvent("扫描结果记录模式已更新: " + mode.getDisplayName() + performanceNote);
+        } catch (Exception ex) {
+            api.logging().raiseErrorEvent("保存记录模式失败: " + ex.getMessage());
+        }
+    }
+    
+    /**
      * ✅ 加载保存的设置
      */
     public void loadSavedSettings() {
@@ -503,6 +560,11 @@ public class PassiveScanConfigTab {
             // 加载全局注入模式
             if (config.getGlobalInjectionMode() != null) {
                 globalInjectionModeCombo.setSelectedItem(config.getGlobalInjectionMode());
+            }
+            
+            // ✅ 加载扫描结果记录模式
+            if (config.getScanResultLogMode() != null) {
+                logModeCombo.setSelectedItem(config.getScanResultLogMode());
             }
         } catch (Exception e) {
             api.logging().raiseErrorEvent("加载设置失败: " + e.getMessage());

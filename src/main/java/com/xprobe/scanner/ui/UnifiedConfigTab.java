@@ -868,18 +868,55 @@ public class UnifiedConfigTab {
             return;
         }
         
+        // ✅ 先保存配置，以便测试时使用最新配置
+        saveAllConfigurations();
+        
+        api.logging().raiseInfoEvent("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        api.logging().raiseInfoEvent("🔧 用户点击测试Arjun连接按钮");
+        api.logging().raiseInfoEvent("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        
+        // ✅ 创建临时的 ArjunIntegration 实例进行测试
         try {
-            ProcessBuilder pb = new ProcessBuilder(arjunPath, "--version");
-            Process process = pb.start();
-            int exitCode = process.waitFor();
+            com.xprobe.scanner.config.XProbeConfig xprobeConfig = configPersistence.load();
             
-            if (exitCode == 0) {
-                JOptionPane.showMessageDialog(panel, "Arjun工具连接成功！", "测试结果", JOptionPane.INFORMATION_MESSAGE);
+            // ✅ 从XProbeConfig提取ExternalToolConfig
+            com.xprobe.scanner.active.ExternalToolConfig toolConfig = new com.xprobe.scanner.active.ExternalToolConfig();
+            toolConfig.setArjunPath(xprobeConfig.getArjunPath());
+            toolConfig.setBurpProxyAddress(xprobeConfig.getBurpProxyAddress());
+            toolConfig.setThreadCount(xprobeConfig.getThreadCount());
+            toolConfig.setTimeout(xprobeConfig.getTimeout());
+            // ✅ Set -> List 转换
+            if (xprobeConfig.getCustomDictionary() != null) {
+                toolConfig.setCustomDictionary(new java.util.ArrayList<>(xprobeConfig.getCustomDictionary()));
+            }
+            toolConfig.setEnableJsonOutput(xprobeConfig.isEnableJsonOutput());
+            toolConfig.setEnableVerboseOutput(xprobeConfig.isEnableVerboseOutput());
+            
+            com.xprobe.scanner.active.ArjunIntegration arjunIntegration = 
+                new com.xprobe.scanner.active.ArjunIntegration(api, toolConfig);
+            
+            boolean success = arjunIntegration.testConnection();
+            
+            if (success) {
+                api.logging().raiseInfoEvent("✅ Arjun测试成功！");
+                JOptionPane.showMessageDialog(panel, 
+                    "Arjun工具连接成功！\n请查看Burp日志了解详细信息。", 
+                    "测试结果", 
+                    JOptionPane.INFORMATION_MESSAGE);
             } else {
-                JOptionPane.showMessageDialog(panel, "Arjun工具连接失败，退出码: " + exitCode, "测试结果", JOptionPane.ERROR_MESSAGE);
+                api.logging().raiseErrorEvent("❌ Arjun测试失败！");
+                JOptionPane.showMessageDialog(panel, 
+                    "Arjun工具连接失败！\n请查看Burp日志了解详细错误信息。", 
+                    "测试结果", 
+                    JOptionPane.ERROR_MESSAGE);
             }
         } catch (Exception e) {
-            JOptionPane.showMessageDialog(panel, "测试连接时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
+            api.logging().raiseErrorEvent("❌ 测试连接时出现异常: " + e.getClass().getName() + " - " + e.getMessage());
+            e.printStackTrace();
+            JOptionPane.showMessageDialog(panel, 
+                "测试连接时出错: " + e.getMessage() + "\n请查看Burp日志了解详细错误信息。", 
+                "错误", 
+                JOptionPane.ERROR_MESSAGE);
         }
     }
     

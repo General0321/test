@@ -142,6 +142,11 @@ public class UnifiedResponseEvaluator {
     private static boolean evaluateLength(HttpResponse response, MatchConfig config) {
         if (response == null) return false;
         
+        // ✅ 安全检查：确保body不为null
+        if (response.body() == null) {
+            return compareNumeric(0, config);
+        }
+        
         long length = response.body().length();
         return compareNumeric(length, config);
     }

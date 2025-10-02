@@ -32,6 +32,25 @@ public class UniversalScanner extends AbstractScanner {
     public static final String SCANNER_TYPE = "UNIVERSAL_RULE_SCANNER";
     private final ConfigPersistence configPersistence;
     
+    // ✅ 内部类：配对评估结果（包含响应对象）
+    private static class PairEvaluationResult {
+        boolean matched;
+        HttpResponse response;
+        HttpRequest modifiedRequest;
+        long responseTime;
+        
+        PairEvaluationResult(boolean matched, HttpResponse response, HttpRequest modifiedRequest, long responseTime) {
+            this.matched = matched;
+            this.response = response;
+            this.modifiedRequest = modifiedRequest;
+            this.responseTime = responseTime;
+        }
+        
+        PairEvaluationResult(boolean matched) {
+            this(matched, null, null, 0);
+        }
+    }
+    
     public UniversalScanner(MontoyaApi api, com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner, ConfigPersistence configPersistence) {
         super(api, realtimeScanner);
         this.configPersistence = configPersistence;
@@ -114,15 +133,21 @@ public class UniversalScanner extends AbstractScanner {
             // 初始化Payload解析器
             PayloadVariableResolver payloadResolver = new PayloadVariableResolver(api);
             
-            // 评估每个配对
+            // ✅ 评估每个配对（保存评估结果和响应）
             Map<Integer, Boolean> pairResults = new HashMap<>();
+            Map<Integer, PairEvaluationResult> pairEvaluations = new HashMap<>();
+            List<PairEvaluationResult> allEvaluations = new ArrayList<>();  // ✅ 保存所有评估（包括未命中的）
             
             for (RuleMatchPair pair : pairs) {
                 try {
-                    boolean pairMatched = evaluatePair(pair, originalRequest, payloadResolver, config);
-                    pairResults.put(pair.getId(), pairMatched);
+                    // ✅ 传递allEvaluations列表，让评估方法能够记录所有请求
+                    PairEvaluationResult evaluation = evaluatePair(pair, originalRequest, payloadResolver, config, allEvaluations);
+                    pairResults.put(pair.getId(), evaluation.matched);
+                    pairEvaluations.put(pair.getId(), evaluation);
                     
-                    if (pairMatched) {
+                    // ✅ 主评估结果已经在evaluatePair中添加到allEvaluations了
+                    
+                    if (evaluation.matched) {
                         api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] " + 
                             pair.getDisplayLabel() + " 匹配成功");
                     }
@@ -130,18 +155,46 @@ public class UniversalScanner extends AbstractScanner {
                     api.logging().raiseErrorEvent("评估配对 [" + pair.getId() + "] 时出错: " + 
                         e.getMessage());
                     pairResults.put(pair.getId(), false);
+                    pairEvaluations.put(pair.getId(), new PairEvaluationResult(false));
                 }
             }
             
             // 根据配对表达式评估最终结果
             boolean finalResult = evaluatePairExpression(config.getPairExpression(), pairResults);
             
-            if (finalResult) {
-                // 创建扫描结果
-                ScanResult result = buildScanResult(config, originalRequest, pairResults);
-                results.add(result);
+            // ✅ 为所有发送的请求创建结果条目
+            if (!allEvaluations.isEmpty()) {
+                // 第一个结果作为主结果
+                PairEvaluationResult firstEval = allEvaluations.get(0);
+                ScanResult mainResult = new ScanResult.Builder()
+                    .vulnerable(finalResult)  // 使用最终评估结果
+                    .scanType(config.getCustomLabel())
+                    .evidence(finalResult ? "检测到漏洞" : "测试请求")
+                    .originalRequest(originalRequest)
+                    .modifiedRequest(firstEval.modifiedRequest)
+                    .response(firstEval.response)
+                    .responseTime(firstEval.responseTime)
+                    .build();
+                results.add(mainResult);
                 
-                api.logging().raiseInfoEvent("规则 " + config.getCustomLabel() + " 检测到漏洞！");
+                if (finalResult) {
+                    api.logging().raiseInfoEvent("✓ 规则 " + config.getCustomLabel() + " 检测到漏洞！");
+                }
+                
+                // 其余的请求作为额外条目（标记为未命中）
+                for (int i = 1; i < allEvaluations.size(); i++) {
+                    PairEvaluationResult eval = allEvaluations.get(i);
+                    ScanResult additionalResult = new ScanResult.Builder()
+                        .vulnerable(false)  // 额外的流量条目标记为未命中
+                        .scanType(config.getCustomLabel())
+                        .evidence("测试请求 #" + (i + 1))
+                        .originalRequest(originalRequest)
+                        .modifiedRequest(eval.modifiedRequest)
+                        .response(eval.response)
+                        .responseTime(eval.responseTime)
+                        .build();
+                    results.add(additionalResult);
+                }
             }
             
             return results;
@@ -150,53 +203,42 @@ public class UniversalScanner extends AbstractScanner {
     
     /**
      * 评估单个配对
+     * @param allEvaluations 用于保存所有评估结果的列表（包括未命中的）
      */
-    private boolean evaluatePair(RuleMatchPair pair, HttpRequest originalRequest, 
-                                 PayloadVariableResolver payloadResolver, Configuration config) {
+    private PairEvaluationResult evaluatePair(RuleMatchPair pair, HttpRequest originalRequest, 
+                                              PayloadVariableResolver payloadResolver, Configuration config,
+                                              List<PairEvaluationResult> allEvaluations) {
         UnifiedHttpConfig requestConfig = pair.getRequestConfig();
         UnifiedResponseConfig responseConfig = pair.getResponseConfig();
         
         if (requestConfig == null || responseConfig == null) {
-            return false;
+            return new PairEvaluationResult(false);
         }
         
         // 1. 检查请求是否匹配
         if (!UnifiedHttpEvaluator.evaluate(originalRequest, requestConfig)) {
-            return false;
+            return new PairEvaluationResult(false);
         }
         
         // 2. 获取注入点（启用了注入的元素）
-        // 🔍 调试：打印所有元素信息
-        api.logging().raiseInfoEvent("🔍 [调试] 配对 [" + pair.getId() + "] 总元素数: " + 
-            (requestConfig.getElements() != null ? requestConfig.getElements().size() : 0));
-        
-        if (requestConfig.getElements() != null) {
-            for (int i = 0; i < requestConfig.getElements().size(); i++) {
-                var elem = requestConfig.getElements().get(i);
-                api.logging().raiseInfoEvent(String.format(
-                    "🔍 [调试] 元素[%d]: 类型=%s, 名称=%s, useForMatch=%s, useForInjection=%s, payloads数=%d, injectionTarget=%s",
-                    i, elem.getType(), elem.getName(), elem.isUseForMatch(), elem.isUseForInjection(),
-                    (elem.getPayloads() != null ? elem.getPayloads().size() : 0),
-                    elem.getInjectionTarget()
-                ));
-            }
-        }
-        
         List<UnifiedHttpConfig.HttpElementConfig> injectionPoints = requestConfig.getElements()
             .stream()
             .filter(UnifiedHttpConfig.HttpElementConfig::isUseForInjection)
             .collect(Collectors.toList());
         
-        api.logging().raiseInfoEvent("🔍 [调试] 过滤后的注入点数: " + injectionPoints.size());
-        
         // ✅ 如果没有注入点，执行被动检测（检查原始响应）
         if (injectionPoints.isEmpty()) {
-            api.logging().raiseInfoEvent("⚠️ 配对 [" + pair.getId() + "] 没有注入点，执行被动检测");
             try {
                 // 发送原始请求
                 long startTime = System.currentTimeMillis();
                 HttpResponse response = api.http().sendRequest(originalRequest).response();
                 long responseTime = System.currentTimeMillis() - startTime;
+                
+                // ✅ 安全检查：确保响应不为null
+                if (response == null) {
+                    api.logging().raiseErrorEvent("⚠️ 配对 [" + pair.getId() + "] 被动检测收到null响应");
+                    return new PairEvaluationResult(false);
+                }
                 
                 // 评估响应（无payload上下文）
                 boolean responseMatched = UnifiedResponseEvaluator.evaluate(
@@ -205,12 +247,12 @@ public class UniversalScanner extends AbstractScanner {
                 
                 if (responseMatched) {
                     api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] 被动检测成功");
-                    return true;
+                    return new PairEvaluationResult(true, response, originalRequest, responseTime);
                 }
             } catch (Exception e) {
-                api.logging().raiseErrorEvent("被动检测时发送请求失败: " + e.getMessage());
+                api.logging().raiseErrorEvent("❌ 被动检测时发送请求失败: " + e.getMessage());
             }
-            return false;
+            return new PairEvaluationResult(false);
         }
         
         // 3. 根据全局注入模式执行注入并检查响应
@@ -219,10 +261,10 @@ public class UniversalScanner extends AbstractScanner {
         // 📌 批量模式 vs 逐个模式
         if (injectionMode == Configuration.InjectionMode.BATCH) {
             // ========== 批量模式（BATCH）：所有匹配参数同时注入相同payload ==========
-            return evaluateBatchMode(injectionPoints, originalRequest, responseConfig, payloadResolver, pair);
+            return evaluateBatchMode(injectionPoints, originalRequest, responseConfig, payloadResolver, pair, allEvaluations);
         } else {
             // ========== 逐个模式（INDIVIDUAL）：每次只注入一个参数 ==========
-            return evaluateIndividualMode(injectionPoints, originalRequest, responseConfig, payloadResolver, pair);
+            return evaluateIndividualMode(injectionPoints, originalRequest, responseConfig, payloadResolver, pair, allEvaluations);
         }
     }
     
@@ -241,12 +283,20 @@ public class UniversalScanner extends AbstractScanner {
     
     /**
      * 批量模式评估：所有匹配的参数同时注入相同payload
+     * ✅ 修改：将所有评估结果保存到共享列表中
+     * @param allEvaluations 用于保存所有评估结果的列表（包括未命中的）
      */
-    private boolean evaluateBatchMode(List<UnifiedHttpConfig.HttpElementConfig> injectionPoints,
-                                     HttpRequest originalRequest,
-                                     UnifiedResponseConfig responseConfig,
-                                     PayloadVariableResolver payloadResolver,
-                                     RuleMatchPair pair) {
+    private PairEvaluationResult evaluateBatchMode(List<UnifiedHttpConfig.HttpElementConfig> injectionPoints,
+                                                   HttpRequest originalRequest,
+                                                   UnifiedResponseConfig responseConfig,
+                                                   PayloadVariableResolver payloadResolver,
+                                                   RuleMatchPair pair,
+                                                   List<PairEvaluationResult> allEvaluations) {
+        // ✅ 保存最后一个响应（用于记录未命中的请求）
+        HttpResponse lastResponse = null;
+        HttpRequest lastModifiedRequest = null;
+        long lastResponseTime = 0;
+        
         for (UnifiedHttpConfig.HttpElementConfig injectionPoint : injectionPoints) {
             List<String> payloads = injectionPoint.getPayloads();
             if (payloads == null || payloads.isEmpty()) {
@@ -276,6 +326,21 @@ public class UniversalScanner extends AbstractScanner {
                     HttpResponse response = api.http().sendRequest(modifiedRequest).response();
                     long responseTime = System.currentTimeMillis() - startTime;
                     
+                    // ✅ 安全检查：确保响应不为null
+                    if (response == null) {
+                        api.logging().raiseErrorEvent("⚠️ 批量注入收到null响应");
+                        continue;
+                    }
+                    
+                    // ✅ 保存最后一个有效响应
+                    lastResponse = response;
+                    lastModifiedRequest = modifiedRequest;
+                    lastResponseTime = responseTime;
+                    
+                    // ✅ 将此评估添加到共享列表（确保所有请求都被记录）
+                    PairEvaluationResult evalResult = new PairEvaluationResult(false, response, modifiedRequest, responseTime);
+                    allEvaluations.add(evalResult);
+                    
                     // 评估响应
                     boolean responseMatched = UnifiedResponseEvaluator.evaluate(
                         response, responseConfig, payloadContext, responseTime
@@ -287,25 +352,39 @@ public class UniversalScanner extends AbstractScanner {
                             injectionPoint.getType().getDisplayName() + 
                             ", Payload: " + resolvedPayload.substring(0, Math.min(50, resolvedPayload.length()))
                         );
-                        return true;
+                        return new PairEvaluationResult(true, response, modifiedRequest, responseTime);
                     }
                     
                 } catch (Exception e) {
-                    api.logging().raiseErrorEvent("批量注入时出错: " + e.getMessage());
+                    api.logging().raiseErrorEvent("❌ 批量注入时出错: " + e.getMessage());
+                    e.printStackTrace();
                 }
             }
         }
-        return false;
+        
+        // ✅ 即使没有匹配，也返回最后一个响应（确保请求被记录）
+        if (lastResponse != null) {
+            return new PairEvaluationResult(false, lastResponse, lastModifiedRequest, lastResponseTime);
+        }
+        
+        return new PairEvaluationResult(false);
     }
     
     /**
      * 逐个模式评估：每次只注入一个匹配的参数
+     * @param allEvaluations 用于保存所有评估结果的列表（包括未命中的）
      */
-    private boolean evaluateIndividualMode(List<UnifiedHttpConfig.HttpElementConfig> injectionPoints,
-                                          HttpRequest originalRequest,
-                                          UnifiedResponseConfig responseConfig,
-                                          PayloadVariableResolver payloadResolver,
-                                          RuleMatchPair pair) {
+    private PairEvaluationResult evaluateIndividualMode(List<UnifiedHttpConfig.HttpElementConfig> injectionPoints,
+                                                        HttpRequest originalRequest,
+                                                        UnifiedResponseConfig responseConfig,
+                                                        PayloadVariableResolver payloadResolver,
+                                                        RuleMatchPair pair,
+                                                        List<PairEvaluationResult> allEvaluations) {
+        // ✅ 保存最后一个响应（用于记录未命中的请求）
+        HttpResponse lastResponse = null;
+        HttpRequest lastModifiedRequest = null;
+        long lastResponseTime = 0;
+        
         for (UnifiedHttpConfig.HttpElementConfig injectionPoint : injectionPoints) {
             List<String> payloads = injectionPoint.getPayloads();
             if (payloads == null || payloads.isEmpty()) {
@@ -339,6 +418,21 @@ public class UniversalScanner extends AbstractScanner {
                         HttpResponse response = api.http().sendRequest(modifiedRequest).response();
                         long responseTime = System.currentTimeMillis() - startTime;
                         
+                        // ✅ 安全检查：确保响应不为null
+                        if (response == null) {
+                            api.logging().raiseErrorEvent("⚠️ 逐个注入收到null响应");
+                            continue;
+                        }
+                        
+                        // ✅ 保存最后一个有效响应
+                        lastResponse = response;
+                        lastModifiedRequest = modifiedRequest;
+                        lastResponseTime = responseTime;
+                        
+                        // ✅ 将此评估添加到共享列表（确保所有请求都被记录）
+                        PairEvaluationResult evalResult = new PairEvaluationResult(false, response, modifiedRequest, responseTime);
+                        allEvaluations.add(evalResult);
+                        
                         // 评估响应
                         boolean responseMatched = UnifiedResponseEvaluator.evaluate(
                             response, responseConfig, payloadContext, responseTime
@@ -350,16 +444,22 @@ public class UniversalScanner extends AbstractScanner {
                                 injectionPoint.getType().getDisplayName() + 
                                 " [" + target.name + "], Payload: " + resolvedPayload.substring(0, Math.min(50, resolvedPayload.length()))
                             );
-                            return true;
+                            return new PairEvaluationResult(true, response, modifiedRequest, responseTime);
                         }
                         
                     } catch (Exception e) {
-                        api.logging().raiseErrorEvent("逐个注入时出错: " + e.getMessage());
+                        api.logging().raiseErrorEvent("❌ 逐个注入时出错: " + e.getMessage());
                     }
                 }
             }
         }
-        return false;
+        
+        // ✅ 即使没有匹配，也返回最后一个响应（确保请求被记录）
+        if (lastResponse != null) {
+            return new PairEvaluationResult(false, lastResponse, lastModifiedRequest, lastResponseTime);
+        }
+        
+        return new PairEvaluationResult(false);
     }
     
     /**
@@ -638,27 +738,17 @@ public class UniversalScanner extends AbstractScanner {
                         
                         // 如果匹配成功，执行注入
                         if (shouldInject) {
-                            // 🔍 调试日志
-                            api.logging().raiseInfoEvent(String.format(
-                                "🎯 [Payload注入] 参数='%s', 原值='%s', Payload='%s', 注入目标=%s", 
-                                param.name(), param.value(), payload, target
-                            ));
-                            
                             if (target == UnifiedHttpConfig.InjectionTarget.VALUE) {
                                 // ✅ 使用withUpdatedParameters()直接更新参数值
                                 var newParam = burp.api.montoya.http.message.params.HttpParameter
                                     .parameter(param.name(), payload, param.type());
                                 modified = modified.withUpdatedParameters(newParam);
-                                api.logging().raiseInfoEvent("✅ [Payload注入] 参数值替换成功: " + param.name());
                             } else if (target == UnifiedHttpConfig.InjectionTarget.NAME) {
                                 // 替换参数名（必须先删除旧的，再添加新的）
                                 modified = modified.withRemovedParameters(param);
                                 var newParam = burp.api.montoya.http.message.params.HttpParameter
                                     .parameter(payload, param.value(), param.type());
                                 modified = modified.withAddedParameters(newParam);
-                                api.logging().raiseInfoEvent("✅ [Payload注入] 参数名替换成功");
-                            } else {
-                                api.logging().raiseErrorEvent("⚠️ [Payload注入] 注入目标为null或不支持: " + target);
                             }
                         }
                     }
@@ -692,11 +782,9 @@ public class UniversalScanner extends AbstractScanner {
                         if (shouldInject) {
                             if (target == UnifiedHttpConfig.InjectionTarget.VALUE) {
                                 modified = modified.withUpdatedHeader(header.name(), payload);
-                                api.logging().raiseInfoEvent("✅ [Payload注入] Header值替换成功: " + header.name());
                             } else if (target == UnifiedHttpConfig.InjectionTarget.NAME) {
                                 modified = modified.withRemovedHeader(header.name());
                                 modified = modified.withAddedHeader(payload, header.value());
-                                api.logging().raiseInfoEvent("✅ [Payload注入] Header名替换成功");
                             }
                         }
                     }
@@ -735,7 +823,6 @@ public class UniversalScanner extends AbstractScanner {
                             var cookieParam = burp.api.montoya.http.message.params.HttpParameter
                                 .cookieParameter(param.name(), payload);
                             modified = modified.withUpdatedParameters(cookieParam);
-                            api.logging().raiseInfoEvent("✅ [Payload注入] Cookie值替换成功: " + param.name());
                         }
                     }
                     break;
@@ -855,27 +942,62 @@ public class UniversalScanner extends AbstractScanner {
      * 构建扫描结果
      */
     private ScanResult buildScanResult(Configuration config, HttpRequest request, 
-                                      Map<Integer, Boolean> pairResults) {
+                                      Map<Integer, Boolean> pairResults,
+                                      Map<Integer, PairEvaluationResult> pairEvaluations,
+                                      boolean vulnerable) {
         StringBuilder evidence = new StringBuilder();
         evidence.append("规则: ").append(config.getCustomLabel()).append("\n");
         evidence.append("配对匹配结果:\n");
         
+        // ✅ 查找第一个有响应的评估结果（优先匹配成功的）
+        PairEvaluationResult selectedEvaluation = null;
         for (Map.Entry<Integer, Boolean> entry : pairResults.entrySet()) {
             evidence.append("  配对 [").append(entry.getKey()).append("]: ")
                    .append(entry.getValue() ? "✓ 匹配" : "✗ 不匹配")
                    .append("\n");
+            
+            // 优先选择匹配成功的评估结果
+            if (selectedEvaluation == null && entry.getValue()) {
+                PairEvaluationResult eval = pairEvaluations.get(entry.getKey());
+                if (eval != null && eval.response != null) {
+                    selectedEvaluation = eval;
+                }
+            }
+        }
+        
+        // 如果没有匹配成功的，选择任意一个有响应的
+        if (selectedEvaluation == null) {
+            selectedEvaluation = pairEvaluations.values().stream()
+                .filter(e -> e.response != null)
+                .findFirst()
+                .orElse(null);
         }
         
         if (config.getPairExpression() != null && !config.getPairExpression().isEmpty()) {
             evidence.append("配对逻辑: ").append(config.getPairExpression()).append("\n");
         }
         
-        return new ScanResult.Builder()
-            .vulnerable(true)
+        // ✅ 构建结果，包含响应对象
+        ScanResult.Builder builder = new ScanResult.Builder()
+            .vulnerable(vulnerable)  // ✅ 使用传入的vulnerable标志
             .scanType(config.getCustomLabel())
             .evidence(evidence.toString())
-            .originalRequest(request)
-            .build();
+            .originalRequest(request);
+        
+        // ✅ 如果有评估结果，添加响应信息
+        if (selectedEvaluation != null) {
+            if (selectedEvaluation.response != null) {
+                builder.response(selectedEvaluation.response);
+            }
+            if (selectedEvaluation.modifiedRequest != null) {
+                builder.modifiedRequest(selectedEvaluation.modifiedRequest);
+            }
+            if (selectedEvaluation.responseTime > 0) {
+                builder.responseTime(selectedEvaluation.responseTime);
+            }
+        }
+        
+        return builder.build();
     }
     
     /**

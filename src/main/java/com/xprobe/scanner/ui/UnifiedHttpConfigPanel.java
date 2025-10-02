@@ -314,6 +314,46 @@ public class UnifiedHttpConfigPanel extends JPanel {
     }
     
     /**
+     * ✅ 加载配置到UI
+     */
+    public void loadConfig(UnifiedHttpConfig config) {
+        if (config == null) {
+            return;
+        }
+        
+        this.config = config;
+        
+        // 清空现有元素
+        elementRows.clear();
+        elementsPanel.removeAll();
+        nextElementId = 1;
+        
+        // 加载元素
+        if (config.getElements() != null) {
+            for (UnifiedHttpConfig.HttpElementConfig element : config.getElements()) {
+                // 创建元素行
+                HttpElementRow row = new HttpElementRow(element);
+                elementRows.add(row);
+                elementsPanel.add(row);
+                
+                // 更新ID计数器
+                if (element.getId() >= nextElementId) {
+                    nextElementId = element.getId() + 1;
+                }
+            }
+        }
+        
+        // 加载逻辑表达式
+        if (config.getConditionExpression() != null) {
+            expressionArea.setText(config.getConditionExpression());
+        }
+        
+        // 刷新UI
+        elementsPanel.revalidate();
+        elementsPanel.repaint();
+    }
+    
+    /**
      * HTTP元素行组件
      */
     private class HttpElementRow extends JPanel {
@@ -365,7 +405,12 @@ public class UnifiedHttpConfigPanel extends JPanel {
                 private void update() {
                     // ✅ 忽略来自摘要更新的变更
                     if (!isUpdatingSummary) {
-                        element.setName(nameField.getText().trim());
+                        // ✅ 仅当没有配置 nameMatchConfig 时，才保存nameField的值
+                        if (element.getNameMatchConfig() == null || 
+                            element.getNameMatchConfig().getValues() == null ||
+                            element.getNameMatchConfig().getValues().isEmpty()) {
+                            element.setName(nameField.getText().trim());
+                        }
                     }
                 }
             });
@@ -385,7 +430,10 @@ public class UnifiedHttpConfigPanel extends JPanel {
                 private void update() {
                     // ✅ 忽略来自摘要更新的变更
                     if (!isUpdatingSummary) {
-                        element.setExampleValue(valueField.getText().trim());
+                        // ✅ 仅当没有配置 payloads 时，才保存valueField的值
+                        if (element.getPayloads() == null || element.getPayloads().isEmpty()) {
+                            element.setExampleValue(valueField.getText().trim());
+                        }
                     }
                 }
             });
@@ -440,12 +488,32 @@ public class UnifiedHttpConfigPanel extends JPanel {
             idLabel.setText(String.valueOf(element.getId()));
             typeLabel.setText(element.getType().getDisplayName());
             
-            if (element.getName() != null) {
-                nameField.setText(element.getName());
-            }
+            // ✅ 优先使用updateSummaryFields()来正确显示摘要
+            // 如果有配置详细信息（nameMatchConfig或payloads），显示摘要
+            // 否则显示简单的name和exampleValue
+            boolean hasDetailedConfig = 
+                (element.getNameMatchConfig() != null && 
+                 element.getNameMatchConfig().getValues() != null &&
+                 !element.getNameMatchConfig().getValues().isEmpty()) ||
+                (element.getPayloads() != null && !element.getPayloads().isEmpty());
             
-            if (element.getExampleValue() != null) {
-                valueField.setText(element.getExampleValue());
+            if (hasDetailedConfig) {
+                // 有详细配置，使用updateSummaryFields()显示摘要
+                updateSummaryFields();
+            } else {
+                // 没有详细配置，直接显示name和exampleValue
+                isUpdatingSummary = true;
+                try {
+                    if (element.getName() != null) {
+                        nameField.setText(element.getName());
+                    }
+                    
+                    if (element.getExampleValue() != null) {
+                        valueField.setText(element.getExampleValue());
+                    }
+                } finally {
+                    isUpdatingSummary = false;
+                }
             }
             
             matchCheckbox.setSelected(element.isUseForMatch());
@@ -453,13 +521,22 @@ public class UnifiedHttpConfigPanel extends JPanel {
         }
         
         private void showDetailConfig() {
-            // 保存当前输入
+            // ✅ 修复：只在没有配置nameMatchConfig时才保存nameField的值
             if (element.getType() == ElementType.PARAMETER ||
                 element.getType() == ElementType.HEADER ||
                 element.getType() == ElementType.COOKIE) {
-                element.setName(nameField.getText().trim());
+                // 仅当没有配置 nameMatchConfig 时，才从 nameField 读取值
+                if (element.getNameMatchConfig() == null || 
+                    element.getNameMatchConfig().getValues() == null ||
+                    element.getNameMatchConfig().getValues().isEmpty()) {
+                    element.setName(nameField.getText().trim());
+                }
             }
-            element.setExampleValue(valueField.getText().trim());
+            
+            // ✅ 修复：只在没有配置payloads时才保存valueField的值
+            if (element.getPayloads() == null || element.getPayloads().isEmpty()) {
+                element.setExampleValue(valueField.getText().trim());
+            }
             
             // 显示详细配置对话框
             HttpElementDetailDialog dialog = new HttpElementDetailDialog(
@@ -532,13 +609,24 @@ public class UnifiedHttpConfigPanel extends JPanel {
         }
         
         public HttpElementConfig getElement() {
-            // 保存最新输入
+            // ✅ 修复：只在没有配置nameMatchConfig时才从nameField读取值
+            // 避免摘要覆盖实际配置
             if (element.getType() == ElementType.PARAMETER ||
                 element.getType() == ElementType.HEADER ||
                 element.getType() == ElementType.COOKIE) {
-                element.setName(nameField.getText().trim());
+                // 仅当没有配置 nameMatchConfig 时，才从 nameField 读取值
+                if (element.getNameMatchConfig() == null || 
+                    element.getNameMatchConfig().getValues() == null ||
+                    element.getNameMatchConfig().getValues().isEmpty()) {
+                    element.setName(nameField.getText().trim());
+                }
             }
-            element.setExampleValue(valueField.getText().trim());
+            
+            // ✅ 修复：只在没有配置payloads时才从valueField读取值
+            if (element.getPayloads() == null || element.getPayloads().isEmpty()) {
+                element.setExampleValue(valueField.getText().trim());
+            }
+            
             element.setUseForMatch(matchCheckbox.isSelected());
             element.setUseForInjection(injectCheckbox.isSelected());
             

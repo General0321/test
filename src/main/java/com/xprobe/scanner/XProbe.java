@@ -107,7 +107,7 @@ public class XProbe implements BurpExtension {
         ScannerFactory scannerFactory = new ScannerFactory(api, realtimeScanner, configPersistence);
         
         // 创建任务调度器
-        taskScheduler = new TaskScheduler(api, scannerFactory, logModel);
+        taskScheduler = new TaskScheduler(api, scannerFactory, logModel, configPersistence);
         
         // 创建请求处理器 (需要RealtimeScanner)
         RequestHandler requestHandler = new RequestHandler(api, configManager, requestFilter, taskScheduler, realtimeScanner, configPersistence);

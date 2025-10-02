@@ -291,12 +291,14 @@ public class ExternalToolConfigDialog extends JDialog {
             return;
         }
         
+        // ✅ 注意：这是旧版对话框，仅做简单测试
+        // 生产环境请使用 UnifiedConfigTab 的测试功能
         try {
-            ProcessBuilder pb = new ProcessBuilder(arjunPath, "--version");
+            ProcessBuilder pb = new ProcessBuilder(arjunPath, "--help");
             Process process = pb.start();
             int exitCode = process.waitFor();
             
-            if (exitCode == 0) {
+            if (exitCode == 0 || exitCode == 1) {
                 JOptionPane.showMessageDialog(this, "Arjun工具连接成功！", 
                     "测试结果", JOptionPane.INFORMATION_MESSAGE);
             } else {

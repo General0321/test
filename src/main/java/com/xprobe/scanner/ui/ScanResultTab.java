@@ -28,6 +28,7 @@ public class ScanResultTab {
     private JTable resultTable;
     private JTextField searchField;
     private JComboBox<String> filterComboBox;
+    private JComboBox<String> vulnerableFilterComboBox;  // ✅ 新增：命中规则过滤
     private TableRowSorter<LogModel> sorter;
     
     // 统计标签
@@ -57,7 +58,7 @@ public class ScanResultTab {
         modifiedRequest = api.userInterface().createHttpRequestEditor(READ_ONLY);
         modifiedResponse = api.userInterface().createHttpResponseEditor(READ_ONLY);
         
-        // 创建结果表格
+        // 创建结果表格（带高亮）
         resultTable = new JTable(logModel) {
             @Override
             public void changeSelection(int rowIndex, int columnIndex, boolean toggle, boolean extend) {
@@ -70,6 +71,33 @@ public class ScanResultTab {
                     modifiedResponse.setResponse(logEntry.modifiedResponse);
                 }
                 super.changeSelection(rowIndex, columnIndex, toggle, extend);
+            }
+            
+            // ✅ 高亮显示命中规则的行
+            @Override
+            public Component prepareRenderer(javax.swing.table.TableCellRenderer renderer, int row, int column) {
+                Component c = super.prepareRenderer(renderer, row, column);
+                
+                if (!isRowSelected(row)) {
+                    int modelRow = convertRowIndexToModel(row);
+                    LogModel.LogEntry entry = logModel.get(modelRow);
+                    
+                    if (entry.isVulnerable()) {
+                        // 命中规则：高亮显示（浅红色背景）
+                        c.setBackground(new Color(255, 230, 230));
+                        c.setForeground(new Color(200, 0, 0));
+                    } else {
+                        // 未命中：正常显示
+                        c.setBackground(Color.WHITE);
+                        c.setForeground(Color.BLACK);
+                    }
+                } else {
+                    // 选中行：使用默认选中颜色
+                    c.setBackground(getSelectionBackground());
+                    c.setForeground(getSelectionForeground());
+                }
+                
+                return c;
             }
         };
         
@@ -89,6 +117,11 @@ public class ScanResultTab {
         // 过滤下拉框
         filterComboBox = new JComboBox<>(new String[]{
             "全部", "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"
+        });
+        
+        // ✅ 新增：命中规则过滤下拉框（初始只有"全部流量"和"所有命中"）
+        vulnerableFilterComboBox = new JComboBox<>(new String[]{
+            "全部流量", "所有命中"
         });
         
         // 统计标签
@@ -143,6 +176,11 @@ public class ScanResultTab {
         leftPanel.add(Box.createHorizontalStrut(10));
         leftPanel.add(new JLabel("📋 方法:"));
         leftPanel.add(filterComboBox);
+        
+        // ✅ 新增：命中规则过滤
+        leftPanel.add(Box.createHorizontalStrut(10));
+        leftPanel.add(new JLabel("🎯 筛选:"));
+        leftPanel.add(vulnerableFilterComboBox);
         
         JButton clearFilterButton = new JButton("清除过滤");
         clearFilterButton.addActionListener(e -> clearFilters());
@@ -219,6 +257,10 @@ public class ScanResultTab {
         return editorPanel;
     }
     
+    // ✅ 用于节流更新规则筛选选项
+    private javax.swing.Timer updateRuleFilterTimer;
+    private volatile boolean needsRuleFilterUpdate = false;
+    
     private void setupEventListeners() {
         // 搜索框实时过滤
         searchField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
@@ -230,13 +272,36 @@ public class ScanResultTab {
         // 方法过滤下拉框
         filterComboBox.addActionListener(e -> applyFilters());
         
-        // 监听表格数据变化以更新统计
-        logModel.addTableModelListener(e -> updateStatistics());
+        // ✅ 命中规则过滤下拉框
+        vulnerableFilterComboBox.addActionListener(e -> applyFilters());
+        
+        // ✅ 初始化节流定时器（每2秒最多更新一次规则筛选选项）
+        updateRuleFilterTimer = new javax.swing.Timer(2000, e -> {
+            if (needsRuleFilterUpdate) {
+                updateRuleFilterOptions();
+                needsRuleFilterUpdate = false;
+            }
+        });
+        updateRuleFilterTimer.setRepeats(true);
+        updateRuleFilterTimer.start();
+        
+        // ✅ 监听表格数据变化（节流更新）
+        logModel.addTableModelListener(e -> {
+            updateStatistics();
+            // ✅ 标记需要更新，由定时器批量执行
+            needsRuleFilterUpdate = true;
+        });
     }
     
     private void applyFilters() {
         String searchText = searchField.getText().trim();
         String methodFilter = (String) filterComboBox.getSelectedItem();
+        String vulnerableFilter = (String) vulnerableFilterComboBox.getSelectedItem();
+        
+        // ✅ 安全检查：避免在更新下拉框时触发过滤
+        if (vulnerableFilter == null) {
+            return;
+        }
         
         RowFilter<LogModel, Object> rf = null;
         
@@ -249,8 +314,27 @@ public class ScanResultTab {
             }
             
             // 方法过滤
-            if (!"全部".equals(methodFilter)) {
+            if (methodFilter != null && !"全部".equals(methodFilter)) {
                 filters.add(RowFilter.regexFilter(methodFilter, 2)); // 第2列是Method
+            }
+            
+            // ✅ 命中规则过滤
+            if (!"全部流量".equals(vulnerableFilter)) {
+                filters.add(new RowFilter<LogModel, Object>() {
+                    @Override
+                    public boolean include(Entry<? extends LogModel, ?> entry) {
+                        int modelRow = (Integer) entry.getIdentifier();
+                        LogModel.LogEntry logEntry = logModel.get(modelRow);
+                        
+                        if ("所有命中".equals(vulnerableFilter)) {
+                            // 显示所有命中了任何规则的
+                            return logEntry.isVulnerable();
+                        } else {
+                            // 显示命中特定规则的
+                            return vulnerableFilter.equals(logEntry.ruleName);
+                        }
+                    }
+                });
             }
             
             // 组合过滤器
@@ -269,6 +353,7 @@ public class ScanResultTab {
     private void clearFilters() {
         searchField.setText("");
         filterComboBox.setSelectedIndex(0);
+        vulnerableFilterComboBox.setSelectedIndex(0);  // ✅ 重置命中规则过滤
         sorter.setRowFilter(null);
         updateStatistics();
     }
@@ -329,14 +414,10 @@ public class ScanResultTab {
         );
         
         if (result == JOptionPane.YES_OPTION) {
-            // 清空LogModel (需要在LogModel中实现clear方法)
-            // 这里我们暂时通过刷新来模拟
-            JOptionPane.showMessageDialog(mainSplitPane, 
-                "清空功能需要在LogModel中实现clear()方法", 
-                "提示", 
-                JOptionPane.INFORMATION_MESSAGE);
-            // TODO: logModel.clear();
+            // ✅ 清空LogModel
+            logModel.clear();
             updateStatistics();
+            api.logging().raiseInfoEvent("扫描结果已清空");
         }
     }
     
@@ -369,8 +450,84 @@ public class ScanResultTab {
             filtered < total ? new Color(241, 196, 15) : new Color(46, 204, 113)
         );
     }
+    
+    /**
+     * 更新规则筛选选项（动态添加已出现的规则名称）
+     */
+    private void updateRuleFilterOptions() {
+        // ✅ 临时移除ActionListener，避免在更新过程中触发过滤
+        java.awt.event.ActionListener[] listeners = vulnerableFilterComboBox.getActionListeners();
+        for (java.awt.event.ActionListener listener : listeners) {
+            vulnerableFilterComboBox.removeActionListener(listener);
+        }
+        
+        try {
+            // 收集所有出现过的规则名称
+            java.util.Set<String> ruleNames = new java.util.HashSet<>();
+            for (int i = 0; i < logModel.getRowCount(); i++) {
+                LogModel.LogEntry entry = logModel.get(i);
+                if (entry.isVulnerable() && entry.ruleName != null) {
+                    ruleNames.add(entry.ruleName);
+                }
+            }
+            
+            // 保存当前选择
+            String currentSelection = (String) vulnerableFilterComboBox.getSelectedItem();
+            
+            // 重建下拉框选项
+            vulnerableFilterComboBox.removeAllItems();
+            vulnerableFilterComboBox.addItem("全部流量");
+            vulnerableFilterComboBox.addItem("所有命中");
+            
+            // 添加具体的规则名称（按字母顺序）
+            java.util.List<String> sortedRules = new java.util.ArrayList<>(ruleNames);
+            java.util.Collections.sort(sortedRules);
+            for (String ruleName : sortedRules) {
+                vulnerableFilterComboBox.addItem(ruleName);
+            }
+            
+            // 恢复之前的选择（如果还存在）
+            if (currentSelection != null) {
+                for (int i = 0; i < vulnerableFilterComboBox.getItemCount(); i++) {
+                    if (currentSelection.equals(vulnerableFilterComboBox.getItemAt(i))) {
+                        vulnerableFilterComboBox.setSelectedIndex(i);
+                        return;
+                    }
+                }
+            }
+            
+            // 如果之前的选择不存在了，默认选择"全部流量"
+            vulnerableFilterComboBox.setSelectedIndex(0);
+            
+        } finally {
+            // ✅ 重新添加ActionListener
+            for (java.awt.event.ActionListener listener : listeners) {
+                vulnerableFilterComboBox.addActionListener(listener);
+            }
+        }
+    }
 
+    /**
+     * ✅ 清理资源（停止Timer等）
+     */
+    public void cleanup() {
+        if (updateRuleFilterTimer != null) {
+            updateRuleFilterTimer.stop();
+            updateRuleFilterTimer = null;
+        }
+    }
+    
     public Component getComponent() {
+        // ✅ 添加组件移除监听器，自动清理
+        if (mainSplitPane.getComponentListeners().length == 0) {
+            mainSplitPane.addHierarchyListener(e -> {
+                if ((e.getChangeFlags() & java.awt.event.HierarchyEvent.DISPLAYABILITY_CHANGED) != 0) {
+                    if (!mainSplitPane.isDisplayable()) {
+                        cleanup();
+                    }
+                }
+            });
+        }
         return mainSplitPane;
     }
 }

@@ -87,47 +87,152 @@ public class ArjunIntegration {
                 arjunPath = "arjun";
             }
             
+            api.logging().raiseInfoEvent("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            api.logging().raiseInfoEvent("🔍 Arjun测试连接开始");
+            api.logging().raiseInfoEvent("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            api.logging().raiseInfoEvent("📝 配置的Arjun路径: " + arjunPath);
+            api.logging().raiseInfoEvent("🖥️  操作系统: " + System.getProperty("os.name"));
+            api.logging().raiseInfoEvent("🏠 当前工作目录: " + System.getProperty("user.dir"));
+            
             if (arjunPath.equals("python") || arjunPath.equals("python3")) {
                 command.add(arjunPath);
                 command.add("-m");
                 command.add("arjun");
+                api.logging().raiseInfoEvent("📌 使用Python模块模式: " + arjunPath + " -m arjun");
             } else {
+                // ✅ 详细文件检查
+                File arjunFile = new File(arjunPath);
+                api.logging().raiseInfoEvent("📂 文件检查:");
+                api.logging().raiseInfoEvent("   - 绝对路径: " + arjunFile.getAbsolutePath());
+                api.logging().raiseInfoEvent("   - 文件存在: " + arjunFile.exists());
+                if (arjunFile.exists()) {
+                    api.logging().raiseInfoEvent("   - 是否为文件: " + arjunFile.isFile());
+                    api.logging().raiseInfoEvent("   - 是否可读: " + arjunFile.canRead());
+                    api.logging().raiseInfoEvent("   - 是否可执行: " + arjunFile.canExecute());
+                    api.logging().raiseInfoEvent("   - 文件大小: " + arjunFile.length() + " bytes");
+                }
+                
                 // 检查是否是Python脚本并获取解释器
                 String[] scriptInfo = checkPythonScriptAndGetInterpreter(arjunPath);
                 boolean isPythonScript = "true".equals(scriptInfo[0]);
                 String shebangInterpreter = scriptInfo[1];
                 
+                api.logging().raiseInfoEvent("🔬 脚本类型检测:");
+                api.logging().raiseInfoEvent("   - 是Python脚本: " + isPythonScript);
+                api.logging().raiseInfoEvent("   - Shebang解释器: " + (shebangInterpreter != null ? shebangInterpreter : "未找到"));
+                
                 if (isPythonScript) {
                     String pythonInterpreter;
                     if (shebangInterpreter != null && !shebangInterpreter.isEmpty()) {
                         pythonInterpreter = shebangInterpreter;
+                        api.logging().raiseInfoEvent("✅ 使用Shebang解释器: " + pythonInterpreter);
                     } else {
                         pythonInterpreter = extractPythonInterpreter(arjunPath);
+                        api.logging().raiseInfoEvent("✅ 使用提取的解释器: " + pythonInterpreter);
                     }
+                    
+                    // ✅ 详细验证解释器
+                    File interpreterFile = new File(pythonInterpreter);
+                    api.logging().raiseInfoEvent("🐍 Python解释器检查:");
+                    api.logging().raiseInfoEvent("   - 解释器路径: " + pythonInterpreter);
+                    api.logging().raiseInfoEvent("   - 绝对路径: " + interpreterFile.getAbsolutePath());
+                    
+                    if (!pythonInterpreter.equals("python") && !pythonInterpreter.equals("python3")) {
+                        api.logging().raiseInfoEvent("   - 文件存在: " + interpreterFile.exists());
+                        if (interpreterFile.exists()) {
+                            api.logging().raiseInfoEvent("   - 是否可执行: " + interpreterFile.canExecute());
+                        } else {
+                            api.logging().raiseErrorEvent("❌ Python解释器不存在: " + pythonInterpreter);
+                            return false;
+                        }
+                    }
+                    
                     command.add(pythonInterpreter);
                     command.add(arjunPath);
                 } else {
+                    // ✅ 直接可执行文件检查
+                    if (!arjunFile.exists()) {
+                        api.logging().raiseErrorEvent("❌ Arjun文件不存在: " + arjunPath);
+                        return false;
+                    }
+                    if (!arjunFile.canExecute()) {
+                        api.logging().raiseErrorEvent("❌ Arjun文件没有执行权限: " + arjunPath);
+                        api.logging().raiseInfoEvent("💡 建议: 执行 chmod +x " + arjunPath);
+                        return false;
+                    }
                     command.add(arjunPath);
                 }
             }
             
             command.add("--help");
             
+            api.logging().raiseInfoEvent("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            api.logging().raiseInfoEvent("🚀 即将执行命令:");
+            api.logging().raiseInfoEvent("   " + String.join(" ", command));
+            api.logging().raiseInfoEvent("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.redirectErrorStream(true);
+            
+            api.logging().raiseInfoEvent("⏳ 启动进程...");
             Process process = pb.start();
+            api.logging().raiseInfoEvent("✅ 进程启动成功！");
+            
+            // 读取输出（用于调试）
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            StringBuilder output = new StringBuilder();
+            String line;
+            int lineCount = 0;
+            while ((line = reader.readLine()) != null && lineCount < 5) {
+                output.append(line).append("\n");
+                lineCount++;
+            }
             
             boolean finished = process.waitFor(5, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
+                api.logging().raiseErrorEvent("❌ Arjun执行超时");
                 return false;
             }
             
             int exitCode = process.exitValue();
-            return exitCode == 0 || exitCode == 1; // Arjun --help可能返回0或1
+            api.logging().raiseInfoEvent("📊 退出码: " + exitCode);
+            if (output.length() > 0) {
+                api.logging().raiseInfoEvent("📝 输出预览:\n" + output.toString());
+            }
+            
+            if (exitCode == 0 || exitCode == 1) {
+                api.logging().raiseInfoEvent("✅ Arjun测试成功！");
+                return true;
+            } else {
+                api.logging().raiseErrorEvent("❌ Arjun退出码异常: " + exitCode);
+                return false;
+            }
             
         } catch (Exception e) {
-            api.logging().raiseErrorEvent("Arjun连接测试失败: " + e.getMessage());
+            api.logging().raiseErrorEvent("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            api.logging().raiseErrorEvent("❌ Arjun连接测试失败！");
+            api.logging().raiseErrorEvent("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            api.logging().raiseErrorEvent("异常类型: " + e.getClass().getName());
+            api.logging().raiseErrorEvent("异常信息: " + e.getMessage());
+            
+            // ✅ 打印完整堆栈跟踪（前10行）
+            StackTraceElement[] stackTrace = e.getStackTrace();
+            api.logging().raiseErrorEvent("堆栈跟踪:");
+            int limit = Math.min(stackTrace.length, 10);
+            for (int i = 0; i < limit; i++) {
+                api.logging().raiseErrorEvent("   " + stackTrace[i].toString());
+            }
+            
+            // ✅ 如果有原因链，也打印出来
+            Throwable cause = e.getCause();
+            if (cause != null) {
+                api.logging().raiseErrorEvent("根本原因: " + cause.getClass().getName() + " - " + cause.getMessage());
+            }
+            
+            api.logging().raiseErrorEvent("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            
+            e.printStackTrace();
             return false;
         }
     }
@@ -277,11 +382,11 @@ public class ArjunIntegration {
             case "PUT":
             case "PATCH":
                 if (isJson) {
-                    return "JSON";
+                return "JSON";
                 } else if (isXml) {
-                    return "XML";
-                }
-                return "POST";
+                return "XML";
+            }
+            return "POST";
             
             case "GET":
                 return "GET";
@@ -474,8 +579,8 @@ public class ArjunIntegration {
                 new InputStreamReader(process.getInputStream())
             );
             
-            String line;
-            while ((line = reader.readLine()) != null) {
+                String line;
+                while ((line = reader.readLine()) != null) {
                 output.add(line);
                 if (config.isEnableVerboseOutput()) {
                     api.logging().raiseDebugEvent("Arjun: " + line);
@@ -695,38 +800,69 @@ public class ArjunIntegration {
                 
             } else {
                 // ========== Unix/Linux/macOS 通用策略 ==========
-                // 策略：从arjun所在目录查找python/python3
+                // 策略：从arjun所在目录查找python/python3，并验证可执行性
                 
                 File binDir = arjunFile.getParentFile();
+                List<String> candidatePaths = new ArrayList<>();
                 
                 if (binDir != null) {
-                    // 1️⃣ 优先在同一bin目录下查找python
-                    File pythonBin = new File(binDir, "python");
-                    if (pythonBin.exists() && pythonBin.canExecute()) {
-                        api.logging().raiseDebugEvent("✅ 找到Python解释器 (同bin目录): " + pythonBin.getAbsolutePath());
-                        return pythonBin.getAbsolutePath();
-                    }
+                    // 1️⃣ 收集候选的Python解释器路径
+                    candidatePaths.add(new File(binDir, "python3").getAbsolutePath());  // 优先python3
+                    candidatePaths.add(new File(binDir, "python").getAbsolutePath());
+                    candidatePaths.add(new File(binDir, "python3.11").getAbsolutePath());
+                    candidatePaths.add(new File(binDir, "python3.10").getAbsolutePath());
+                    candidatePaths.add(new File(binDir, "python3.9").getAbsolutePath());
                     
-                    // 2️⃣ 在同一bin目录下查找python3
-                    File python3Bin = new File(binDir, "python3");
-                    if (python3Bin.exists() && python3Bin.canExecute()) {
-                        api.logging().raiseDebugEvent("✅ 找到Python解释器 (同bin目录): " + python3Bin.getAbsolutePath());
-                        return python3Bin.getAbsolutePath();
-                    }
-                    
-                    // 3️⃣ 向上查找可能的Python环境根目录（如虚拟环境）
+                    // 2️⃣ 向上查找环境根目录
                     File envRoot = binDir.getParentFile();
                     if (envRoot != null) {
-                        File envPython = new File(new File(envRoot, "bin"), "python");
-                        if (envPython.exists() && envPython.canExecute()) {
-                            api.logging().raiseDebugEvent("✅ 找到Python解释器 (环境根目录): " + envPython.getAbsolutePath());
-                            return envPython.getAbsolutePath();
-                        }
+                        File envBin = new File(envRoot, "bin");
+                        candidatePaths.add(new File(envBin, "python3").getAbsolutePath());
+                        candidatePaths.add(new File(envBin, "python").getAbsolutePath());
                     }
                 }
                 
-                // 4️⃣ 兜底：使用系统PATH中的python3
-                api.logging().raiseDebugEvent("⚠️ 未在本地找到Python，使用系统默认: python3");
+                // 3️⃣ 验证每个候选路径（存在、可执行、真实可用）
+                for (String candidatePath : candidatePaths) {
+                    File pythonFile = new File(candidatePath);
+                    
+                    api.logging().raiseDebugEvent("🔍 检查Python候选: " + candidatePath);
+                    
+                    if (!pythonFile.exists()) {
+                        api.logging().raiseDebugEvent("   ✗ 文件不存在");
+                        continue;
+                    }
+                    
+                    if (!pythonFile.canExecute()) {
+                        api.logging().raiseDebugEvent("   ✗ 文件不可执行");
+                        continue;
+                    }
+                    
+                    // ✅ 额外验证：尝试执行 python --version 确保真实可用
+                    if (verifyPythonExecutable(candidatePath)) {
+                        api.logging().raiseDebugEvent("   ✓ Python解释器验证成功: " + candidatePath);
+                        return candidatePath;
+                    } else {
+                        api.logging().raiseDebugEvent("   ✗ Python解释器执行失败");
+                    }
+                }
+                
+                // 4️⃣ 如果本地都不可用，尝试系统PATH中的python3
+                api.logging().raiseDebugEvent("⚠️ 未在本地找到可用Python，验证系统默认 python3");
+                if (verifyPythonExecutable("python3")) {
+                    api.logging().raiseDebugEvent("✓ 使用系统默认: python3");
+                    return "python3";
+                }
+                
+                // 5️⃣ 最后尝试 python
+                api.logging().raiseDebugEvent("⚠️ python3 不可用，尝试 python");
+                if (verifyPythonExecutable("python")) {
+                    api.logging().raiseDebugEvent("✓ 使用系统默认: python");
+                    return "python";
+                }
+                
+                // 6️⃣ 彻底兜底：返回 python3（让它在实际执行时报错）
+                api.logging().raiseErrorEvent("❌ 未找到任何可用的Python解释器！");
                 return "python3";
             }
             
@@ -734,6 +870,35 @@ public class ArjunIntegration {
             api.logging().raiseErrorEvent("提取Python解释器失败: " + e.getMessage());
             boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
             return isWindows ? "python" : "python3";
+        }
+    }
+    
+    /**
+     * ✅ 验证Python解释器是否真实可用
+     * 通过执行 python --version 来验证
+     */
+    private boolean verifyPythonExecutable(String pythonPath) {
+        try {
+            List<String> command = new ArrayList<>();
+            command.add(pythonPath);
+            command.add("--version");
+            
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            
+            boolean finished = process.waitFor(3, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return false;
+            }
+            
+            int exitCode = process.exitValue();
+            return exitCode == 0;
+            
+        } catch (Exception e) {
+            api.logging().raiseDebugEvent("   验证Python失败: " + e.getMessage());
+            return false;
         }
     }
     

@@ -267,6 +267,46 @@ public class UnifiedResponseConfigPanel extends JPanel {
     }
     
     /**
+     * ✅ 加载配置到UI
+     */
+    public void loadConfig(UnifiedResponseConfig config) {
+        if (config == null) {
+            return;
+        }
+        
+        this.config = config;
+        
+        // 清空现有元素
+        elementRows.clear();
+        elementsPanel.removeAll();
+        nextElementId = 1;
+        
+        // 加载元素
+        if (config.getElements() != null) {
+            for (UnifiedResponseConfig.ResponseElementConfig element : config.getElements()) {
+                // 创建元素行
+                ResponseElementRow row = new ResponseElementRow(element);
+                elementRows.add(row);
+                elementsPanel.add(row);
+                
+                // 更新ID计数器
+                if (element.getId() >= nextElementId) {
+                    nextElementId = element.getId() + 1;
+                }
+            }
+        }
+        
+        // 加载逻辑表达式
+        if (config.getConditionExpression() != null) {
+            expressionArea.setText(config.getConditionExpression());
+        }
+        
+        // 刷新UI
+        elementsPanel.revalidate();
+        elementsPanel.repaint();
+    }
+    
+    /**
      * 响应元素行组件
      */
     private class ResponseElementRow extends JPanel {

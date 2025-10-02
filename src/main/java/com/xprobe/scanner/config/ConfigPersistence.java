@@ -21,6 +21,11 @@ public class ConfigPersistence {
     
     private final ObjectMapper mapper;
     
+    // ✅ 配置缓存（避免频繁磁盘IO）
+    private volatile XProbeConfig cachedConfig;
+    private volatile long lastLoadTime = 0;
+    private static final long CACHE_TTL_MS = 5000; // 缓存5秒
+    
     public ConfigPersistence() {
         this.mapper = new ObjectMapper();
         // 美化输出，便于阅读和编辑
@@ -49,20 +54,32 @@ public class ConfigPersistence {
         
         // 序列化并保存
         mapper.writeValue(file, config);
+        
+        // ✅ 更新缓存
+        cachedConfig = config;
+        lastLoadTime = System.currentTimeMillis();
     }
     
     /**
-     * 从磁盘加载配置
+     * 从磁盘加载配置（带缓存）
      * 
      * @return 配置对象，如果文件不存在则返回默认配置
      * @throws IOException 如果加载失败
      */
     public XProbeConfig load() throws IOException {
+        // ✅ 检查缓存是否有效（5秒内）
+        long now = System.currentTimeMillis();
+        if (cachedConfig != null && (now - lastLoadTime) < CACHE_TTL_MS) {
+            return cachedConfig;
+        }
+        
         File file = new File(CONFIG_FILE);
         
         if (file.exists()) {
             try {
-                return mapper.readValue(file, XProbeConfig.class);
+                cachedConfig = mapper.readValue(file, XProbeConfig.class);
+                lastLoadTime = now;
+                return cachedConfig;
             } catch (IOException e) {
                 // 配置文件损坏，返回默认配置
                 throw new IOException("配置文件损坏: " + e.getMessage(), e);
@@ -70,7 +87,26 @@ public class ConfigPersistence {
         }
         
         // 文件不存在，返回默认配置
-        return createDefaultConfig();
+        cachedConfig = createDefaultConfig();
+        lastLoadTime = now;
+        return cachedConfig;
+    }
+    
+    /**
+     * ✅ 强制重新加载配置（跳过缓存）
+     * 用于UI保存后立即生效
+     */
+    public XProbeConfig forceReload() throws IOException {
+        cachedConfig = null;
+        return load();
+    }
+    
+    /**
+     * ✅ 使缓存失效
+     */
+    public void invalidateCache() {
+        cachedConfig = null;
+        lastLoadTime = 0;
     }
     
     /**

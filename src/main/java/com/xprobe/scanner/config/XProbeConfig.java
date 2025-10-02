@@ -44,6 +44,29 @@ public class XProbeConfig implements Serializable {
     // 被动扫描配置
     private boolean enablePassiveScan = true;  // 被动扫描总开关（默认启用）
     private Configuration.InjectionMode globalInjectionMode = Configuration.InjectionMode.BATCH;  // 全局注入模式（默认批量）
+    private ScanResultLogMode scanResultLogMode = ScanResultLogMode.MATCHED_ONLY;  // 扫描结果记录模式（默认仅命中）
+    
+    // 扫描结果记录模式枚举
+    public enum ScanResultLogMode {
+        ALL_REQUESTS("记录所有流量", "记录被动扫描发出的所有请求（包括未命中的）"),
+        MATCHED_ONLY("仅记录命中", "只记录命中规则的请求（节省内存和性能）");
+        
+        private final String displayName;
+        private final String description;
+        
+        ScanResultLogMode(String displayName, String description) {
+            this.displayName = displayName;
+            this.description = description;
+        }
+        
+        public String getDisplayName() {
+            return displayName;
+        }
+        
+        public String getDescription() {
+            return description;
+        }
+    }
     
     // 主动探测配置
     private boolean enableActiveScan = false;
@@ -199,6 +222,14 @@ public class XProbeConfig implements Serializable {
     
     public void setGlobalInjectionMode(Configuration.InjectionMode globalInjectionMode) {
         this.globalInjectionMode = globalInjectionMode;
+    }
+    
+    public ScanResultLogMode getScanResultLogMode() {
+        return scanResultLogMode != null ? scanResultLogMode : ScanResultLogMode.MATCHED_ONLY;
+    }
+    
+    public void setScanResultLogMode(ScanResultLogMode scanResultLogMode) {
+        this.scanResultLogMode = scanResultLogMode;
     }
     
     public boolean isEnableActiveScan() {
