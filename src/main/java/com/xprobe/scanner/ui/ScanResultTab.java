@@ -285,11 +285,26 @@ public class ScanResultTab {
         updateRuleFilterTimer.setRepeats(true);
         updateRuleFilterTimer.start();
         
-        // ✅ 监听表格数据变化（节流更新）
+        // ✅ 监听表格数据变化（节流更新 + 自动滚动）
         logModel.addTableModelListener(e -> {
             updateStatistics();
             // ✅ 标记需要更新，由定时器批量执行
             needsRuleFilterUpdate = true;
+            
+            // ✅ 自动滚动到最新记录（如果是新增行）
+            if (e.getType() == javax.swing.event.TableModelEvent.INSERT) {
+                SwingUtilities.invokeLater(() -> {
+                    try {
+                        int lastRow = resultTable.getRowCount() - 1;
+                        if (lastRow >= 0) {
+                            // 滚动到最后一行
+                            resultTable.scrollRectToVisible(resultTable.getCellRect(lastRow, 0, true));
+                        }
+                    } catch (Exception ex) {
+                        // 忽略滚动错误
+                    }
+                });
+            }
         });
     }
     

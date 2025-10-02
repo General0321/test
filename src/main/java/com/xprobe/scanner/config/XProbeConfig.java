@@ -311,4 +311,61 @@ public class XProbeConfig implements Serializable {
     public void setProxyList(List<String> proxyList) {
         this.proxyList = proxyList != null ? proxyList : new ArrayList<>();
     }
+    
+    /**
+     * ✅ 创建配置对象的深拷贝
+     * 
+     * 用于防御性复制，避免多线程并发修改同一个配置对象
+     * 
+     * @return 配置对象的完整副本
+     */
+    public XProbeConfig copy() {
+        XProbeConfig copy = new XProbeConfig();
+        
+        // 黑白名单配置（深拷贝）
+        copy.setWhitelist(new ArrayList<>(this.whitelist));
+        copy.setBlacklist(new ArrayList<>(this.blacklist));
+        copy.setWhitelistEnabled(this.whitelistEnabled);
+        copy.setBlacklistEnabled(this.blacklistEnabled);
+        
+        // Arjun工具配置
+        copy.setArjunPath(this.arjunPath);
+        copy.setBurpProxyAddress(this.burpProxyAddress);
+        copy.setThreadCount(this.threadCount);
+        copy.setTimeout(this.timeout);
+        copy.setCustomDictionary(new HashSet<>(this.customDictionary));
+        copy.setEnableJsonOutput(this.enableJsonOutput);
+        copy.setEnableVerboseOutput(this.enableVerboseOutput);
+        copy.setSendToBurp(this.sendToBurp);
+        
+        // 参数收集模式
+        copy.setCollectionMode(this.collectionMode);
+        
+        // 全局参数字典（深拷贝）
+        copy.setGlobalParameters(new HashSet<>(this.globalParameters));
+        
+        // 被动扫描规则（深拷贝，但Configuration对象本身不需要深拷贝，因为它们是不可变的）
+        copy.setScanConfigurations(new ArrayList<>(this.scanConfigurations));
+        
+        // 被动扫描配置
+        copy.setEnablePassiveScan(this.enablePassiveScan);
+        copy.setGlobalInjectionMode(this.globalInjectionMode);
+        copy.setScanResultLogMode(this.scanResultLogMode);
+        
+        // 主动探测配置
+        copy.setEnableActiveScan(this.enableActiveScan);
+        copy.setBruteforceInterval(this.bruteforceInterval);
+        copy.setMinParameterCount(this.minParameterCount);
+        copy.setMaxConcurrentHosts(this.maxConcurrentHosts);
+        copy.setAutoStart(this.autoStart);
+        copy.setVerboseLogging(this.verboseLogging);
+        
+        // 代理池配置
+        copy.setEnableProxyPool(this.enableProxyPool);
+        copy.setProxyTimeout(this.proxyTimeout);
+        copy.setMaxRetries(this.maxRetries);
+        copy.setProxyList(new ArrayList<>(this.proxyList));
+        
+        return copy;
+    }
 }

@@ -7,6 +7,7 @@ import com.xprobe.scanner.active.RealtimeScannerRefactored;
 import com.xprobe.scanner.active.ExternalToolConfig;
 import com.xprobe.scanner.config.Configuration;
 import com.xprobe.scanner.config.XProbeConfig;
+import com.xprobe.scanner.config.XProbeConfigManager;
 import com.xprobe.scanner.config.ConfigStorage;
 import com.xprobe.scanner.config.ConfigValidator;
 
@@ -67,17 +68,17 @@ public class UnifiedConfigTab {
     // 外部工具配置实例
     private ExternalToolConfig toolConfig;
     
-    // 配置持久化管理器
-    private com.xprobe.scanner.config.ConfigPersistence configPersistence;
+    // ✅ 配置管理器
+    private XProbeConfigManager xprobeConfigManager;
     
     public UnifiedConfigTab(MontoyaApi api, ConfigurationManager configManager, 
                            GlobalFilter globalFilter, RealtimeScannerRefactored realtimeScanner,
-                           com.xprobe.scanner.config.ConfigPersistence configPersistence) {
+                           XProbeConfigManager xprobeConfigManager) {
         this.api = api;
         this.configManager = configManager;
         this.globalFilter = globalFilter;
         this.realtimeScanner = realtimeScanner;
-        this.configPersistence = configPersistence;
+        this.xprobeConfigManager = xprobeConfigManager;  // ✅ 改为配置管理器
         this.toolConfig = new ExternalToolConfig();
         this.configStorage = new ConfigStorage(api);
         
@@ -741,12 +742,12 @@ public class UnifiedConfigTab {
             // 应用到后端组件
             applyConfigToComponents(config);
             
-            // ✅ 持久化到磁盘 (使用新的ConfigPersistence)
-            configPersistence.save(config);
+            // ✅ 持久化到磁盘 (使用配置管理器)
+            xprobeConfigManager.saveConfig(config);
             
             // 显示成功提示
             showStatus("✓ 所有配置已成功保存到磁盘！", true);
-            api.logging().raiseInfoEvent("所有配置已保存到: " + configPersistence.getConfigFilePath());
+            api.logging().raiseInfoEvent("所有配置已保存到: " + xprobeConfigManager.getConfigFilePath());
             
         } catch (Exception e) {
             showStatus("✗ 保存配置失败: " + e.getMessage(), false);
@@ -758,8 +759,15 @@ public class UnifiedConfigTab {
     /**
      * 从UI收集所有配置
      */
+    /**
+     * ✅ 从UI收集配置（防御性复制）
+     * 
+     * 获取配置副本并只更新UnifiedConfigTab管理的字段，
+     * 保留其他组件（如PassiveScanConfigTab）设置的配置
+     */
     private XProbeConfig collectConfigFromUI() {
-        XProbeConfig config = new XProbeConfig();
+        // ✅ 关键修复：从configManager获取副本，而不是创建新对象
+        XProbeConfig config = xprobeConfigManager.getConfigCopy();
         
         // 黑白名单
         config.setWhitelistEnabled(whitelistEnabledCheckBox.isSelected());
@@ -877,7 +885,7 @@ public class UnifiedConfigTab {
         
         // ✅ 创建临时的 ArjunIntegration 实例进行测试
         try {
-            com.xprobe.scanner.config.XProbeConfig xprobeConfig = configPersistence.load();
+            com.xprobe.scanner.config.XProbeConfig xprobeConfig = xprobeConfigManager.getConfig();
             
             // ✅ 从XProbeConfig提取ExternalToolConfig
             com.xprobe.scanner.active.ExternalToolConfig toolConfig = new com.xprobe.scanner.active.ExternalToolConfig();

@@ -4,11 +4,10 @@ import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
 import com.xprobe.scanner.config.Configuration;
-import com.xprobe.scanner.config.ConfigPersistence;
+import com.xprobe.scanner.config.XProbeConfigManager;
 import com.xprobe.scanner.config.RuleMatchPair;
 import com.xprobe.scanner.config.UnifiedHttpConfig;
 import com.xprobe.scanner.config.UnifiedResponseConfig;
-import com.xprobe.scanner.config.XProbeConfig;
 import com.xprobe.scanner.core.*;
 import com.xprobe.scanner.core.PayloadVariableResolver.PayloadContext;
 import com.xprobe.scanner.models.ScanResult;
@@ -30,7 +29,7 @@ import java.util.stream.Collectors;
 public class UniversalScanner extends AbstractScanner {
     
     public static final String SCANNER_TYPE = "UNIVERSAL_RULE_SCANNER";
-    private final ConfigPersistence configPersistence;
+    private final XProbeConfigManager xprobeConfigManager;  // ✅ 改为配置管理器
     
     // ✅ 内部类：配对评估结果（包含响应对象）
     private static class PairEvaluationResult {
@@ -51,9 +50,9 @@ public class UniversalScanner extends AbstractScanner {
         }
     }
     
-    public UniversalScanner(MontoyaApi api, com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner, ConfigPersistence configPersistence) {
+    public UniversalScanner(MontoyaApi api, com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner, XProbeConfigManager xprobeConfigManager) {
         super(api, realtimeScanner);
-        this.configPersistence = configPersistence;
+        this.xprobeConfigManager = xprobeConfigManager;  // ✅ 改为配置管理器
     }
     
     @Override
@@ -255,41 +254,110 @@ public class UniversalScanner extends AbstractScanner {
             return new PairEvaluationResult(false);
         }
         
-        // 3. 根据全局注入模式执行注入并检查响应
+        // 3. ✅ 收集所有需要注入的目标（参数、Header、Cookie等）
+        List<InjectionTarget> allTargets = new ArrayList<>();
+        for (UnifiedHttpConfig.HttpElementConfig injectionPoint : injectionPoints) {
+            List<InjectionTarget> targets = collectInjectionTargets(originalRequest, injectionPoint);
+            allTargets.addAll(targets);
+        }
+        
+        if (allTargets.isEmpty()) {
+            return new PairEvaluationResult(false);
+        }
+        
+        // 4. ✅ 统一去重过滤（与批量/逐个模式无关）
+        //    去重决定"打不打"，批量/逐个决定"怎么打"
+        List<InjectionTarget> validTargets = filterDuplicateTargets(allTargets, config, originalRequest);
+        
+        if (validTargets.isEmpty()) {
+            // 所有目标都被去重过滤掉了
+            return new PairEvaluationResult(false);
+        }
+        
+        // 5. 根据全局注入模式执行注入并检查响应
         Configuration.InjectionMode injectionMode = getGlobalInjectionMode();
         
         // 📌 批量模式 vs 逐个模式
         if (injectionMode == Configuration.InjectionMode.BATCH) {
-            // ========== 批量模式（BATCH）：所有匹配参数同时注入相同payload ==========
-            return evaluateBatchMode(injectionPoints, originalRequest, responseConfig, payloadResolver, pair, allEvaluations);
+            // ========== 批量模式（BATCH）：所有validTargets同时注入相同payload ==========
+            return evaluateBatchMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations);
         } else {
-            // ========== 逐个模式（INDIVIDUAL）：每次只注入一个参数 ==========
-            return evaluateIndividualMode(injectionPoints, originalRequest, responseConfig, payloadResolver, pair, allEvaluations);
+            // ========== 逐个模式（INDIVIDUAL）：每个validTarget分别注入 ==========
+            return evaluateIndividualMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations);
         }
     }
     
     /**
-     * 获取全局注入模式
+     * ✅ 去重过滤：根据配置的去重颗粒度，过滤掉已经测试过的目标
+     * 这个方法与批量/逐个模式无关，统一处理去重逻辑
+     * 
+     * ⚠️ 注意：这里只检查不标记，真正的标记在注入发送请求后进行
+     */
+    private List<InjectionTarget> filterDuplicateTargets(List<InjectionTarget> allTargets, 
+                                                         Configuration config, 
+                                                         HttpRequest originalRequest) {
+        // 获取请求上下文信息
+        String method = originalRequest.method();
+        String host = originalRequest.httpService().host();
+        String path = originalRequest.path();
+        String contentType = originalRequest.headers().stream()
+            .filter(h -> h.name().equalsIgnoreCase("Content-Type"))
+            .map(h -> h.value())
+            .findFirst()
+            .orElse(null);
+        
+        List<InjectionTarget> validTargets = new ArrayList<>();
+        
+        for (InjectionTarget target : allTargets) {
+            // ✅ 只检查是否重复，不标记（使用生成key的方式检查）
+            String dedupKey = com.xprobe.scanner.core.DeduplicationKeyGenerator.generateKey(
+                method, host, path, contentType, config, target.name
+            );
+            
+            // 检查这个key是否已经在去重集合中
+            boolean isDuplicate = realtimeScanner != null && 
+                realtimeScanner.isAlreadyProcessed(dedupKey);
+            
+            if (!isDuplicate) {
+                // 未测试过，添加到有效目标列表
+                // 同时保存dedupKey到target中，后续标记时使用
+                target.dedupKey = dedupKey;
+                validTargets.add(target);
+            }
+        }
+        
+        return validTargets;
+    }
+    
+    /**
+     * ✅ 标记目标为已测试
+     * 在真正发送请求并注入payload后调用
+     */
+    private void markTargetAsProcessed(InjectionTarget target) {
+        if (realtimeScanner != null && target.dedupKey != null) {
+            realtimeScanner.markAsProcessed(target.dedupKey);
+        }
+    }
+    
+    /**
+     * ✅ 获取全局注入模式（零开销）
      */
     private Configuration.InjectionMode getGlobalInjectionMode() {
-        try {
-            XProbeConfig xProbeConfig = configPersistence.load();
-            return xProbeConfig.getGlobalInjectionMode();
-        } catch (Exception e) {
-            api.logging().raiseErrorEvent("读取全局注入模式失败，使用默认批量模式: " + e.getMessage());
-            return Configuration.InjectionMode.BATCH;  // 默认批量模式
-        }
+        return xprobeConfigManager.getGlobalInjectionMode();
     }
     
     /**
-     * 批量模式评估：所有匹配的参数同时注入相同payload
-     * ✅ 修改：将所有评估结果保存到共享列表中
+     * 批量模式评估：所有validTargets同时注入相同payload
+     * ✅ 去重已在外部统一处理，这里只负责"怎么打"
+     * @param validTargets 已经过去重过滤的有效目标列表
      * @param allEvaluations 用于保存所有评估结果的列表（包括未命中的）
      */
-    private PairEvaluationResult evaluateBatchMode(List<UnifiedHttpConfig.HttpElementConfig> injectionPoints,
+    private PairEvaluationResult evaluateBatchMode(List<InjectionTarget> validTargets,
+                                                   List<UnifiedHttpConfig.HttpElementConfig> injectionPoints,
                                                    HttpRequest originalRequest,
                                                    UnifiedResponseConfig responseConfig,
                                                    PayloadVariableResolver payloadResolver,
+                                                   Configuration config,
                                                    RuleMatchPair pair,
                                                    List<PairEvaluationResult> allEvaluations) {
         // ✅ 保存最后一个响应（用于记录未命中的请求）
@@ -297,14 +365,24 @@ public class UniversalScanner extends AbstractScanner {
         HttpRequest lastModifiedRequest = null;
         long lastResponseTime = 0;
         
+        // 批量模式：所有validTargets都会被同时注入相同的payload
         for (UnifiedHttpConfig.HttpElementConfig injectionPoint : injectionPoints) {
             List<String> payloads = injectionPoint.getPayloads();
             if (payloads == null || payloads.isEmpty()) {
                 continue;
             }
             
-            // 获取注入点的原始值
-            String originalValue = UnifiedHttpEvaluator.getOriginalValue(originalRequest, injectionPoint);
+            // 获取属于这个injectionPoint的validTargets
+            List<InjectionTarget> pointTargets = validTargets.stream()
+                .filter(t -> t.injectionPoint == injectionPoint)
+                .collect(Collectors.toList());
+            
+            if (pointTargets.isEmpty()) {
+                continue;
+            }
+            
+            // 获取注入点的原始值（使用第一个有效目标的值）
+            String originalValue = pointTargets.get(0).originalValue;
             
             // 对每个payload进行测试
             for (String rawPayload : payloads) {
@@ -325,6 +403,12 @@ public class UniversalScanner extends AbstractScanner {
                     long startTime = System.currentTimeMillis();
                     HttpResponse response = api.http().sendRequest(modifiedRequest).response();
                     long responseTime = System.currentTimeMillis() - startTime;
+                    
+                    // ✅ 立即标记所有pointTargets为已处理（遵循颗粒度）
+                    // 批量模式：这一个请求测试了所有pointTargets
+                    for (InjectionTarget target : pointTargets) {
+                        markTargetAsProcessed(target);
+                    }
                     
                     // ✅ 安全检查：确保响应不为null
                     if (response == null) {
@@ -371,13 +455,17 @@ public class UniversalScanner extends AbstractScanner {
     }
     
     /**
-     * 逐个模式评估：每次只注入一个匹配的参数
+     * 逐个模式评估：每个validTarget分别注入
+     * ✅ 去重已在外部统一处理，这里只负责"怎么打"
+     * @param validTargets 已经过去重过滤的有效目标列表
      * @param allEvaluations 用于保存所有评估结果的列表（包括未命中的）
      */
-    private PairEvaluationResult evaluateIndividualMode(List<UnifiedHttpConfig.HttpElementConfig> injectionPoints,
+    private PairEvaluationResult evaluateIndividualMode(List<InjectionTarget> validTargets,
+                                                        List<UnifiedHttpConfig.HttpElementConfig> injectionPoints,
                                                         HttpRequest originalRequest,
                                                         UnifiedResponseConfig responseConfig,
                                                         PayloadVariableResolver payloadResolver,
+                                                        Configuration config,
                                                         RuleMatchPair pair,
                                                         List<PairEvaluationResult> allEvaluations) {
         // ✅ 保存最后一个响应（用于记录未命中的请求）
@@ -385,19 +473,19 @@ public class UniversalScanner extends AbstractScanner {
         HttpRequest lastModifiedRequest = null;
         long lastResponseTime = 0;
         
-        for (UnifiedHttpConfig.HttpElementConfig injectionPoint : injectionPoints) {
+        // 逐个模式：每个validTarget分别测试
+        for (InjectionTarget target : validTargets) {
+            UnifiedHttpConfig.HttpElementConfig injectionPoint = target.injectionPoint;
             List<String> payloads = injectionPoint.getPayloads();
             if (payloads == null || payloads.isEmpty()) {
                 continue;
             }
             
-            // 获取所有匹配的目标（参数/Header/Cookie等）
-            List<InjectionTarget> targets = collectInjectionTargets(originalRequest, injectionPoint);
+            // ✅ 标记：开始测试这个target（在第一个payload发送前标记）
+            boolean targetMarked = false;
             
-            // 对每个目标分别测试
-            for (InjectionTarget target : targets) {
-                // 对每个payload进行测试
-                for (String rawPayload : payloads) {
+            // 对每个payload进行测试
+            for (String rawPayload : payloads) {
                     try {
                         // 解析payload变量
                         Map<String, String> context = new HashMap<>();
@@ -417,6 +505,13 @@ public class UniversalScanner extends AbstractScanner {
                         long startTime = System.currentTimeMillis();
                         HttpResponse response = api.http().sendRequest(modifiedRequest).response();
                         long responseTime = System.currentTimeMillis() - startTime;
+                        
+                        // ✅ 立即标记此target为已处理（只标记一次）
+                        // 逐个模式：一旦开始测试某个target，立即标记，防止重复打
+                        if (!targetMarked) {
+                            markTargetAsProcessed(target);
+                            targetMarked = true;
+                        }
                         
                         // ✅ 安全检查：确保响应不为null
                         if (response == null) {
@@ -451,7 +546,6 @@ public class UniversalScanner extends AbstractScanner {
                         api.logging().raiseErrorEvent("❌ 逐个注入时出错: " + e.getMessage());
                     }
                 }
-            }
         }
         
         // ✅ 即使没有匹配，也返回最后一个响应（确保请求被记录）
@@ -474,7 +568,7 @@ public class UniversalScanner extends AbstractScanner {
             case PARAMETER:
                 for (var param : request.parameters()) {
                     if (shouldMatchTarget(param.name(), element)) {
-                        targets.add(new InjectionTarget(param.name(), param.value(), param.type()));
+                        targets.add(new InjectionTarget(param.name(), param.value(), param.type(), element));
                     }
                 }
                 break;
@@ -482,7 +576,7 @@ public class UniversalScanner extends AbstractScanner {
             case HEADER:
                 for (var header : request.headers()) {
                     if (shouldMatchTarget(header.name(), element)) {
-                        targets.add(new InjectionTarget(header.name(), header.value(), null));
+                        targets.add(new InjectionTarget(header.name(), header.value(), null, element));
                     }
                 }
                 break;
@@ -491,7 +585,7 @@ public class UniversalScanner extends AbstractScanner {
                 for (var param : request.parameters()) {
                     if (param.type() == burp.api.montoya.http.message.params.HttpParameterType.COOKIE &&
                         shouldMatchTarget(param.name(), element)) {
-                        targets.add(new InjectionTarget(param.name(), param.value(), param.type()));
+                        targets.add(new InjectionTarget(param.name(), param.value(), param.type(), element));
                     }
                 }
                 break;
@@ -500,7 +594,7 @@ public class UniversalScanner extends AbstractScanner {
             case PATH:
             case BODY:
                 // 这些类型不需要逐个处理，只有一个目标
-                targets.add(new InjectionTarget("", UnifiedHttpEvaluator.getOriginalValue(request, element), null));
+                targets.add(new InjectionTarget("", UnifiedHttpEvaluator.getOriginalValue(request, element), null, element));
                 break;
         }
         
@@ -603,11 +697,15 @@ public class UniversalScanner extends AbstractScanner {
         String name;
         String originalValue;
         burp.api.montoya.http.message.params.HttpParameterType paramType;
+        UnifiedHttpConfig.HttpElementConfig injectionPoint;  // ✅ 关联的注入点配置
+        String dedupKey;  // ✅ 去重key（在filterDuplicateTargets中生成）
         
-        InjectionTarget(String name, String originalValue, burp.api.montoya.http.message.params.HttpParameterType paramType) {
+        InjectionTarget(String name, String originalValue, burp.api.montoya.http.message.params.HttpParameterType paramType, UnifiedHttpConfig.HttpElementConfig injectionPoint) {
             this.name = name;
             this.originalValue = originalValue;
             this.paramType = paramType;
+            this.injectionPoint = injectionPoint;
+            this.dedupKey = null;
         }
     }
     

@@ -5,8 +5,7 @@ import burp.api.montoya.http.handler.*;
 import burp.api.montoya.http.message.params.ParsedHttpParameter;
 import com.xprobe.scanner.config.Configuration;
 import com.xprobe.scanner.config.ConfigurationManager;
-import com.xprobe.scanner.config.ConfigPersistence;
-import com.xprobe.scanner.config.XProbeConfig;
+import com.xprobe.scanner.config.XProbeConfigManager;
 import com.xprobe.scanner.models.RequestContext;
 import com.xprobe.scanner.models.ScanTask;
 
@@ -26,32 +25,26 @@ public class RequestHandler implements HttpHandler {
     private final RequestFilter requestFilter;
     private final TaskScheduler taskScheduler;
     private final com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner;
-    private final ConfigPersistence configPersistence;  // ✅ 添加
+    private final XProbeConfigManager xprobeConfigManager;  // ✅ 改为配置管理器
     
     public RequestHandler(MontoyaApi api, ConfigurationManager configManager, 
                          RequestFilter requestFilter, TaskScheduler taskScheduler, 
                          com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner,
-                         ConfigPersistence configPersistence) {
+                         XProbeConfigManager xprobeConfigManager) {
         this.api = api;
         this.configManager = configManager;
         this.requestFilter = requestFilter;
         this.taskScheduler = taskScheduler;
         this.realtimeScanner = realtimeScanner;
-        this.configPersistence = configPersistence;  // ✅ 添加
+        this.xprobeConfigManager = xprobeConfigManager;  // ✅ 改为配置管理器
     }
     
     @Override
     public RequestToBeSentAction handleHttpRequestToBeSent(HttpRequestToBeSent requestToBeSent) {
-        // 0. 检查被动扫描总开关
-        try {
-            XProbeConfig config = configPersistence.load();
-            if (!config.isEnablePassiveScan()) {
-                // 被动扫描已禁用，直接返回
-                return RequestToBeSentAction.continueWith(requestToBeSent);
-            }
-        } catch (Exception e) {
-            api.logging().raiseErrorEvent("检查被动扫描开关时出错: " + e.getMessage());
-            // 出错时默认允许扫描
+        // ✅ 0. 检查被动扫描总开关（零开销）
+        if (!xprobeConfigManager.isPassiveScanEnabled()) {
+            // 被动扫描已禁用，直接返回
+            return RequestToBeSentAction.continueWith(requestToBeSent);
         }
         
         // 1. 使用过滤器检查是否应该扫描

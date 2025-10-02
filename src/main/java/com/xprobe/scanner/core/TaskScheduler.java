@@ -1,11 +1,11 @@
 package com.xprobe.scanner.core;
 
 import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
 import com.xprobe.scanner.Logs.LogModel;
 import com.xprobe.scanner.config.Configuration;
-import com.xprobe.scanner.config.ConfigPersistence;
-import com.xprobe.scanner.config.XProbeConfig;
+import com.xprobe.scanner.config.XProbeConfigManager;
 import com.xprobe.scanner.models.ScanResult;
 import com.xprobe.scanner.models.ScanTask;
 import com.xprobe.scanner.scanners.Scanner;
@@ -24,15 +24,15 @@ public class TaskScheduler {
     private final MontoyaApi api;
     private final ScannerFactory scannerFactory;
     private final LogModel logModel;
-    private final ConfigPersistence configPersistence;  // ✅ 添加配置持久化
+    private final XProbeConfigManager xprobeConfigManager;  // ✅ 改为配置管理器
     private final ExecutorService executorService;
     private static final AtomicInteger logId = new AtomicInteger(0);
     
-    public TaskScheduler(MontoyaApi api, ScannerFactory scannerFactory, LogModel logModel, ConfigPersistence configPersistence) {
+    public TaskScheduler(MontoyaApi api, ScannerFactory scannerFactory, LogModel logModel, XProbeConfigManager xprobeConfigManager) {
         this.api = api;
         this.scannerFactory = scannerFactory;
         this.logModel = logModel;
-        this.configPersistence = configPersistence;  // ✅ 保存引用
+        this.xprobeConfigManager = xprobeConfigManager;  // ✅ 改为配置管理器
         // 创建固定大小的线程池
         this.executorService = Executors.newFixedThreadPool(
             Runtime.getRuntime().availableProcessors() * 2
@@ -47,11 +47,18 @@ public class TaskScheduler {
             return;
         }
         
-        // 使用CompletableFuture异步处理所有任务
-        CompletableFuture.runAsync(() -> {
-            // 并行处理所有扫描任务
-            tasks.parallelStream().forEach(this::executeScanTask);
-        }, executorService);
+        // ✅ 修复：使用 CompletableFuture.allOf 替代 parallelStream()
+        // 这样可以精确控制并发数量，避免使用全局 ForkJoinPool
+        List<CompletableFuture<Void>> futures = tasks.stream()
+            .map(task -> CompletableFuture.runAsync(() -> executeScanTask(task), executorService))
+            .collect(java.util.stream.Collectors.toList());
+        
+        // 等待所有任务完成，并处理异常
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+            .exceptionally(ex -> {
+                api.logging().raiseErrorEvent("Error during batch scan: " + ex.getMessage());
+                return null;
+            });
     }
     
     /**
@@ -115,11 +122,10 @@ public class TaskScheduler {
                 return;
             }
             
-            // ✅ 根据配置决定是否记录
-            XProbeConfig.ScanResultLogMode logMode = getScanResultLogMode();
+            // ✅ 根据配置决定是否记录（零开销）
             boolean shouldLog = false;
             
-            switch (logMode) {
+            switch (xprobeConfigManager.getScanResultLogMode()) {
                 case ALL_REQUESTS:
                     // 记录所有请求（无论是否命中）
                     shouldLog = true;
@@ -152,11 +158,16 @@ public class TaskScheduler {
                 // ✅ 如果命中规则，传递规则名称；否则传递null
                 String ruleName = result.isVulnerable() ? result.getScanType() : null;
                 
+                // ✅ 关键修复：从修改后的请求中提取method和url
+                HttpRequest modifiedRequest = result.getModifiedRequest();
+                String displayMethod = modifiedRequest != null ? modifiedRequest.method() : task.getContext().getMethod();
+                String displayUrl = modifiedRequest != null ? modifiedRequest.url() : task.getContext().getUrl();
+                
                 logModel.add(
                     id,
                     task.getContext().getToolSource(),
-                    task.getContext().getMethod(),
-                    task.getContext().getUrl(),
+                    displayMethod,      // ✅ 修改后的method
+                    displayUrl,         // ✅ 修改后的url
                     result.getOriginalRequest(),
                     response,
                     responseLength,
@@ -171,19 +182,6 @@ public class TaskScheduler {
         } catch (Exception e) {
             api.logging().raiseErrorEvent("❌ Error logging result: " + e.getMessage());
             e.printStackTrace();
-        }
-    }
-    
-    /**
-     * ✅ 获取扫描结果记录模式
-     */
-    private XProbeConfig.ScanResultLogMode getScanResultLogMode() {
-        try {
-            XProbeConfig config = configPersistence.load();
-            return config.getScanResultLogMode();
-        } catch (Exception e) {
-            api.logging().raiseDebugEvent("读取记录模式失败，使用默认: " + e.getMessage());
-            return XProbeConfig.ScanResultLogMode.MATCHED_ONLY;  // 默认仅命中
         }
     }
     

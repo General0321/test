@@ -6,18 +6,33 @@ import burp.api.montoya.http.message.responses.HttpResponse;
 import javax.swing.table.AbstractTableModel;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class LogModel extends AbstractTableModel {
 
     //private final List<HttpResponseEntry> log;
     private List<LogEntry> log;
     
-    // ✅ 最大容量限制（防止内存泄漏）
-    private static final int MAX_ENTRIES = 10000;
-    private static final int CLEANUP_THRESHOLD = 9000;  // 90%时触发清理
+    // ✅ 滚动窗口机制：保留最新的N条记录
+    private static final int MAX_ENTRIES = 7000;  // 最多保留7000条（滚动窗口）
 
     public LogModel() {
         this.log = new ArrayList<>();
+    }
+    
+    /**
+     * ✅ 设置最大记录数（线程安全）
+     * 使用 AtomicInteger 确保多线程环境下的可见性
+     */
+    private final AtomicInteger maxEntries = new AtomicInteger(MAX_ENTRIES);
+    
+    public void setMaxEntries(int max) {
+        int validMax = Math.max(100, Math.min(max, 10000));  // 限制在100-10000之间
+        maxEntries.set(validMax);
+    }
+    
+    public int getMaxEntries() {
+        return maxEntries.get();
     }
 
     @Override
@@ -83,28 +98,16 @@ public class LogModel extends AbstractTableModel {
     }
 
     public synchronized void add(int id, String from, String method, String url, HttpRequest originalRequest, HttpResponse originalResponse, int originalResponseLen, int originalResponseCode, long originalResponseTime, HttpRequest modifiedRequest, HttpResponse modifiedResponse, String ruleName) {
-        // ✅ 检查是否需要清理旧数据
-        if (log.size() >= CLEANUP_THRESHOLD) {
-            cleanupOldEntries();
+        // ✅ 滚动窗口机制：如果达到最大值，删除最旧的一条
+        if (log.size() >= maxEntries.get()) {  // ✅ 使用 .get() 获取当前值
+            log.remove(0);  // 删除第一条（最旧的）
+            fireTableRowsDeleted(0, 0);  // 通知表格删除了第一行
         }
         
+        // 添加新条目到末尾
         int index = log.size();
         log.add(new LogEntry(id, from, method, url, originalRequest, originalResponse, originalResponseLen, originalResponseCode, originalResponseTime, modifiedRequest, modifiedResponse, ruleName));
         fireTableRowsInserted(index, index);
-    }
-    
-    /**
-     * ✅ 清理旧条目（保留最新的50%）
-     */
-    private synchronized void cleanupOldEntries() {
-        int removeCount = log.size() - (MAX_ENTRIES / 2);
-        if (removeCount > 0) {
-            // 删除最旧的条目
-            for (int i = 0; i < removeCount; i++) {
-                log.remove(0);
-            }
-            fireTableDataChanged();
-        }
     }
     
     /**
@@ -126,7 +129,21 @@ public class LogModel extends AbstractTableModel {
      * ✅ 检查是否已满
      */
     public synchronized boolean isFull() {
-        return log.size() >= MAX_ENTRIES;
+        return log.size() >= maxEntries.get();  // ✅ 使用 .get() 获取当前值
+    }
+    
+    /**
+     * ✅ 批量添加条目（优化性能）
+     */
+    public synchronized void addAll(List<LogEntry> entries) {
+        for (LogEntry entry : entries) {
+            // 如果达到最大值，删除最旧的
+            if (log.size() >= maxEntries.get()) {  // ✅ 使用 .get() 获取当前值
+                log.remove(0);
+            }
+            log.add(entry);
+        }
+        fireTableDataChanged();  // 批量更新，只触发一次
     }
 
     public synchronized LogEntry get(int rowIndex) {

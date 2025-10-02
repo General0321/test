@@ -1,7 +1,7 @@
 package com.xprobe.scanner.scanners;
 
 import burp.api.montoya.MontoyaApi;
-import com.xprobe.scanner.config.ConfigPersistence;
+import com.xprobe.scanner.config.XProbeConfigManager;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -12,18 +12,18 @@ public class ScannerFactory {
     private final Map<String, Scanner> scanners = new HashMap<>();
     private final MontoyaApi api;
     private final com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner;
-    private final ConfigPersistence configPersistence;
+    private final XProbeConfigManager xprobeConfigManager;  // ✅ 改为配置管理器
     
-    public ScannerFactory(MontoyaApi api, com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner, ConfigPersistence configPersistence) {
+    public ScannerFactory(MontoyaApi api, com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner, XProbeConfigManager xprobeConfigManager) {
         this.api = api;
         this.realtimeScanner = realtimeScanner;
-        this.configPersistence = configPersistence;
+        this.xprobeConfigManager = xprobeConfigManager;  // ✅ 改为配置管理器
         initializeScanners();
     }
     
     private void initializeScanners() {
         // ✅ 注册UniversalScanner（通用扫描器，支持灵活的配对架构）
-        registerScanner(new UniversalScanner(api, realtimeScanner, configPersistence));
+        registerScanner(new UniversalScanner(api, realtimeScanner, xprobeConfigManager));
         
         // 注: 旧的专用扫描器（LFIScanner、SQLScanner、SSRFScanner）已移除
         // 所有扫描功能现在统一由UniversalScanner + 配对规则实现

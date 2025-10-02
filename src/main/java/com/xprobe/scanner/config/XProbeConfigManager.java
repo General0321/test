@@ -37,25 +37,68 @@ public class XProbeConfigManager {
     }
     
     /**
-     * 初始化配置管理器（启动时调用一次）
+     * ✅ 初始化配置管理器（启动时调用一次）
+     * 
+     * 如果加载失败，会使用默认配置并标记为已初始化，确保系统能正常工作
      */
     public synchronized void initialize() throws IOException {
         if (!initialized) {
-            currentConfig = persistence.load();
-            initialized = true;
+            try {
+                currentConfig = persistence.load();
+                initialized = true;
+            } catch (IOException e) {
+                // ✅ 加载失败时使用默认配置，确保系统能正常工作
+                currentConfig = new XProbeConfig();
+                initialized = true;
+                // 重新抛出异常，让调用者知道加载失败了
+                throw e;
+            }
         }
     }
     
     /**
      * ✅ 获取当前配置（快速，无IO）
      * 
-     * @return 当前配置对象（只读，不要修改！）
+     * ⚠️ 警告：返回的是内部配置对象的引用，请勿直接修改！
+     * 如果需要修改配置，请使用 getConfigCopy() 或 updateConfig()
+     * 
+     * @return 当前配置对象（只读）
      */
     public XProbeConfig getConfig() {
         if (!initialized) {
             throw new IllegalStateException("ConfigManager未初始化，请先调用initialize()");
         }
         return currentConfig;
+    }
+    
+    /**
+     * ✅ 获取配置的副本（防御性复制）
+     * 
+     * 用于需要修改配置的场景，修改副本后调用 saveConfig() 保存
+     * 
+     * @return 配置对象的深拷贝
+     */
+    public XProbeConfig getConfigCopy() {
+        return getConfig().copy();
+    }
+    
+    /**
+     * ✅ 事务式更新配置
+     * 
+     * 推荐的配置更新方式，保证原子性和线程安全
+     * 
+     * @param updater 配置更新函数
+     * @throws IOException 如果保存失败
+     */
+    public synchronized void updateConfig(java.util.function.Consumer<XProbeConfig> updater) throws IOException {
+        // 1. 创建副本
+        XProbeConfig copy = getConfigCopy();
+        
+        // 2. 应用修改
+        updater.accept(copy);
+        
+        // 3. 保存并更新（原子操作）
+        saveConfig(copy);
     }
     
     /**
@@ -115,24 +158,45 @@ public class XProbeConfigManager {
     }
     
     /**
-     * ✅ 便捷方法：检查被动扫描是否启用
+     * ✅ 便捷方法：检查被动扫描是否启用（线程安全）
+     * 
+     * @return 如果被动扫描启用返回true，未初始化时返回false（默认）
      */
     public boolean isPassiveScanEnabled() {
-        return getConfig().isEnablePassiveScan();
+        try {
+            return getConfig().isEnablePassiveScan();
+        } catch (IllegalStateException e) {
+            // 未初始化，返回默认值（禁用）
+            return false;
+        }
     }
     
     /**
-     * ✅ 便捷方法：获取全局注入模式
+     * ✅ 便捷方法：获取全局注入模式（线程安全）
+     * 
+     * @return 全局注入模式，未初始化时返回BATCH（默认）
      */
     public Configuration.InjectionMode getGlobalInjectionMode() {
-        return getConfig().getGlobalInjectionMode();
+        try {
+            return getConfig().getGlobalInjectionMode();
+        } catch (IllegalStateException e) {
+            // 未初始化，返回默认值（批量模式）
+            return Configuration.InjectionMode.BATCH;
+        }
     }
     
     /**
-     * ✅ 便捷方法：获取扫描结果记录模式
+     * ✅ 便捷方法：获取扫描结果记录模式（线程安全）
+     * 
+     * @return 扫描结果记录模式，未初始化时返回MATCHED_ONLY（默认）
      */
     public XProbeConfig.ScanResultLogMode getScanResultLogMode() {
-        return getConfig().getScanResultLogMode();
+        try {
+            return getConfig().getScanResultLogMode();
+        } catch (IllegalStateException e) {
+            // 未初始化，返回默认值（仅记录命中）
+            return XProbeConfig.ScanResultLogMode.MATCHED_ONLY;
+        }
     }
     
     /**

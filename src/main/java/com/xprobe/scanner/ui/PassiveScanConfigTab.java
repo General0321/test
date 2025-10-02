@@ -3,7 +3,7 @@ package com.xprobe.scanner.ui;
 import burp.api.montoya.MontoyaApi;
 import com.xprobe.scanner.config.Configuration;
 import com.xprobe.scanner.config.ConfigurationManager;
-import com.xprobe.scanner.config.ConfigPersistence;
+import com.xprobe.scanner.config.XProbeConfigManager;
 import com.xprobe.scanner.config.XProbeConfig;
 
 import javax.swing.*;
@@ -20,7 +20,7 @@ public class PassiveScanConfigTab {
     private JPanel panel;
     private final MontoyaApi api;
     private final ConfigurationManager configManager;
-    private final ConfigPersistence configPersistence;
+    private final XProbeConfigManager xprobeConfigManager;  // ✅ 改为配置管理器
     
     // 配置表格
     private JTable configurationTable;
@@ -39,10 +39,10 @@ public class PassiveScanConfigTab {
     private JComboBox<Configuration.InjectionMode> globalInjectionModeCombo;  // ✅ 全局注入模式
     private JComboBox<XProbeConfig.ScanResultLogMode> logModeCombo;  // ✅ 扫描结果记录模式
     
-    public PassiveScanConfigTab(MontoyaApi api, ConfigurationManager configManager, ConfigPersistence configPersistence) {
+    public PassiveScanConfigTab(MontoyaApi api, ConfigurationManager configManager, XProbeConfigManager xprobeConfigManager) {
         this.api = api;
         this.configManager = configManager;
-        this.configPersistence = configPersistence;
+        this.xprobeConfigManager = xprobeConfigManager;  // ✅ 改为配置管理器
         
         initializeComponents();
         setupLayout();
@@ -117,50 +117,90 @@ public class PassiveScanConfigTab {
         panel = new JPanel(new BorderLayout(10, 10));
         panel.setBorder(BorderFactory.createEmptyBorder(15, 15, 15, 15));
         
-        // ✅ 顶部总开关和全局设置面板
-        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 15, 8));
-        topPanel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
-        topPanel.setBackground(new Color(245, 250, 255));  // 淡蓝色背景
+        // ✅ 优化后的顶部控制面板
+        JPanel topPanel = new JPanel();
+        topPanel.setLayout(new BoxLayout(topPanel, BoxLayout.X_AXIS));
+        topPanel.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(200, 220, 240), 1),
+            BorderFactory.createEmptyBorder(10, 15, 10, 15)
+        ));
+        topPanel.setBackground(new Color(248, 252, 255));  // 更柔和的浅蓝色背景
         
-        // 添加总开关按钮
+        // 1. 被动扫描总开关（左侧，更突出）
         topPanel.add(passiveScanToggleButton);
+        topPanel.add(Box.createRigidArea(new Dimension(20, 0)));
         
-        // 添加分隔符
+        // 分隔线
         JSeparator separator1 = new JSeparator(SwingConstants.VERTICAL);
-        separator1.setPreferredSize(new Dimension(1, 30));
+        separator1.setMaximumSize(new Dimension(1, 35));
+        separator1.setForeground(new Color(200, 220, 240));
         topPanel.add(separator1);
+        topPanel.add(Box.createRigidArea(new Dimension(20, 0)));
         
-        // 添加注入模式标签和选择框
-        JLabel modeLabel = new JLabel("全局注入模式:");
-        modeLabel.setFont(modeLabel.getFont().deriveFont(Font.BOLD, 13f));
-        topPanel.add(modeLabel);
+        // 2. 全局注入模式组
+        JPanel injectionModePanel = new JPanel();
+        injectionModePanel.setLayout(new BoxLayout(injectionModePanel, BoxLayout.Y_AXIS));
+        injectionModePanel.setOpaque(false);
         
-        topPanel.add(globalInjectionModeCombo);
+        JLabel modeLabel = new JLabel("全局注入模式");
+        modeLabel.setFont(modeLabel.getFont().deriveFont(Font.BOLD, 12f));
+        modeLabel.setForeground(new Color(50, 50, 50));
         
-        // 添加说明标签
-        JLabel infoLabel = new JLabel("(单个规则可覆盖)");
-        infoLabel.setForeground(Color.GRAY);
-        infoLabel.setFont(infoLabel.getFont().deriveFont(Font.ITALIC, 11f));
-        topPanel.add(infoLabel);
+        JPanel modeValuePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        modeValuePanel.setOpaque(false);
+        modeValuePanel.add(globalInjectionModeCombo);
+        JLabel modeHint = new JLabel("各规则可单独设置");
+        modeHint.setForeground(new Color(120, 120, 120));
+        modeHint.setFont(modeHint.getFont().deriveFont(Font.PLAIN, 10f));
+        modeValuePanel.add(modeHint);
         
-        // ✅ 添加记录模式标签和选择框
-        JLabel logModeLabel = new JLabel("结果记录模式:");
-        logModeLabel.setFont(logModeLabel.getFont().deriveFont(Font.BOLD, 13f));
-        topPanel.add(logModeLabel);
+        injectionModePanel.add(modeLabel);
+        injectionModePanel.add(Box.createRigidArea(new Dimension(0, 3)));
+        injectionModePanel.add(modeValuePanel);
         
-        logModeCombo.setFont(logModeCombo.getFont().deriveFont(13f));
+        topPanel.add(injectionModePanel);
+        topPanel.add(Box.createRigidArea(new Dimension(25, 0)));
+        
+        // 分隔线
+        JSeparator separator2 = new JSeparator(SwingConstants.VERTICAL);
+        separator2.setMaximumSize(new Dimension(1, 35));
+        separator2.setForeground(new Color(200, 220, 240));
+        topPanel.add(separator2);
+        topPanel.add(Box.createRigidArea(new Dimension(20, 0)));
+        
+        // 3. 结果记录模式组
+        JPanel logModePanel = new JPanel();
+        logModePanel.setLayout(new BoxLayout(logModePanel, BoxLayout.Y_AXIS));
+        logModePanel.setOpaque(false);
+        
+        JLabel logModeLabel = new JLabel("扫描结果记录");
+        logModeLabel.setFont(logModeLabel.getFont().deriveFont(Font.BOLD, 12f));
+        logModeLabel.setForeground(new Color(50, 50, 50));
+        
+        JPanel logValuePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        logValuePanel.setOpaque(false);
+        
+        logModeCombo.setFont(logModeCombo.getFont().deriveFont(12f));
         logModeCombo.setToolTipText("<html>" +
             "<b>扫描结果记录模式</b><br>" +
             "• <b>记录所有流量</b>：记录所有被动扫描发送的请求（便于调试，内存占用高）<br>" +
             "• <b>仅记录命中</b>：只记录命中规则的请求（推荐，节省内存和性能）" +
             "</html>");
-        topPanel.add(logModeCombo);
+        logValuePanel.add(logModeCombo);
         
-        // 添加性能提示标签
-        JLabel perfLabel = new JLabel("(影响性能和内存)");
-        perfLabel.setForeground(new Color(200, 100, 0));
-        perfLabel.setFont(perfLabel.getFont().deriveFont(Font.ITALIC, 11f));
-        topPanel.add(perfLabel);
+        JLabel logHint = new JLabel("仅命中可节省资源");
+        logHint.setForeground(new Color(180, 100, 0));
+        logHint.setFont(logHint.getFont().deriveFont(Font.PLAIN, 10f));
+        logValuePanel.add(logHint);
+        
+        logModePanel.add(logModeLabel);
+        logModePanel.add(Box.createRigidArea(new Dimension(0, 3)));
+        logModePanel.add(logValuePanel);
+        
+        topPanel.add(logModePanel);
+        
+        // 右侧填充
+        topPanel.add(Box.createHorizontalGlue());
         
         panel.add(topPanel, BorderLayout.NORTH);
         
@@ -493,13 +533,14 @@ public class PassiveScanConfigTab {
     }
     
     /**
-     * ✅ 保存被动扫描开关状态
+     * ✅ 保存被动扫描开关状态（防御性复制）
      */
     private void savePassiveScanEnabled() {
         try {
-            XProbeConfig config = configPersistence.load();
+            // ✅ 获取配置副本（防止并发修改）
+            XProbeConfig config = xprobeConfigManager.getConfigCopy();
             config.setEnablePassiveScan(passiveScanToggleButton.isSelected());
-            configPersistence.save(config);
+            xprobeConfigManager.saveConfig(config);
             
             if (passiveScanToggleButton.isSelected()) {
                 api.logging().raiseInfoEvent("✅ 被动扫描已启用");
@@ -507,51 +548,83 @@ public class PassiveScanConfigTab {
                 api.logging().raiseInfoEvent("❌ 被动扫描已禁用");
             }
         } catch (Exception e) {
-            api.logging().raiseErrorEvent("保存被动扫描开关状态失败: " + e.getMessage());
+            // ✅ 保存失败：回滚UI状态
+            SwingUtilities.invokeLater(() -> {
+                passiveScanToggleButton.setSelected(!passiveScanToggleButton.isSelected());
+                updateToggleButtonAppearance();
+            });
+            
+            // ✅ 显示错误对话框
+            JOptionPane.showMessageDialog(
+                panel,
+                "配置保存失败：" + e.getMessage() + "\n请检查磁盘空间和文件权限。",
+                "保存失败",
+                JOptionPane.ERROR_MESSAGE
+            );
+            
+            api.logging().raiseErrorEvent("❌ 保存被动扫描开关失败: " + e.getMessage());
         }
     }
     
     /**
-     * ✅ 保存全局注入模式
+     * ✅ 保存全局注入模式（防御性复制）
      */
     private void saveGlobalInjectionMode() {
+        Configuration.InjectionMode selectedMode = (Configuration.InjectionMode) globalInjectionModeCombo.getSelectedItem();
         try {
-            XProbeConfig config = configPersistence.load();
-            Configuration.InjectionMode mode = (Configuration.InjectionMode) globalInjectionModeCombo.getSelectedItem();
-            config.setGlobalInjectionMode(mode);
-            configPersistence.save(config);
+            // ✅ 获取配置副本（防止并发修改）
+            XProbeConfig config = xprobeConfigManager.getConfigCopy();
+            config.setGlobalInjectionMode(selectedMode);
+            xprobeConfigManager.saveConfig(config);
             
-            api.logging().raiseInfoEvent("全局注入模式已设置为: " + mode.getDisplayName());
+            api.logging().raiseInfoEvent("✅ 全局注入模式已设置为: " + selectedMode.getDisplayName());
         } catch (Exception e) {
-            api.logging().raiseErrorEvent("保存全局注入模式失败: " + e.getMessage());
+            // ✅ 显示错误对话框
+            JOptionPane.showMessageDialog(
+                panel,
+                "配置保存失败：" + e.getMessage() + "\n请检查磁盘空间和文件权限。",
+                "保存失败",
+                JOptionPane.ERROR_MESSAGE
+            );
+            
+            api.logging().raiseErrorEvent("❌ 保存全局注入模式失败: " + e.getMessage());
         }
     }
     
     /**
-     * ✅ 保存扫描结果记录模式
+     * ✅ 保存扫描结果记录模式（防御性复制）
      */
     private void saveLogMode() {
+        XProbeConfig.ScanResultLogMode selectedMode = (XProbeConfig.ScanResultLogMode) logModeCombo.getSelectedItem();
         try {
-            XProbeConfig config = configPersistence.load();
-            XProbeConfig.ScanResultLogMode mode = (XProbeConfig.ScanResultLogMode) logModeCombo.getSelectedItem();
-            config.setScanResultLogMode(mode);
-            configPersistence.save(config);
+            // ✅ 获取配置副本（防止并发修改）
+            XProbeConfig config = xprobeConfigManager.getConfigCopy();
+            config.setScanResultLogMode(selectedMode);
+            xprobeConfigManager.saveConfig(config);
             
-            String performanceNote = mode == XProbeConfig.ScanResultLogMode.ALL_REQUESTS 
+            String performanceNote = selectedMode == XProbeConfig.ScanResultLogMode.ALL_REQUESTS 
                 ? " ⚠️ 注意：记录所有流量会增加内存和性能开销" 
                 : "";
-            api.logging().raiseInfoEvent("扫描结果记录模式已更新: " + mode.getDisplayName() + performanceNote);
-        } catch (Exception ex) {
-            api.logging().raiseErrorEvent("保存记录模式失败: " + ex.getMessage());
+            api.logging().raiseInfoEvent("✅ 扫描结果记录模式已更新: " + selectedMode.getDisplayName() + performanceNote);
+        } catch (Exception e) {
+            // ✅ 显示错误对话框
+            JOptionPane.showMessageDialog(
+                panel,
+                "配置保存失败：" + e.getMessage() + "\n请检查磁盘空间和文件权限。",
+                "保存失败",
+                JOptionPane.ERROR_MESSAGE
+            );
+            
+            api.logging().raiseErrorEvent("❌ 保存记录模式失败: " + e.getMessage());
         }
     }
     
     /**
-     * ✅ 加载保存的设置
+     * ✅ 加载保存的设置（使用配置管理器，零开销）
      */
     public void loadSavedSettings() {
         try {
-            XProbeConfig config = configPersistence.load();
+            XProbeConfig config = xprobeConfigManager.getConfig();
             
             // 加载被动扫描开关状态
             passiveScanToggleButton.setSelected(config.isEnablePassiveScan());

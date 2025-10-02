@@ -8,6 +8,7 @@ import com.xprobe.scanner.config.Configuration;
 import com.xprobe.scanner.config.ConfigurationManager;
 import com.xprobe.scanner.config.ConfigPersistence;
 import com.xprobe.scanner.config.XProbeConfig;
+import com.xprobe.scanner.config.XProbeConfigManager;
 import com.xprobe.scanner.core.GlobalFilter;
 import com.xprobe.scanner.core.RequestFilter;
 import com.xprobe.scanner.core.RequestHandler;
@@ -27,24 +28,36 @@ import java.util.ArrayList;
 
 public class XProbe implements BurpExtension {
     private TaskScheduler taskScheduler;
-    private ConfigPersistence configPersistence;
+    private XProbeConfigManager xprobeConfigManager;
     
     @Override
     public void initialize(MontoyaApi api) {
         api.extension().setName("XProbe - Passive Security Scanner");
 
-        // 初始化配置持久化
-        configPersistence = new ConfigPersistence();
+        // ✅ 初始化配置管理器（单例模式）
+        xprobeConfigManager = new XProbeConfigManager(new ConfigPersistence());
         
-        // 加载配置
+        // ✅ 初始化配置（加载一次到内存）
         XProbeConfig config;
         try {
-            config = configPersistence.load();
-            api.logging().raiseInfoEvent("✅ 配置加载成功: " + configPersistence.getConfigFilePath());
+            xprobeConfigManager.initialize();
+            api.logging().raiseInfoEvent("✅ 配置管理器初始化成功: " + xprobeConfigManager.getConfigFilePath());
         } catch (Exception e) {
             api.logging().raiseErrorEvent("⚠️ 配置加载失败，使用默认配置: " + e.getMessage());
-            config = new XProbeConfig();
+            
+            // ✅ 关键修复：保存默认配置到configManager
+            try {
+                XProbeConfig defaultConfig = new XProbeConfig();
+                xprobeConfigManager.saveConfig(defaultConfig);
+                api.logging().raiseInfoEvent("✅ 默认配置已保存到: " + xprobeConfigManager.getConfigFilePath());
+            } catch (Exception ex) {
+                api.logging().raiseErrorEvent("❌ 致命错误：无法保存默认配置: " + ex.getMessage());
+                api.logging().raiseErrorEvent("❌ 插件可能无法正常工作，请检查磁盘空间和权限");
+            }
         }
+        
+        // ✅ 获取配置（现在一定有配置了）
+        config = xprobeConfigManager.getConfig();
 
         // 创建核心组件
         LogModel logModel = new LogModel();
@@ -103,19 +116,19 @@ public class XProbe implements BurpExtension {
         toolConfig.setSendToBurp(config.isSendToBurp());
         api.logging().raiseInfoEvent("✅ Arjun配置已应用: " + config.getArjunPath());
         
-        // 创建ScannerFactory (需要RealtimeScanner和ConfigPersistence以支持全局注入模式)
-        ScannerFactory scannerFactory = new ScannerFactory(api, realtimeScanner, configPersistence);
+        // ✅ 创建ScannerFactory (需要RealtimeScanner和XProbeConfigManager以支持全局注入模式)
+        ScannerFactory scannerFactory = new ScannerFactory(api, realtimeScanner, xprobeConfigManager);
         
-        // 创建任务调度器
-        taskScheduler = new TaskScheduler(api, scannerFactory, logModel, configPersistence);
+        // ✅ 创建任务调度器
+        taskScheduler = new TaskScheduler(api, scannerFactory, logModel, xprobeConfigManager);
         
-        // 创建请求处理器 (需要RealtimeScanner)
-        RequestHandler requestHandler = new RequestHandler(api, configManager, requestFilter, taskScheduler, realtimeScanner, configPersistence);
+        // ✅ 创建请求处理器 (需要RealtimeScanner)
+        RequestHandler requestHandler = new RequestHandler(api, configManager, requestFilter, taskScheduler, realtimeScanner, xprobeConfigManager);
         
         // 注册HTTP处理器
         api.http().registerHttpHandler(requestHandler);
 
-        // 创建并注册UI界面（传入 realtimeScanner 和 configPersistence）
+        // ✅ 创建并注册UI界面（传入 realtimeScanner 和 xprobeConfigManager）
         api.userInterface().registerSuiteTab("XProbe", constructMainTab(api, logModel, configManager, requestFilter, globalFilter, realtimeScanner));
         
         // 注册扩展卸载处理器
@@ -144,7 +157,7 @@ public class XProbe implements BurpExtension {
 
         // 3. 被动扫描规则 - 核心功能
         com.xprobe.scanner.ui.PassiveScanConfigTab passiveScanTab = 
-            new com.xprobe.scanner.ui.PassiveScanConfigTab(api, configManager, configPersistence);
+            new com.xprobe.scanner.ui.PassiveScanConfigTab(api, configManager, xprobeConfigManager);
         tabbedPane.addTab("🔍 被动扫描规则", passiveScanTab.getComponent());
 
         // 4. 主动探测 - 辅助功能（参数挖掘）
@@ -152,16 +165,16 @@ public class XProbe implements BurpExtension {
         tabbedPane.addTab("✨ 主动探测", activeProbeTab.getComponent());
 
         // 5. 配置中心 - 全局配置（黑白名单、工具配置等）
-        UnifiedConfigTab unifiedConfigTab = new UnifiedConfigTab(api, configManager, globalFilter, realtimeScanner, configPersistence);
+        UnifiedConfigTab unifiedConfigTab = new UnifiedConfigTab(api, configManager, globalFilter, realtimeScanner, xprobeConfigManager);
         tabbedPane.addTab("⚙️ 配置中心", unifiedConfigTab.getComponent());
 
         return tabbedPane;
     }
     
     /**
-     * 获取配置持久化管理器
+     * ✅ 获取配置管理器（新架构）
      */
-    public ConfigPersistence getConfigPersistence() {
-        return configPersistence;
+    public XProbeConfigManager getConfigManager() {
+        return xprobeConfigManager;
     }
 }

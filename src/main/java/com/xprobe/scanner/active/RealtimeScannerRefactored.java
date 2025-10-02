@@ -760,6 +760,27 @@ public class RealtimeScannerRefactored {
     }
     
     /**
+     * ✅ 只检查是否已处理（不标记）
+     * 用于过滤阶段，决定"打不打"
+     * 
+     * @param key 去重key
+     * @return true=已处理（跳过），false=未处理（继续）
+     */
+    public boolean isAlreadyProcessed(String key) {
+        return passiveScanProcessedKeys.contains(key);
+    }
+    
+    /**
+     * ✅ 标记为已处理
+     * 用于注入阶段，每打完一个目标后调用
+     * 
+     * @param key 去重key
+     */
+    public void markAsProcessed(String key) {
+        passiveScanProcessedKeys.add(key);
+    }
+    
+    /**
      * 检查并标记被动扫描已处理（旧版：向后兼容）
      * 
      * @deprecated 使用 checkAndMarkPassiveScanProcessed(method, host, path, contentType, targetIdentifier, config)
