@@ -119,14 +119,25 @@ public class UnifiedResponseEvaluator {
      * 评估响应体
      */
     private static boolean evaluateBody(HttpResponse response, MatchConfig config) {
-        if (response == null) return false;
+        if (response == null) {
+            System.out.println("🔍 [响应体匹配] 响应为null，返回false");
+            return false;
+        }
         
         String body = response.bodyToString();
         if (body == null) {
             body = "";
         }
         
-        return matchTextValues(body, config);
+        // ✅ 调试日志
+        String bodyPreview = body.length() > 200 ? body.substring(0, 200) + "..." : body;
+        System.out.println("🔍 [响应体匹配] 响应体长度: " + body.length() + ", 预览: " + bodyPreview);
+        System.out.println("🔍 [响应体匹配] 匹配配置: 类型=" + config.getMatchType() + ", 值=" + config.getValues());
+        
+        boolean result = matchTextValues(body, config);
+        System.out.println("🔍 [响应体匹配] 匹配结果: " + (result ? "✅ 成功" : "❌ 失败"));
+        
+        return result;
     }
     
     /**

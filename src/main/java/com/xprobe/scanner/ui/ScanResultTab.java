@@ -285,19 +285,32 @@ public class ScanResultTab {
         updateRuleFilterTimer.setRepeats(true);
         updateRuleFilterTimer.start();
         
-        // ✅ 监听表格数据变化（节流更新 + 自动滚动）
+        // ✅ 监听表格数据变化（节流更新 + 智能滚动）
         logModel.addTableModelListener(e -> {
             updateStatistics();
             // ✅ 标记需要更新，由定时器批量执行
             needsRuleFilterUpdate = true;
             
-            // ✅ 自动滚动到最新记录（如果是新增行）
+            // ✅ 智能滚动：只有当用户在底部时，才自动滚动到最新记录
             if (e.getType() == javax.swing.event.TableModelEvent.INSERT) {
                 SwingUtilities.invokeLater(() -> {
                     try {
                         int lastRow = resultTable.getRowCount() - 1;
-                        if (lastRow >= 0) {
-                            // 滚动到最后一行
+                        if (lastRow < 0) return;
+                        
+                        // 获取滚动面板
+                        JScrollPane scrollPane = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, resultTable);
+                        if (scrollPane == null) return;
+                        
+                        JViewport viewport = scrollPane.getViewport();
+                        Rectangle viewRect = viewport.getViewRect();
+                        Rectangle tableRect = resultTable.getBounds();
+                        
+                        // ✅ 判断用户是否在底部附近（距离底部小于100像素）
+                        boolean isNearBottom = (viewRect.y + viewRect.height) >= (tableRect.height - 100);
+                        
+                        // ✅ 只有在底部时，才自动滚动
+                        if (isNearBottom) {
                             resultTable.scrollRectToVisible(resultTable.getCellRect(lastRow, 0, true));
                         }
                     } catch (Exception ex) {

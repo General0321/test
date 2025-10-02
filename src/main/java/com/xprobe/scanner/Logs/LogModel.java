@@ -68,6 +68,27 @@ public class LogModel extends AbstractTableModel {
                 return "";
         }
     }
+    
+    /**
+     * ✅ 重写此方法，让表格按正确类型排序
+     * - 第0列（序号）：Integer 类型 → 数字排序
+     * - 第4列（响应码）：Integer 类型 → 数字排序
+     * - 第5列（响应长度）：Integer 类型 → 数字排序
+     * - 其他列：String 类型 → 字符串排序
+     */
+    @Override
+    public Class<?> getColumnClass(int columnIndex) {
+        switch (columnIndex) {
+            case 0:  // 序号
+                return Integer.class;
+            case 4:  // 响应码
+                return Integer.class;
+            case 5:  // 响应长度
+                return Integer.class;
+            default:
+                return String.class;
+        }
+    }
 
     @Override
     public synchronized Object getValueAt(int rowIndex, int columnIndex) {

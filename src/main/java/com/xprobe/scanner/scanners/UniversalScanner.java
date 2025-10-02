@@ -158,8 +158,14 @@ public class UniversalScanner extends AbstractScanner {
                 }
             }
             
+            // ✅ 调试日志：配对结果
+            System.out.println("🔍 [最终评估] 规则: " + config.getCustomLabel());
+            System.out.println("🔍 [最终评估] 配对结果: " + pairResults);
+            System.out.println("🔍 [最终评估] 配对表达式: " + (config.getPairExpression() != null && !config.getPairExpression().isEmpty() ? config.getPairExpression() : "默认(AND)"));
+            
             // 根据配对表达式评估最终结果
             boolean finalResult = evaluatePairExpression(config.getPairExpression(), pairResults);
+            System.out.println("🔍 [最终评估] 最终结果: " + (finalResult ? "✅ 漏洞" : "❌ 未命中"));
             
             // ✅ 为所有发送的请求创建结果条目
             if (!allEvaluations.isEmpty()) {
@@ -178,6 +184,8 @@ public class UniversalScanner extends AbstractScanner {
                 
                 if (finalResult) {
                     api.logging().raiseInfoEvent("✓ 规则 " + config.getCustomLabel() + " 检测到漏洞！");
+                } else {
+                    System.out.println("⚠️ [最终评估] 虽然有评估结果，但finalResult=false，未记录为漏洞");
                 }
                 
                 // 其余的请求作为额外条目（标记为未命中）
@@ -425,19 +433,21 @@ public class UniversalScanner extends AbstractScanner {
                     PairEvaluationResult evalResult = new PairEvaluationResult(false, response, modifiedRequest, responseTime);
                     allEvaluations.add(evalResult);
                     
-                    // 评估响应
-                    boolean responseMatched = UnifiedResponseEvaluator.evaluate(
-                        response, responseConfig, payloadContext, responseTime
+                // 评估响应
+                System.out.println("🔍 [批量注入] 开始评估响应，配对ID: " + pair.getId());
+                boolean responseMatched = UnifiedResponseEvaluator.evaluate(
+                    response, responseConfig, payloadContext, responseTime
+                );
+                System.out.println("🔍 [批量注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
+                
+                if (responseMatched) {
+                    api.logging().raiseDebugEvent(
+                        "配对 [" + pair.getId() + "] 批量注入匹配: " + 
+                        injectionPoint.getType().getDisplayName() + 
+                        ", Payload: " + resolvedPayload.substring(0, Math.min(50, resolvedPayload.length()))
                     );
-                    
-                    if (responseMatched) {
-                        api.logging().raiseDebugEvent(
-                            "配对 [" + pair.getId() + "] 批量注入匹配: " + 
-                            injectionPoint.getType().getDisplayName() + 
-                            ", Payload: " + resolvedPayload.substring(0, Math.min(50, resolvedPayload.length()))
-                        );
-                        return new PairEvaluationResult(true, response, modifiedRequest, responseTime);
-                    }
+                    return new PairEvaluationResult(true, response, modifiedRequest, responseTime);
+                }
                     
                 } catch (Exception e) {
                     api.logging().raiseErrorEvent("❌ 批量注入时出错: " + e.getMessage());
@@ -529,9 +539,11 @@ public class UniversalScanner extends AbstractScanner {
                         allEvaluations.add(evalResult);
                         
                         // 评估响应
+                        System.out.println("🔍 [逐个注入] 开始评估响应，配对ID: " + pair.getId() + ", 目标: " + target.name);
                         boolean responseMatched = UnifiedResponseEvaluator.evaluate(
                             response, responseConfig, payloadContext, responseTime
                         );
+                        System.out.println("🔍 [逐个注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
                         
                         if (responseMatched) {
                             api.logging().raiseDebugEvent(
