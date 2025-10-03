@@ -83,8 +83,6 @@ public class GlobalFilter {
         return true; // 通过所有检查，可以处理
     }
     
-    // 已删除 matchesPattern 方法，使用编译好的 Pattern 对象提高性能
-    
     /**
      * 更新白名单
      */

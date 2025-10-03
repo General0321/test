@@ -4,7 +4,6 @@ import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
 import com.xprobe.scanner.Logs.LogModel;
-import com.xprobe.scanner.config.Configuration;
 import com.xprobe.scanner.config.XProbeConfigManager;
 import com.xprobe.scanner.models.ScanResult;
 import com.xprobe.scanner.models.ScanTask;
@@ -15,6 +14,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -53,11 +53,15 @@ public class TaskScheduler {
             .map(task -> CompletableFuture.runAsync(() -> executeScanTask(task), executorService))
             .collect(java.util.stream.Collectors.toList());
         
-        // 等待所有任务完成，并处理异常
+        // ✅ 修复：使用 whenComplete 处理异常，并记录完成信息
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-            .exceptionally(ex -> {
-                api.logging().raiseErrorEvent("Error during batch scan: " + ex.getMessage());
-                return null;
+            .whenComplete((result, throwable) -> {
+                if (throwable != null) {
+                    api.logging().raiseErrorEvent("批量扫描时发生错误: " + throwable.getMessage());
+                    throwable.printStackTrace();
+                } else {
+                    api.logging().raiseDebugEvent("批量扫描完成: " + tasks.size() + " 个任务");
+                }
             });
     }
     
@@ -187,9 +191,33 @@ public class TaskScheduler {
     
     /**
      * 关闭任务调度器
+     * ✅ 修复：正确等待任务完成，避免资源泄漏
      */
     public void shutdown() {
+        api.logging().raiseInfoEvent("开始关闭任务调度器...");
         executorService.shutdown();
-        api.logging().raiseInfoEvent("Task scheduler shutdown");
+        
+        try {
+            // 等待最多30秒让任务完成
+            if (!executorService.awaitTermination(30, TimeUnit.SECONDS)) {
+                api.logging().raiseInfoEvent("任务未在30秒内完成，强制终止...");
+                
+                // 强制停止所有任务
+                List<Runnable> pendingTasks = executorService.shutdownNow();
+                api.logging().raiseInfoEvent("强制终止了 " + pendingTasks.size() + " 个待执行任务");
+                
+                // 再等待5秒确保线程停止
+                if (!executorService.awaitTermination(5, TimeUnit.SECONDS)) {
+                    api.logging().raiseErrorEvent("⚠️ 部分线程可能未正确关闭！");
+                }
+            }
+            
+            api.logging().raiseInfoEvent("✅ 任务调度器已安全关闭");
+            
+        } catch (InterruptedException e) {
+            api.logging().raiseErrorEvent("关闭任务调度器时被中断");
+            executorService.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 }

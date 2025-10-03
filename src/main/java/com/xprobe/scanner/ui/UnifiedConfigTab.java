@@ -4,7 +4,6 @@ import burp.api.montoya.MontoyaApi;
 import com.xprobe.scanner.config.ConfigurationManager;
 import com.xprobe.scanner.core.GlobalFilter;
 import com.xprobe.scanner.active.RealtimeScannerRefactored;
-import com.xprobe.scanner.active.ExternalToolConfig;
 import com.xprobe.scanner.config.Configuration;
 import com.xprobe.scanner.config.XProbeConfig;
 import com.xprobe.scanner.config.XProbeConfigManager;
@@ -30,6 +29,7 @@ public class UnifiedConfigTab {
     private final GlobalFilter globalFilter;
     private final RealtimeScannerRefactored realtimeScanner;
     private final ConfigStorage configStorage;
+    private com.xprobe.scanner.active.arjun.ArjunService arjunService;  // Arjun服务（可选）
     
     // 状态标签
     private JLabel statusLabel;
@@ -40,16 +40,6 @@ public class UnifiedConfigTab {
     private JCheckBox blacklistEnabledCheckBox;
     private JTextArea whitelistTextArea;
     private JTextArea blacklistTextArea;
-    
-    // 外部工具配置组件
-    private JTextField arjunPathField;
-    private JTextField burpProxyField;
-    private JSpinner threadCountSpinner;
-    private JSpinner timeoutSpinner;
-    private JTextArea customDictArea;
-    private JCheckBox sendToBurpCheckBox;
-    private JCheckBox jsonOutputCheckBox;
-    private JCheckBox verboseOutputCheckBox;
     
     // 主动探测配置组件
     private JSpinner bruteforceIntervalSpinner;
@@ -65,8 +55,16 @@ public class UnifiedConfigTab {
     private JSpinner proxyTimeoutSpinner;
     private JSpinner maxRetriesSpinner;
     
-    // 外部工具配置实例
-    private ExternalToolConfig toolConfig;
+    // Java原生Arjun配置组件
+    private JCheckBox arjunEnabledCheckBox;
+    private JSpinner arjunChunkSizeSpinner;
+    private JSpinner arjunTimeoutSpinner;
+    private JTextArea arjunCustomDictArea;
+    private JLabel arjunDictCountLabel;
+    
+    // Arjun实时模式配置组件
+    private JSpinner arjunRealtimeIntervalSpinner;
+    private JSpinner arjunRealtimeThresholdSpinner;
     
     // ✅ 配置管理器
     private XProbeConfigManager xprobeConfigManager;
@@ -79,7 +77,6 @@ public class UnifiedConfigTab {
         this.globalFilter = globalFilter;
         this.realtimeScanner = realtimeScanner;
         this.xprobeConfigManager = xprobeConfigManager;  // ✅ 改为配置管理器
-        this.toolConfig = new ExternalToolConfig();
         this.configStorage = new ConfigStorage(api);
         
         initializeComponents();
@@ -102,21 +99,9 @@ public class UnifiedConfigTab {
         whitelistTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         blacklistTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         
-        // 外部工具组件
-        arjunPathField = new JTextField(30);
-        burpProxyField = new JTextField("127.0.0.1:8080", 20);
-        threadCountSpinner = new JSpinner(new SpinnerNumberModel(5, 1, 50, 1));
-        timeoutSpinner = new JSpinner(new SpinnerNumberModel(15, 5, 300, 5));
-        customDictArea = new JTextArea(10, 40);
-        customDictArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        sendToBurpCheckBox = new JCheckBox("发送结果到Burp (使用 -oB)");
-        sendToBurpCheckBox.setSelected(true);
-        jsonOutputCheckBox = new JCheckBox("启用JSON输出");
-        verboseOutputCheckBox = new JCheckBox("启用详细输出");
-        
         // 主动探测组件
         bruteforceIntervalSpinner = new JSpinner(new SpinnerNumberModel(300, 60, 3600, 60));
-        minParameterCountSpinner = new JSpinner(new SpinnerNumberModel(5, 1, 100, 1));
+        minParameterCountSpinner = new JSpinner(new SpinnerNumberModel(15, 1, 100, 1));  // ✅ 默认15
         maxConcurrentHostsSpinner = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
         autoStartCheckBox = new JCheckBox("🚀 自动启动");
         verboseLoggingCheckBox = new JCheckBox("📝 详细日志");
@@ -128,6 +113,22 @@ public class UnifiedConfigTab {
         enableProxyPoolCheckBox = new JCheckBox("启用代理池");
         proxyTimeoutSpinner = new JSpinner(new SpinnerNumberModel(10, 1, 60, 1));
         maxRetriesSpinner = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
+        
+        // Java原生Arjun配置组件
+        arjunEnabledCheckBox = new JCheckBox("✅ 启用Arjun参数发现");
+        arjunEnabledCheckBox.setSelected(true);
+        arjunChunkSizeSpinner = new JSpinner(new SpinnerNumberModel(250, 10, 1000, 10));
+        arjunTimeoutSpinner = new JSpinner(new SpinnerNumberModel(15, 5, 60, 5));
+        arjunCustomDictArea = new JTextArea(8, 40);
+        arjunCustomDictArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        arjunCustomDictArea.setLineWrap(false);
+        arjunDictCountLabel = new JLabel("字典: 0 个参数");
+        arjunDictCountLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        arjunDictCountLabel.setForeground(Color.GRAY);
+        
+        // Arjun实时模式配置组件
+        arjunRealtimeIntervalSpinner = new JSpinner(new SpinnerNumberModel(300, 60, 3600, 30));  // 60秒-60分钟，步长30秒
+        arjunRealtimeThresholdSpinner = new JSpinner(new SpinnerNumberModel(15, 1, 100, 5));  // 1-100个，步长5
     }
     
     private void setupLayout() {
@@ -342,7 +343,7 @@ public class UnifiedConfigTab {
         arjunContent.add(minParameterCountSpinner, gbc);
         
         gbc.gridx = 2; gbc.weightx = 0.7;
-        JLabel minParamUnit = new JLabel("个 (触发Arjun探测所需的最少参数数)");
+        JLabel minParamUnit = new JLabel("个 (智能触发阈值：达到此数量自动触发Arjun)");
         minParamUnit.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
         minParamUnit.setForeground(Color.GRAY);
         arjunContent.add(minParamUnit, gbc);
@@ -367,117 +368,195 @@ public class UnifiedConfigTab {
         configContainer.add(arjunConfigPanel);
         configContainer.add(Box.createVerticalStrut(10));
         
-        // 3. Arjun工具配置组
-        JPanel toolConfigPanel = createGroupPanel("🔧 Arjun工具配置", new Color(230, 126, 34));
-        JPanel toolContent = new JPanel(new GridBagLayout());
-        gbc = new GridBagConstraints();
-        gbc.insets = new Insets(5, 10, 5, 10);
-        gbc.anchor = GridBagConstraints.WEST;
-        gbc.fill = GridBagConstraints.HORIZONTAL;
+        // 2.5. Java原生Arjun配置组
+        JPanel javaArjunConfigPanel = createGroupPanel("🔍 Java原生Arjun配置", new Color(52, 152, 219));
+        JPanel javaArjunContent = new JPanel(new GridBagLayout());
+        GridBagConstraints gbc2 = new GridBagConstraints();
+        gbc2.insets = new Insets(5, 10, 5, 10);
+        gbc2.anchor = GridBagConstraints.WEST;
+        gbc2.fill = GridBagConstraints.HORIZONTAL;
         
-        // Arjun路径
-        gbc.gridx = 0; gbc.gridy = 0; gbc.weightx = 0;
-        JLabel arjunPathLabel = new JLabel("🔨 Arjun路径:");
-        arjunPathLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        toolContent.add(arjunPathLabel, gbc);
+        // 说明提示
+        gbc2.gridx = 0; gbc2.gridy = 0; gbc2.gridwidth = 3; gbc2.weightx = 1.0;
+        JPanel javaArjunHintPanel = new JPanel(new BorderLayout(5, 0));
+        javaArjunHintPanel.setBackground(new Color(232, 246, 253));
+        javaArjunHintPanel.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(52, 152, 219), 1),
+            new EmptyBorder(8, 10, 8, 10)
+        ));
         
-        gbc.gridx = 1; gbc.weightx = 0.7;
-        arjunPathField.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        toolContent.add(arjunPathField, gbc);
+        JLabel javaArjunHintIcon = new JLabel("💡");
+        javaArjunHintIcon.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 14));
         
-        gbc.gridx = 2; gbc.weightx = 0;
-        JButton browseButton = new JButton("📁");
-        browseButton.setToolTipText("浏览选择Arjun路径");
-        browseButton.addActionListener(e -> browseArjunPath());
-        toolContent.add(browseButton, gbc);
+        JTextArea javaArjunHintText = new JTextArea(
+            "Java原生Arjun参数发现引擎（无需外部工具，跨平台）\n" +
+            "• 支持GET/POST/POST-JSON • 内置152个特殊参数 • 动态稳定性检测 • 自动去重"
+        );
+        javaArjunHintText.setEditable(false);
+        javaArjunHintText.setBackground(new Color(232, 246, 253));
+        javaArjunHintText.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
+        javaArjunHintText.setForeground(new Color(21, 67, 96));
+        javaArjunHintText.setLineWrap(true);
+        javaArjunHintText.setWrapStyleWord(true);
         
-        // Burp代理地址
-        gbc.gridx = 0; gbc.gridy = 1; gbc.weightx = 0;
-        JLabel proxyLabel = new JLabel("🌐 Burp代理:");
-        proxyLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        toolContent.add(proxyLabel, gbc);
+        javaArjunHintPanel.add(javaArjunHintIcon, BorderLayout.WEST);
+        javaArjunHintPanel.add(javaArjunHintText, BorderLayout.CENTER);
+        javaArjunContent.add(javaArjunHintPanel, gbc2);
+        gbc2.gridwidth = 1;
         
-        gbc.gridx = 1; gbc.weightx = 0.7; gbc.gridwidth = 2;
-        burpProxyField.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        toolContent.add(burpProxyField, gbc);
-        gbc.gridwidth = 1;
+        // 启用Arjun
+        gbc2.gridx = 0; gbc2.gridy = 1; gbc2.gridwidth = 3; gbc2.weightx = 1.0;
+        arjunEnabledCheckBox.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+        arjunEnabledCheckBox.setForeground(new Color(52, 152, 219));
+        javaArjunContent.add(arjunEnabledCheckBox, gbc2);
+        gbc2.gridwidth = 1;
         
-        // 线程数
-        gbc.gridx = 0; gbc.gridy = 2; gbc.weightx = 0;
-        JLabel threadsLabel = new JLabel("🔀 线程数:");
-        threadsLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        toolContent.add(threadsLabel, gbc);
+        // 分块大小
+        gbc2.gridx = 0; gbc2.gridy = 2; gbc2.weightx = 0;
+        JLabel chunkLabel = new JLabel("📦 分块大小:");
+        chunkLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(chunkLabel, gbc2);
         
-        gbc.gridx = 1; gbc.weightx = 0.3;
-        threadCountSpinner.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        toolContent.add(threadCountSpinner, gbc);
+        gbc2.gridx = 1; gbc2.weightx = 0.3;
+        arjunChunkSizeSpinner.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(arjunChunkSizeSpinner, gbc2);
         
-        gbc.gridx = 2; gbc.weightx = 0.7;
-        JLabel threadsUnit = new JLabel("个");
-        threadsUnit.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
-        threadsUnit.setForeground(Color.GRAY);
-        toolContent.add(threadsUnit, gbc);
+        gbc2.gridx = 2; gbc2.weightx = 0.7;
+        JLabel chunkUnit = new JLabel("个参数/批次 (10-1000，默认250)");
+        chunkUnit.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+        chunkUnit.setForeground(Color.GRAY);
+        javaArjunContent.add(chunkUnit, gbc2);
         
         // 超时时间
-        gbc.gridx = 0; gbc.gridy = 3; gbc.weightx = 0;
-        JLabel timeoutLabel = new JLabel("⏱️ 超时:");
-        timeoutLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        toolContent.add(timeoutLabel, gbc);
+        gbc2.gridx = 0; gbc2.gridy = 3; gbc2.weightx = 0;
+        JLabel arjunTimeoutLabel = new JLabel("⏱️ 超时时间:");
+        arjunTimeoutLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(arjunTimeoutLabel, gbc2);
         
-        gbc.gridx = 1; gbc.weightx = 0.3;
-        timeoutSpinner.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        toolContent.add(timeoutSpinner, gbc);
+        gbc2.gridx = 1; gbc2.weightx = 0.3;
+        arjunTimeoutSpinner.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(arjunTimeoutSpinner, gbc2);
         
-        gbc.gridx = 2; gbc.weightx = 0.7;
-        JLabel timeoutUnit = new JLabel("秒");
-        timeoutUnit.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
-        timeoutUnit.setForeground(Color.GRAY);
-        toolContent.add(timeoutUnit, gbc);
+        gbc2.gridx = 2; gbc2.weightx = 0.7;
+        JLabel arjunTimeoutUnit = new JLabel("秒 (单次请求超时，5-60秒)");
+        arjunTimeoutUnit.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+        arjunTimeoutUnit.setForeground(Color.GRAY);
+        javaArjunContent.add(arjunTimeoutUnit, gbc2);
         
-        // 发送到Burp
-        gbc.gridx = 0; gbc.gridy = 4; gbc.gridwidth = 3;
-        sendToBurpCheckBox.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        toolContent.add(sendToBurpCheckBox, gbc);
+        // 分隔线
+        gbc2.gridx = 0; gbc2.gridy = 4; gbc2.gridwidth = 3; gbc2.weightx = 1.0;
+        JSeparator sep2 = new JSeparator();
+        sep2.setBorder(new EmptyBorder(10, 0, 10, 0));
+        javaArjunContent.add(sep2, gbc2);
+        gbc2.gridwidth = 1;
         
-        // JSON输出
-        gbc.gridx = 0; gbc.gridy = 5; gbc.gridwidth = 3;
-        jsonOutputCheckBox.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        toolContent.add(jsonOutputCheckBox, gbc);
+        // 自定义字典标题
+        gbc2.gridx = 0; gbc2.gridy = 5; gbc2.gridwidth = 2; gbc2.weightx = 1.0;
+        JLabel arjunDictLabel = new JLabel("📚 自定义参数字典:");
+        arjunDictLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+        arjunDictLabel.setForeground(new Color(52, 152, 219));
+        javaArjunContent.add(arjunDictLabel, gbc2);
         
-        // 详细输出
-        gbc.gridx = 0; gbc.gridy = 6; gbc.gridwidth = 3;
-        verboseOutputCheckBox.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        toolContent.add(verboseOutputCheckBox, gbc);
-        gbc.gridwidth = 1;
+        gbc2.gridx = 2; gbc2.weightx = 0;
+        javaArjunContent.add(arjunDictCountLabel, gbc2);
+        gbc2.gridwidth = 1;
         
-        toolConfigPanel.add(toolContent, BorderLayout.CENTER);
-        configContainer.add(toolConfigPanel);
+        // 字典文本区域
+        gbc2.gridx = 0; gbc2.gridy = 6; gbc2.gridwidth = 3; gbc2.weightx = 1.0; gbc2.weighty = 1.0;
+        gbc2.fill = GridBagConstraints.BOTH;
+        JScrollPane arjunDictScrollPane = new JScrollPane(arjunCustomDictArea);
+        arjunDictScrollPane.setPreferredSize(new Dimension(400, 150));
+        javaArjunContent.add(arjunDictScrollPane, gbc2);
+        gbc2.weighty = 0;
+        gbc2.fill = GridBagConstraints.HORIZONTAL;
+        gbc2.gridwidth = 1;
+        
+        // 按钮面板
+        gbc2.gridx = 0; gbc2.gridy = 7; gbc2.gridwidth = 3; gbc2.weightx = 1.0;
+        JPanel arjunDictButtonPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 5));
+        arjunDictButtonPanel.setBackground(new Color(236, 240, 241));
+        
+        JButton uploadDictButton = new JButton("📁 上传字典");
+        uploadDictButton.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        uploadDictButton.addActionListener(e -> uploadArjunDictionary());
+        
+        JButton clearDictButton = new JButton("🗑️ 清空");
+        clearDictButton.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        clearDictButton.addActionListener(e -> clearArjunDictionary());
+        
+        JButton exportDictButton = new JButton("💾 导出");
+        exportDictButton.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        exportDictButton.addActionListener(e -> exportArjunDictionary());
+        
+        arjunDictButtonPanel.add(uploadDictButton);
+        arjunDictButtonPanel.add(clearDictButton);
+        arjunDictButtonPanel.add(exportDictButton);
+        javaArjunContent.add(arjunDictButtonPanel, gbc2);
+        
+        // 帮助提示
+        gbc2.gridx = 0; gbc2.gridy = 8; gbc2.gridwidth = 3; gbc2.weightx = 1.0;
+        JLabel arjunDictHint = new JLabel("💡 每行一个参数名，上传TXT文件自动合并（去重）");
+        arjunDictHint.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 10));
+        arjunDictHint.setForeground(Color.GRAY);
+        javaArjunContent.add(arjunDictHint, gbc2);
+        
+        // 分隔线
+        gbc2.gridx = 0; gbc2.gridy = 9; gbc2.gridwidth = 3; gbc2.weightx = 1.0;
+        JSeparator sep3 = new JSeparator();
+        sep3.setBorder(new EmptyBorder(15, 0, 10, 0));
+        javaArjunContent.add(sep3, gbc2);
+        gbc2.gridwidth = 1;
+        
+        // 实时模式配置标题
+        gbc2.gridx = 0; gbc2.gridy = 10; gbc2.gridwidth = 3; gbc2.weightx = 1.0;
+        JLabel realtimeLabel = new JLabel("⚡ 实时模式配置:");
+        realtimeLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+        realtimeLabel.setForeground(new Color(52, 152, 219));
+        javaArjunContent.add(realtimeLabel, gbc2);
+        gbc2.gridwidth = 1;
+        
+        // 参数阈值
+        gbc2.gridx = 0; gbc2.gridy = 11; gbc2.weightx = 0;
+        JLabel thresholdLabel = new JLabel("🔢 参数阈值:");
+        thresholdLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(thresholdLabel, gbc2);
+        
+        gbc2.gridx = 1; gbc2.weightx = 0.3;
+        arjunRealtimeThresholdSpinner.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(arjunRealtimeThresholdSpinner, gbc2);
+        
+        gbc2.gridx = 2; gbc2.weightx = 0.7;
+        JLabel thresholdUnit = new JLabel("个 (达到此数量自动触发Arjun)");
+        thresholdUnit.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+        thresholdUnit.setForeground(Color.GRAY);
+        javaArjunContent.add(thresholdUnit, gbc2);
+        
+        // 定时间隔
+        gbc2.gridx = 0; gbc2.gridy = 12; gbc2.weightx = 0;
+        JLabel rtIntervalLabel = new JLabel("⏱️ 定时间隔:");
+        rtIntervalLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(rtIntervalLabel, gbc2);
+        
+        gbc2.gridx = 1; gbc2.weightx = 0.3;
+        arjunRealtimeIntervalSpinner.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(arjunRealtimeIntervalSpinner, gbc2);
+        
+        gbc2.gridx = 2; gbc2.weightx = 0.7;
+        JLabel rtIntervalUnit = new JLabel("秒 (定时兜底检查，只在有新参数时触发)");
+        rtIntervalUnit.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+        rtIntervalUnit.setForeground(Color.GRAY);
+        javaArjunContent.add(rtIntervalUnit, gbc2);
+        
+        // 实时模式提示
+        gbc2.gridx = 0; gbc2.gridy = 13; gbc2.gridwidth = 3; gbc2.weightx = 1.0;
+        JLabel realtimeHint = new JLabel("💡 智能触发：达到阈值立即触发 + 定时兜底（有新参数时）");
+        realtimeHint.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 10));
+        realtimeHint.setForeground(Color.GRAY);
+        javaArjunContent.add(realtimeHint, gbc2);
+        
+        javaArjunConfigPanel.add(javaArjunContent, BorderLayout.CENTER);
+        configContainer.add(javaArjunConfigPanel);
         configContainer.add(Box.createVerticalStrut(10));
-        
-        // 4. 自定义字典组
-        JPanel dictPanel = createGroupPanel("📝 自定义参数字典", new Color(52, 152, 219));
-        JPanel dictContent = new JPanel(new BorderLayout(5, 5));
-        
-        JLabel dictLabel = new JLabel("每行一个参数名（这些参数会合并到自动收集的参数中）:");
-        dictLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        dictLabel.setBorder(new EmptyBorder(0, 0, 5, 0));
-        dictContent.add(dictLabel, BorderLayout.NORTH);
-        
-        customDictArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        customDictArea.setRows(8);
-        JScrollPane dictScroll = new JScrollPane(customDictArea);
-        dictScroll.setBorder(BorderFactory.createLineBorder(new Color(200, 200, 200)));
-        dictContent.add(dictScroll, BorderLayout.CENTER);
-        
-        JPanel dictButtonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 5));
-        JButton testConnectionButton = new JButton("🔌 测试Arjun连接");
-        testConnectionButton.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-        testConnectionButton.addActionListener(e -> testArjunConnection());
-        dictButtonPanel.add(testConnectionButton);
-        dictContent.add(dictButtonPanel, BorderLayout.SOUTH);
-        
-        dictPanel.add(dictContent, BorderLayout.CENTER);
-        configContainer.add(dictPanel);
         
         // 🔴 重要：添加滚动条，确保内容可以完整显示
         JScrollPane scrollPane = new JScrollPane(configContainer);
@@ -674,15 +753,14 @@ public class UnifiedConfigTab {
             "参数名+关键词" : "仅参数名"
         );
         
-        // 外部工具
-        arjunPathField.setText(config.getArjunPath());
-        burpProxyField.setText(config.getBurpProxyAddress());
-        threadCountSpinner.setValue(config.getThreadCount());
-        timeoutSpinner.setValue(config.getTimeout());
-        customDictArea.setText(String.join("\n", config.getCustomDictionary()));
-        sendToBurpCheckBox.setSelected(config.isSendToBurp());
-        jsonOutputCheckBox.setSelected(config.isEnableJsonOutput());
-        verboseOutputCheckBox.setSelected(config.isEnableVerboseOutput());
+        // Java原生Arjun配置
+        arjunEnabledCheckBox.setSelected(config.isArjunEnabled());
+        arjunChunkSizeSpinner.setValue(config.getArjunChunkSize());
+        arjunTimeoutSpinner.setValue(config.getArjunTimeout());
+        arjunCustomDictArea.setText(String.join("\n", config.getArjunCustomDictionary()));
+        updateArjunDictCount();
+        arjunRealtimeIntervalSpinner.setValue(config.getArjunRealtimeInterval());
+        arjunRealtimeThresholdSpinner.setValue(config.getArjunRealtimeThreshold());
         
         // 代理池
         enableProxyPoolCheckBox.setSelected(config.isEnableProxyPool());
@@ -707,15 +785,32 @@ public class UnifiedConfigTab {
             );
         }
         
-        // 应用外部工具配置
-        toolConfig.setArjunPath(config.getArjunPath());
-        toolConfig.setBurpProxyAddress(config.getBurpProxyAddress());
-        toolConfig.setThreadCount(config.getThreadCount());
-        toolConfig.setTimeout(config.getTimeout());
-        toolConfig.setCustomDictionary(new ArrayList<>(config.getCustomDictionary())); // Set -> List
-        toolConfig.setSendToBurp(config.isSendToBurp());
-        toolConfig.setEnableJsonOutput(config.isEnableJsonOutput());
-        toolConfig.setEnableVerboseOutput(config.isEnableVerboseOutput());
+        // 应用Java原生Arjun配置
+        if (arjunService != null) {
+            com.xprobe.scanner.active.arjun.config.ArjunConfig arjunConfig = arjunService.getConfig();
+            arjunConfig.setEnabled(config.isArjunEnabled());
+            arjunConfig.setChunkSize(config.getArjunChunkSize());
+            arjunConfig.setTimeout(config.getArjunTimeout());
+            
+            // 应用用户自定义字典
+            arjunService.setUserCustomDictionary(config.getArjunCustomDictionary());
+            
+            api.logging().raiseInfoEvent(String.format(
+                "✅ Arjun配置已更新: 启用=%b, 块大小=%d, 超时=%d秒, 自定义字典=%d个",
+                config.isArjunEnabled(), config.getArjunChunkSize(), config.getArjunTimeout(),
+                config.getArjunCustomDictionary().size()
+            ));
+        }
+        
+        // ✅ 应用实时模式配置到实时扫描器
+        if (realtimeScanner != null) {
+            realtimeScanner.setMinParameterThreshold(config.getArjunRealtimeThreshold());
+            realtimeScanner.setCooldownSeconds(config.getArjunRealtimeInterval());
+            api.logging().raiseInfoEvent(String.format(
+                "✅ 实时模式配置已更新: 参数阈值=%d, 定时间隔=%d秒",
+                config.getArjunRealtimeThreshold(), config.getArjunRealtimeInterval()
+            ));
+        }
     }
     
     private void saveAllConfigurations() {
@@ -789,15 +884,13 @@ public class UnifiedConfigTab {
             "PARAMETERS_AND_KEYWORDS" : "PARAMETERS_ONLY"
         );
         
-        // 外部工具
-        config.setArjunPath(arjunPathField.getText().trim());
-        config.setBurpProxyAddress(burpProxyField.getText().trim());
-        config.setThreadCount((Integer) threadCountSpinner.getValue());
-        config.setTimeout((Integer) timeoutSpinner.getValue());
-        config.setCustomDictionary(new HashSet<>(parseTextAreaToList(customDictArea))); // List -> Set
-        config.setSendToBurp(sendToBurpCheckBox.isSelected());
-        config.setEnableJsonOutput(jsonOutputCheckBox.isSelected());
-        config.setEnableVerboseOutput(verboseOutputCheckBox.isSelected());
+        // Java原生Arjun配置
+        config.setArjunEnabled(arjunEnabledCheckBox.isSelected());
+        config.setArjunChunkSize((Integer) arjunChunkSizeSpinner.getValue());
+        config.setArjunTimeout((Integer) arjunTimeoutSpinner.getValue());
+        config.setArjunCustomDictionary(new HashSet<>(parseTextAreaToList(arjunCustomDictArea)));
+        config.setArjunRealtimeInterval((Integer) arjunRealtimeIntervalSpinner.getValue());
+        config.setArjunRealtimeThreshold((Integer) arjunRealtimeThresholdSpinner.getValue());
         
         // 代理池
         config.setEnableProxyPool(enableProxyPoolCheckBox.isSelected());
@@ -861,73 +954,6 @@ public class UnifiedConfigTab {
         statusTimer.start();
     }
     
-    // 辅助方法
-    private void browseArjunPath() {
-        JFileChooser fileChooser = new JFileChooser();
-        if (fileChooser.showOpenDialog(panel) == JFileChooser.APPROVE_OPTION) {
-            arjunPathField.setText(fileChooser.getSelectedFile().getAbsolutePath());
-        }
-    }
-    
-    private void testArjunConnection() {
-        String arjunPath = arjunPathField.getText().trim();
-        if (arjunPath.isEmpty()) {
-            JOptionPane.showMessageDialog(panel, "请先输入Arjun工具路径", "错误", JOptionPane.ERROR_MESSAGE);
-            return;
-        }
-        
-        // ✅ 先保存配置，以便测试时使用最新配置
-        saveAllConfigurations();
-        
-        api.logging().raiseInfoEvent("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        api.logging().raiseInfoEvent("🔧 用户点击测试Arjun连接按钮");
-        api.logging().raiseInfoEvent("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        
-        // ✅ 创建临时的 ArjunIntegration 实例进行测试
-        try {
-            com.xprobe.scanner.config.XProbeConfig xprobeConfig = xprobeConfigManager.getConfig();
-            
-            // ✅ 从XProbeConfig提取ExternalToolConfig
-            com.xprobe.scanner.active.ExternalToolConfig toolConfig = new com.xprobe.scanner.active.ExternalToolConfig();
-            toolConfig.setArjunPath(xprobeConfig.getArjunPath());
-            toolConfig.setBurpProxyAddress(xprobeConfig.getBurpProxyAddress());
-            toolConfig.setThreadCount(xprobeConfig.getThreadCount());
-            toolConfig.setTimeout(xprobeConfig.getTimeout());
-            // ✅ Set -> List 转换
-            if (xprobeConfig.getCustomDictionary() != null) {
-                toolConfig.setCustomDictionary(new java.util.ArrayList<>(xprobeConfig.getCustomDictionary()));
-            }
-            toolConfig.setEnableJsonOutput(xprobeConfig.isEnableJsonOutput());
-            toolConfig.setEnableVerboseOutput(xprobeConfig.isEnableVerboseOutput());
-            
-            com.xprobe.scanner.active.ArjunIntegration arjunIntegration = 
-                new com.xprobe.scanner.active.ArjunIntegration(api, toolConfig);
-            
-            boolean success = arjunIntegration.testConnection();
-            
-            if (success) {
-                api.logging().raiseInfoEvent("✅ Arjun测试成功！");
-                JOptionPane.showMessageDialog(panel, 
-                    "Arjun工具连接成功！\n请查看Burp日志了解详细信息。", 
-                    "测试结果", 
-                    JOptionPane.INFORMATION_MESSAGE);
-            } else {
-                api.logging().raiseErrorEvent("❌ Arjun测试失败！");
-                JOptionPane.showMessageDialog(panel, 
-                    "Arjun工具连接失败！\n请查看Burp日志了解详细错误信息。", 
-                    "测试结果", 
-                    JOptionPane.ERROR_MESSAGE);
-            }
-        } catch (Exception e) {
-            api.logging().raiseErrorEvent("❌ 测试连接时出现异常: " + e.getClass().getName() + " - " + e.getMessage());
-            e.printStackTrace();
-            JOptionPane.showMessageDialog(panel, 
-                "测试连接时出错: " + e.getMessage() + "\n请查看Burp日志了解详细错误信息。", 
-                "错误", 
-                JOptionPane.ERROR_MESSAGE);
-        }
-    }
-    
     private void importProxies() {
         JFileChooser fileChooser = new JFileChooser();
         if (fileChooser.showOpenDialog(panel) == JFileChooser.APPROVE_OPTION) {
@@ -949,12 +975,138 @@ public class UnifiedConfigTab {
         showStatus("代理测试功能开发中...", true);
     }
     
+    // ========== Arjun字典管理 ==========
+    
+    /**
+     * 上传Arjun自定义字典
+     */
+    private void uploadArjunDictionary() {
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setDialogTitle("选择Arjun字典文件");
+        fileChooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("文本文件 (*.txt)", "txt"));
+        
+        if (fileChooser.showOpenDialog(panel) == JFileChooser.APPROVE_OPTION) {
+            try {
+                java.io.File file = fileChooser.getSelectedFile();
+                java.util.Set<String> newParams = new java.util.HashSet<>();
+                
+                // 读取文件
+                try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(file))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        line = line.trim();
+                        if (!line.isEmpty() && !line.startsWith("#")) {
+                            newParams.add(line);
+                        }
+                    }
+                }
+                
+                // 合并到现有字典
+                String existingText = arjunCustomDictArea.getText();
+                if (!existingText.isEmpty()) {
+                    String[] existing = existingText.split("\n");
+                    for (String param : existing) {
+                        param = param.trim();
+                        if (!param.isEmpty()) {
+                            newParams.add(param);
+                        }
+                    }
+                }
+                
+                // 更新UI
+                arjunCustomDictArea.setText(String.join("\n", newParams));
+                updateArjunDictCount();
+                
+                showStatus(String.format("✓ 上传成功！合并了 %d 个参数", newParams.size()), true);
+                api.logging().raiseInfoEvent("Arjun字典上传成功: " + file.getName());
+                
+            } catch (Exception e) {
+                showStatus("✗ 上传失败: " + e.getMessage(), false);
+                api.logging().raiseErrorEvent("Arjun字典上传失败: " + e.getMessage());
+            }
+        }
+    }
+    
+    /**
+     * 清空Arjun自定义字典
+     */
+    private void clearArjunDictionary() {
+        int confirm = JOptionPane.showConfirmDialog(
+            panel,
+            "确定要清空Arjun自定义字典吗？",
+            "确认清空",
+            JOptionPane.YES_NO_OPTION,
+            JOptionPane.WARNING_MESSAGE
+        );
+        
+        if (confirm == JOptionPane.YES_OPTION) {
+            arjunCustomDictArea.setText("");
+            updateArjunDictCount();
+            showStatus("✓ Arjun字典已清空", true);
+            api.logging().raiseInfoEvent("Arjun自定义字典已清空");
+        }
+    }
+    
+    /**
+     * 导出Arjun自定义字典
+     */
+    private void exportArjunDictionary() {
+        String text = arjunCustomDictArea.getText().trim();
+        if (text.isEmpty()) {
+            JOptionPane.showMessageDialog(panel, "字典为空，无法导出", "提示", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setDialogTitle("导出Arjun字典");
+        fileChooser.setSelectedFile(new java.io.File("arjun-custom-dict.txt"));
+        
+        if (fileChooser.showSaveDialog(panel) == JFileChooser.APPROVE_OPTION) {
+            try {
+                java.io.File file = fileChooser.getSelectedFile();
+                try (java.io.PrintWriter writer = new java.io.PrintWriter(file)) {
+                    writer.print(text);
+                }
+                
+                showStatus("✓ 导出成功: " + file.getName(), true);
+                api.logging().raiseInfoEvent("Arjun字典导出成功: " + file.getAbsolutePath());
+                
+            } catch (Exception e) {
+                showStatus("✗ 导出失败: " + e.getMessage(), false);
+                api.logging().raiseErrorEvent("Arjun字典导出失败: " + e.getMessage());
+            }
+        }
+    }
+    
+    /**
+     * 更新Arjun字典计数
+     */
+    private void updateArjunDictCount() {
+        String text = arjunCustomDictArea.getText().trim();
+        if (text.isEmpty()) {
+            arjunDictCountLabel.setText("字典: 0 个参数");
+        } else {
+            String[] lines = text.split("\n");
+            java.util.Set<String> uniqueParams = new java.util.HashSet<>();
+            for (String line : lines) {
+                line = line.trim();
+                if (!line.isEmpty()) {
+                    uniqueParams.add(line);
+                }
+            }
+            arjunDictCountLabel.setText(String.format("字典: %d 个参数", uniqueParams.size()));
+        }
+    }
+    
     public Component getComponent() {
         return panel;
     }
     
-    public ExternalToolConfig getToolConfig() {
-        return toolConfig;
+    /**
+     * 设置ArjunService实例（用于配置更新）
+     */
+    public void setArjunService(com.xprobe.scanner.active.arjun.ArjunService arjunService) {
+        this.arjunService = arjunService;
     }
 }
 

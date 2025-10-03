@@ -51,9 +51,6 @@ public class ConfigValidator {
         // 验证主动探测配置
         validateActiveScanConfig(config, errors);
         
-        // 验证外部工具配置
-        validateExternalToolConfig(config, errors);
-        
         // 验证代理池配置
         validateProxyPoolConfig(config, errors);
         
@@ -89,54 +86,6 @@ public class ConfigValidator {
         }
         if (config.getMaxConcurrentHosts() > 50) {
             errors.add("最大并发主机数不能大于50");
-        }
-    }
-    
-    /**
-     * 验证外部工具配置
-     */
-    private static void validateExternalToolConfig(XProbeConfig config, List<String> errors) {
-        // Arjun路径
-        String arjunPath = config.getArjunPath();
-        if (arjunPath == null || arjunPath.trim().isEmpty()) {
-            errors.add("Arjun工具路径不能为空");
-        } else if (!arjunPath.equals("arjun")) {
-            // 如果不是系统命令，检查文件是否存在
-            File arjunFile = new File(arjunPath);
-            if (!arjunFile.exists()) {
-                errors.add("Arjun工具路径不存在: " + arjunPath);
-            }
-        }
-        
-        // Burp代理地址
-        String proxyAddress = config.getBurpProxyAddress();
-        if (proxyAddress == null || proxyAddress.trim().isEmpty()) {
-            errors.add("Burp代理地址不能为空");
-        } else if (!IP_PORT_PATTERN.matcher(proxyAddress).matches()) {
-            errors.add("Burp代理地址格式错误，应为 IP:端口 格式 (如: 127.0.0.1:8080)");
-        } else {
-            // 验证端口范围
-            String[] parts = proxyAddress.split(":");
-            int port = Integer.parseInt(parts[1]);
-            if (port < 1 || port > 65535) {
-                errors.add("端口号必须在1-65535之间");
-            }
-        }
-        
-        // 线程数
-        if (config.getThreadCount() < 1) {
-            errors.add("线程数不能小于1");
-        }
-        if (config.getThreadCount() > 20) {
-            errors.add("线程数不能大于20");
-        }
-        
-        // 超时时间
-        if (config.getTimeout() < 5) {
-            errors.add("超时时间不能小于5秒");
-        }
-        if (config.getTimeout() > 300) {
-            errors.add("超时时间不能大于300秒（5分钟）");
         }
     }
     

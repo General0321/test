@@ -3,6 +3,7 @@ package com.xprobe.scanner.Logs;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
 
+import javax.swing.*;
 import javax.swing.table.AbstractTableModel;
 import java.util.ArrayList;
 import java.util.List;
@@ -118,25 +119,48 @@ public class LogModel extends AbstractTableModel {
         }
     }
 
-    public synchronized void add(int id, String from, String method, String url, HttpRequest originalRequest, HttpResponse originalResponse, int originalResponseLen, int originalResponseCode, long originalResponseTime, HttpRequest modifiedRequest, HttpResponse modifiedResponse, String ruleName) {
-        // ✅ 滚动窗口机制：如果达到最大值，删除最旧的一条
-        if (log.size() >= maxEntries.get()) {  // ✅ 使用 .get() 获取当前值
-            log.remove(0);  // 删除第一条（最旧的）
-            fireTableRowsDeleted(0, 0);  // 通知表格删除了第一行
+    /**
+     * ✅ 优化：减少锁持有时间，在锁外触发UI更新
+     */
+    public void add(int id, String from, String method, String url, HttpRequest originalRequest, HttpResponse originalResponse, int originalResponseLen, int originalResponseCode, long originalResponseTime, HttpRequest modifiedRequest, HttpResponse modifiedResponse, String ruleName) {
+        final int indexToInsert;
+        final boolean shouldDelete;
+        
+        synchronized (this) {
+            // ✅ 滚动窗口机制：如果达到最大值，删除最旧的一条
+            if (log.size() >= maxEntries.get()) {
+                log.remove(0);
+                shouldDelete = true;
+            } else {
+                shouldDelete = false;
+            }
+            
+            // 添加新条目到末尾
+            indexToInsert = log.size();
+            log.add(new LogEntry(id, from, method, url, originalRequest, originalResponse, originalResponseLen, originalResponseCode, originalResponseTime, modifiedRequest, modifiedResponse, ruleName));
         }
         
-        // 添加新条目到末尾
-        int index = log.size();
-        log.add(new LogEntry(id, from, method, url, originalRequest, originalResponse, originalResponseLen, originalResponseCode, originalResponseTime, modifiedRequest, modifiedResponse, ruleName));
-        fireTableRowsInserted(index, index);
+        // ✅ 在锁外触发UI更新，避免阻塞
+        SwingUtilities.invokeLater(() -> {
+            if (shouldDelete) {
+                fireTableRowsDeleted(0, 0);
+            }
+            fireTableRowsInserted(indexToInsert, indexToInsert);
+        });
     }
     
     /**
      * ✅ 清空所有条目
      */
-    public synchronized void clear() {
-        log.clear();
-        fireTableDataChanged();
+    public void clear() {
+        synchronized (this) {
+            log.clear();
+        }
+        
+        // ✅ 在锁外触发UI更新
+        SwingUtilities.invokeLater(() -> {
+            fireTableDataChanged();
+        });
     }
     
     /**
@@ -156,16 +180,27 @@ public class LogModel extends AbstractTableModel {
     /**
      * ✅ 批量添加条目（优化性能）
      */
-    public synchronized void addAll(List<LogEntry> entries) {
-        for (LogEntry entry : entries) {
-            // 如果达到最大值，删除最旧的
-            if (log.size() >= maxEntries.get()) {  // ✅ 使用 .get() 获取当前值
-                log.remove(0);
+    public void addAll(List<LogEntry> entries) {
+        synchronized (this) {
+            for (LogEntry entry : entries) {
+                // 如果达到最大值，删除最旧的
+                if (log.size() >= maxEntries.get()) {
+                    log.remove(0);
+                }
+                log.add(entry);
             }
-            log.add(entry);
         }
-        fireTableDataChanged();  // 批量更新，只触发一次
+        
+        // ✅ 在锁外触发UI更新
+        SwingUtilities.invokeLater(() -> {
+            fireTableDataChanged();
+        });
     }
+    
+
+
+    // ✅ 已删除 addArjunLog() 方法
+    // Arjun的探测流量不记录到扫描结果表，只在Burp日志窗口显示
 
     public synchronized LogEntry get(int rowIndex) {
         return log.get(rowIndex);

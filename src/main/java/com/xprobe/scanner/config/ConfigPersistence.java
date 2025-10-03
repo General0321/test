@@ -121,21 +121,11 @@ public class ConfigPersistence {
         config.setWhitelistEnabled(false);
         config.setBlacklistEnabled(false);
         
-        // Arjun默认配置
-        config.setArjunPath("arjun");
-        config.setBurpProxyAddress("http://127.0.0.1:8080");
-        config.setThreadCount(10);
-        config.setTimeout(30);
-        config.setSendToBurp(true);
-        config.setEnableJsonOutput(true);
-        config.setEnableVerboseOutput(false);
-        
         // 参数收集默认为仅参数模式
         config.setCollectionMode("PARAMETERS_ONLY");
         
         // 初始化空集合
         config.setGlobalParameters(new HashSet<>());
-        config.setCustomDictionary(new HashSet<>());
         
         return config;
     }

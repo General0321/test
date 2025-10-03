@@ -18,13 +18,10 @@ import com.xprobe.scanner.ui.DashboardTab;
 import com.xprobe.scanner.ui.ActiveProbeTab;
 import com.xprobe.scanner.ui.ScanResultTab;
 import com.xprobe.scanner.ui.UnifiedConfigTab;
-import com.xprobe.scanner.integration.ScanResultIntegrator;
-import com.xprobe.scanner.active.ExternalToolConfig;
 import com.xprobe.scanner.active.ParameterCollector;
 
 import javax.swing.*;
 import java.awt.*;
-import java.util.ArrayList;
 
 public class XProbe implements BurpExtension {
     private TaskScheduler taskScheduler;
@@ -86,8 +83,9 @@ public class XProbe implements BurpExtension {
         RequestFilter requestFilter = new RequestFilter(api, globalFilter);
         
         // 创建重构后的RealtimeScanner (必须在ScannerFactory之前创建)
+        // ✅ 传入 XProbeConfig 以正确初始化 ArjunService
         com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner = 
-            new com.xprobe.scanner.active.RealtimeScannerRefactored(api, configManager, globalFilter);
+            new com.xprobe.scanner.active.RealtimeScannerRefactored(api, configManager, globalFilter, logModel, config);
         
         // 应用参数收集模式
         if ("PARAMETERS_AND_KEYWORDS".equals(config.getCollectionMode())) {
@@ -104,23 +102,26 @@ public class XProbe implements BurpExtension {
             api.logging().raiseInfoEvent("✅ 加载了 " + config.getGlobalParameters().size() + " 个全局参数");
         }
         
-        // 应用Arjun配置
-        ExternalToolConfig toolConfig = realtimeScanner.getToolConfig();
-        toolConfig.setArjunPath(config.getArjunPath());
-        toolConfig.setBurpProxyAddress(config.getBurpProxyAddress());
-        toolConfig.setThreadCount(config.getThreadCount());
-        toolConfig.setTimeout(config.getTimeout());
-        toolConfig.setCustomDictionary(new ArrayList<>(config.getCustomDictionary())); // Set -> List
-        toolConfig.setEnableJsonOutput(config.isEnableJsonOutput());
-        toolConfig.setEnableVerboseOutput(config.isEnableVerboseOutput());
-        toolConfig.setSendToBurp(config.isSendToBurp());
-        api.logging().raiseInfoEvent("✅ Arjun配置已应用: " + config.getArjunPath());
+        // ✅ 应用Arjun实时模式配置（智能触发）
+        realtimeScanner.setMinParameterThreshold(config.getArjunRealtimeThreshold());
+        realtimeScanner.setCooldownSeconds(config.getArjunRealtimeInterval());
+        api.logging().raiseInfoEvent(String.format(
+            "✅ Arjun实时模式配置: 阈值=%d个参数, 定时=%d秒", 
+            config.getArjunRealtimeThreshold(), config.getArjunRealtimeInterval()
+        ));
+        
+        // ✅ Arjun配置（Java原生Arjun，配置在ArjunService中）
+        // 外部工具配置已废弃，使用Java原生实现
+        api.logging().raiseInfoEvent("✅ 使用Java原生Arjun（无需外部工具配置）");
         
         // ✅ 创建ScannerFactory (需要RealtimeScanner和XProbeConfigManager以支持全局注入模式)
         ScannerFactory scannerFactory = new ScannerFactory(api, realtimeScanner, xprobeConfigManager);
         
         // ✅ 创建任务调度器
         taskScheduler = new TaskScheduler(api, scannerFactory, logModel, xprobeConfigManager);
+        
+        // ✅ 建立RealtimeScanner和TaskScheduler的双向引用（用于Arjun→漏洞扫描）
+        realtimeScanner.setTaskScheduler(taskScheduler);
         
         // ✅ 创建请求处理器 (需要RealtimeScanner)
         RequestHandler requestHandler = new RequestHandler(api, configManager, requestFilter, taskScheduler, realtimeScanner, xprobeConfigManager);
@@ -149,6 +150,7 @@ public class XProbe implements BurpExtension {
         // 1. 仪表板 - 总览
         DashboardTab dashboardTab = new DashboardTab(api, configManager, requestFilter, logModel);
         dashboardTab.setParameterCollector(realtimeScanner.getParameterCollector());
+        dashboardTab.setArjunService(realtimeScanner.getArjunService());  // ✅ 设置Arjun服务
         tabbedPane.addTab("📊 仪表板", dashboardTab.getComponent());
 
         // 2. 扫描结果 - 结果展示
@@ -166,6 +168,7 @@ public class XProbe implements BurpExtension {
 
         // 5. 配置中心 - 全局配置（黑白名单、工具配置等）
         UnifiedConfigTab unifiedConfigTab = new UnifiedConfigTab(api, configManager, globalFilter, realtimeScanner, xprobeConfigManager);
+        unifiedConfigTab.setArjunService(realtimeScanner.getArjunService());  // ✅ 设置Arjun服务
         tabbedPane.addTab("⚙️ 配置中心", unifiedConfigTab.getComponent());
 
         return tabbedPane;

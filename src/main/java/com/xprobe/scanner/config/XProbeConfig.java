@@ -22,15 +22,15 @@ public class XProbeConfig implements Serializable {
     private boolean whitelistEnabled = false;
     private boolean blacklistEnabled = false;
     
-    // Arjun工具配置
-    private String arjunPath = "arjun";
-    private String burpProxyAddress = "http://127.0.0.1:8080";
-    private int threadCount = 10;
-    private int timeout = 30;
-    private Set<String> customDictionary = new HashSet<>();
-    private boolean enableJsonOutput = true;
-    private boolean enableVerboseOutput = false;
-    private boolean sendToBurp = true;
+    // Java原生Arjun配置
+    private boolean arjunEnabled = true;
+    private int arjunChunkSize = 250;
+    private int arjunTimeout = 15;
+    private Set<String> arjunCustomDictionary = new HashSet<>();  // 用户自定义字典
+    
+    // Arjun实时模式配置
+    private int arjunRealtimeInterval = 300;  // 定时检查间隔（秒），默认5分钟
+    private int arjunRealtimeThreshold = 15;  // 参数阈值，默认15个
     
     // 参数收集模式
     private String collectionMode = "PARAMETERS_ONLY"; // "PARAMETERS_ONLY" or "PARAMETERS_AND_KEYWORDS"
@@ -71,7 +71,7 @@ public class XProbeConfig implements Serializable {
     // 主动探测配置
     private boolean enableActiveScan = false;
     private int bruteforceInterval = 300;
-    private int minParameterCount = 5;
+    private int minParameterCount = 15;  // ✅ 默认15个参数触发Arjun
     private int maxConcurrentHosts = 3;
     private boolean autoStart = false;
     private boolean verboseLogging = false;
@@ -89,7 +89,7 @@ public class XProbeConfig implements Serializable {
     // ========== Getters and Setters ==========
     
     public List<String> getWhitelist() {
-        return whitelist;
+        return whitelist != null ? whitelist : new ArrayList<>();
     }
     
     public void setWhitelist(List<String> whitelist) {
@@ -97,7 +97,7 @@ public class XProbeConfig implements Serializable {
     }
     
     public List<String> getBlacklist() {
-        return blacklist;
+        return blacklist != null ? blacklist : new ArrayList<>();
     }
     
     public void setBlacklist(List<String> blacklist) {
@@ -120,70 +120,6 @@ public class XProbeConfig implements Serializable {
         this.blacklistEnabled = blacklistEnabled;
     }
     
-    public String getArjunPath() {
-        return arjunPath;
-    }
-    
-    public void setArjunPath(String arjunPath) {
-        this.arjunPath = arjunPath;
-    }
-    
-    public String getBurpProxyAddress() {
-        return burpProxyAddress;
-    }
-    
-    public void setBurpProxyAddress(String burpProxyAddress) {
-        this.burpProxyAddress = burpProxyAddress;
-    }
-    
-    public int getThreadCount() {
-        return threadCount;
-    }
-    
-    public void setThreadCount(int threadCount) {
-        this.threadCount = threadCount;
-    }
-    
-    public int getTimeout() {
-        return timeout;
-    }
-    
-    public void setTimeout(int timeout) {
-        this.timeout = timeout;
-    }
-    
-    public Set<String> getCustomDictionary() {
-        return customDictionary;
-    }
-    
-    public void setCustomDictionary(Set<String> customDictionary) {
-        this.customDictionary = customDictionary != null ? customDictionary : new HashSet<>();
-    }
-    
-    public boolean isEnableJsonOutput() {
-        return enableJsonOutput;
-    }
-    
-    public void setEnableJsonOutput(boolean enableJsonOutput) {
-        this.enableJsonOutput = enableJsonOutput;
-    }
-    
-    public boolean isEnableVerboseOutput() {
-        return enableVerboseOutput;
-    }
-    
-    public void setEnableVerboseOutput(boolean enableVerboseOutput) {
-        this.enableVerboseOutput = enableVerboseOutput;
-    }
-    
-    public boolean isSendToBurp() {
-        return sendToBurp;
-    }
-    
-    public void setSendToBurp(boolean sendToBurp) {
-        this.sendToBurp = sendToBurp;
-    }
-    
     public String getCollectionMode() {
         return collectionMode;
     }
@@ -193,7 +129,7 @@ public class XProbeConfig implements Serializable {
     }
     
     public Set<String> getGlobalParameters() {
-        return globalParameters;
+        return globalParameters != null ? globalParameters : new HashSet<>();
     }
     
     public void setGlobalParameters(Set<String> globalParameters) {
@@ -201,7 +137,7 @@ public class XProbeConfig implements Serializable {
     }
     
     public List<Configuration> getScanConfigurations() {
-        return scanConfigurations;
+        return scanConfigurations != null ? scanConfigurations : new ArrayList<>();
     }
     
     public void setScanConfigurations(List<Configuration> scanConfigurations) {
@@ -305,11 +241,61 @@ public class XProbeConfig implements Serializable {
     }
     
     public List<String> getProxyList() {
-        return proxyList;
+        return proxyList != null ? proxyList : new ArrayList<>();
     }
     
     public void setProxyList(List<String> proxyList) {
         this.proxyList = proxyList != null ? proxyList : new ArrayList<>();
+    }
+    
+    // Java原生Arjun配置的Getters和Setters
+    public boolean isArjunEnabled() {
+        return arjunEnabled;
+    }
+    
+    public void setArjunEnabled(boolean arjunEnabled) {
+        this.arjunEnabled = arjunEnabled;
+    }
+    
+    public int getArjunChunkSize() {
+        return arjunChunkSize;
+    }
+    
+    public void setArjunChunkSize(int arjunChunkSize) {
+        this.arjunChunkSize = Math.max(10, Math.min(arjunChunkSize, 1000));
+    }
+    
+    public int getArjunTimeout() {
+        return arjunTimeout;
+    }
+    
+    public void setArjunTimeout(int arjunTimeout) {
+        this.arjunTimeout = Math.max(5, Math.min(arjunTimeout, 60));
+    }
+    
+    public Set<String> getArjunCustomDictionary() {
+        return arjunCustomDictionary != null ? arjunCustomDictionary : new HashSet<>();
+    }
+    
+    public void setArjunCustomDictionary(Set<String> arjunCustomDictionary) {
+        this.arjunCustomDictionary = arjunCustomDictionary != null ? arjunCustomDictionary : new HashSet<>();
+    }
+    
+    // Arjun实时模式配置的Getters和Setters
+    public int getArjunRealtimeInterval() {
+        return arjunRealtimeInterval;
+    }
+
+    public void setArjunRealtimeInterval(int arjunRealtimeInterval) {
+        this.arjunRealtimeInterval = Math.max(60, Math.min(arjunRealtimeInterval, 3600));  // 1-60分钟
+    }
+
+    public int getArjunRealtimeThreshold() {
+        return arjunRealtimeThreshold;
+    }
+
+    public void setArjunRealtimeThreshold(int arjunRealtimeThreshold) {
+        this.arjunRealtimeThreshold = Math.max(1, Math.min(arjunRealtimeThreshold, 100));  // 1-100个参数
     }
     
     /**
@@ -327,16 +313,6 @@ public class XProbeConfig implements Serializable {
         copy.setBlacklist(new ArrayList<>(this.blacklist));
         copy.setWhitelistEnabled(this.whitelistEnabled);
         copy.setBlacklistEnabled(this.blacklistEnabled);
-        
-        // Arjun工具配置
-        copy.setArjunPath(this.arjunPath);
-        copy.setBurpProxyAddress(this.burpProxyAddress);
-        copy.setThreadCount(this.threadCount);
-        copy.setTimeout(this.timeout);
-        copy.setCustomDictionary(new HashSet<>(this.customDictionary));
-        copy.setEnableJsonOutput(this.enableJsonOutput);
-        copy.setEnableVerboseOutput(this.enableVerboseOutput);
-        copy.setSendToBurp(this.sendToBurp);
         
         // 参数收集模式
         copy.setCollectionMode(this.collectionMode);
@@ -365,6 +341,16 @@ public class XProbeConfig implements Serializable {
         copy.setProxyTimeout(this.proxyTimeout);
         copy.setMaxRetries(this.maxRetries);
         copy.setProxyList(new ArrayList<>(this.proxyList));
+        
+        // Java原生Arjun配置
+        copy.setArjunEnabled(this.arjunEnabled);
+        copy.setArjunChunkSize(this.arjunChunkSize);
+        copy.setArjunTimeout(this.arjunTimeout);
+        copy.setArjunCustomDictionary(new HashSet<>(this.arjunCustomDictionary));
+        
+        // Arjun实时模式配置
+        copy.setArjunRealtimeInterval(this.arjunRealtimeInterval);
+        copy.setArjunRealtimeThreshold(this.arjunRealtimeThreshold);
         
         return copy;
     }

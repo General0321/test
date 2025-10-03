@@ -992,13 +992,37 @@ public class UniversalScanner extends AbstractScanner {
     }
     
     /**
-     * 评估布尔表达式
+     * 评估布尔表达式（入口方法）
      */
     private boolean evaluateBooleanExpression(String expr) {
+        return evaluateBooleanExpressionInternal(expr, 0);
+    }
+    
+    /**
+     * 评估布尔表达式（内部实现，带递归深度检查）
+     * ✅ 修复：添加递归深度限制，防止栈溢出
+     */
+    private static final int MAX_RECURSION_DEPTH = 10;
+    
+    private boolean evaluateBooleanExpressionInternal(String expr, int depth) {
+        // ✅ 检查递归深度
+        if (depth > MAX_RECURSION_DEPTH) {
+            throw new IllegalArgumentException(
+                "表达式嵌套过深（最大: " + MAX_RECURSION_DEPTH + "层）"
+            );
+        }
+        
         expr = expr.trim();
         
-        // 处理括号
+        // ✅ 处理括号（添加循环次数限制，防止死循环）
+        int iterations = 0;
         while (expr.contains("(")) {
+            if (++iterations > 100) {
+                throw new IllegalArgumentException(
+                    "表达式格式错误（括号处理超过100次迭代）"
+                );
+            }
+            
             int start = expr.lastIndexOf('(');
             int end = expr.indexOf(')', start);
             if (end == -1) {
@@ -1006,12 +1030,19 @@ public class UniversalScanner extends AbstractScanner {
             }
             
             String subExpr = expr.substring(start + 1, end);
-            boolean subResult = evaluateBooleanExpression(subExpr);
+            boolean subResult = evaluateBooleanExpressionInternal(subExpr, depth + 1);
             expr = expr.substring(0, start) + subResult + expr.substring(end + 1);
         }
         
-        // 处理NOT
+        // ✅ 处理NOT（添加循环次数限制）
+        int notIterations = 0;
         while (expr.toUpperCase().contains("NOT")) {
+            if (++notIterations > 50) {
+                throw new IllegalArgumentException(
+                    "表达式格式错误（NOT处理超过50次迭代）"
+                );
+            }
+            
             int notPos = expr.toUpperCase().indexOf("NOT");
             String remaining = expr.substring(notPos + 3).trim();
             String[] tokens = remaining.split("\\s+");

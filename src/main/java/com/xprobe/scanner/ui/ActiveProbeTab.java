@@ -443,23 +443,26 @@ public class ActiveProbeTab {
      * - 去重机制：method + host + content-type + uri + 已探测参数
      */
     private void switchToRealtimeMode() {
-        modeStatusLabel.setText("当前: 实时监听模式 (Proxy实时流量)");
+        modeStatusLabel.setText("当前: 实时监听模式 (智能触发)");
         modeStatusLabel.setForeground(new Color(46, 204, 113));
-        statusLabel.setText("🔄 实时监听Proxy流量 - 自动触发Arjun探测...");
+        statusLabel.setText("🔄 实时监听 - 阈值触发(15个参数) + 定时兜底(5分钟)...");
         statusLabel.setForeground(new Color(46, 204, 113));
         
-        // 启动实时监听定时器（例如每5分钟检查一次）
-        if (realtimeArjunTimer == null) {
-            realtimeArjunTimer = new javax.swing.Timer(300000, e -> {
-                // 在实时模式下，检查Proxy流量是否有新数据需要触发Arjun
-                // 去重颗粒度：method + host + content-type + uri + 已探测参数
-                api.logging().raiseInfoEvent("实时监听模式: 检查Proxy流量，触发Arjun探测");
-                checkAndTriggerArjunFromProxy();
-            });
+        // ✅ 启动定时检查（根据配置，只在有新参数时触发）
+        if (realtimeArjunTimer != null && realtimeArjunTimer.isRunning()) {
+            realtimeArjunTimer.stop();
         }
+        
+        // 从配置中获取定时间隔（毫秒）
+        int intervalMs = activeScanner.getRealtimeScanner().getCooldownSeconds() * 1000;
+        
+        realtimeArjunTimer = new javax.swing.Timer(intervalMs, e -> {
+            api.logging().raiseInfoEvent("🔍 定时检查: 检查是否有新参数需要触发Arjun");
+            activeScanner.getRealtimeScanner().periodicArjunCheck();
+        });
         realtimeArjunTimer.start();
         
-        api.logging().raiseInfoEvent("已切换到实时监听模式（Proxy流量）");
+        api.logging().raiseInfoEvent("已切换到实时监听模式（智能触发：阈值15个参数，定时5分钟兜底）");
     }
     
     /**

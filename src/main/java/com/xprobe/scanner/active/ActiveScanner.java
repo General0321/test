@@ -16,7 +16,6 @@ import java.util.concurrent.CompletableFuture;
  */
 public class ActiveScanner {
     private final MontoyaApi api;
-    private final ExternalToolConfig toolConfig;
     private final RealtimeScannerRefactored realtimeScanner;
 
     /**
@@ -28,7 +27,6 @@ public class ActiveScanner {
      */
     public ActiveScanner(MontoyaApi api, ConfigurationManager configManager, RealtimeScannerRefactored realtimeScanner) {
         this.api = api;
-        this.toolConfig = new ExternalToolConfig();
         this.realtimeScanner = realtimeScanner;  // 使用传入的实例，不创建新的
     }
 
@@ -88,15 +86,6 @@ public class ActiveScanner {
         return requests;
     }
     
-    // 已删除所有未使用的探测方法
-    // 参数探测由 RealtimeScanner 的 Arjun 集成负责
-    // 接口和目录探测功能已废弃
-
-    
-    // 已删除所有未使用的辅助方法
-    // 参数探测功能由 ArjunIntegration 类负责
-    // 已删除 extractEvidence 方法，功能未使用
-
     /**
      * 异步扫描目标
      */
@@ -113,31 +102,6 @@ public class ActiveScanner {
             return true;
         } catch (Exception e) {
             return false;
-        }
-    }
-
-    // 已删除 extractApiEndpoints 方法，功能未使用
-    
-    /**
-     * 获取外部工具配置
-     */
-    public ExternalToolConfig getToolConfig() {
-        return toolConfig;
-    }
-    
-    /**
-     * 更新外部工具配置
-     */
-    public void updateToolConfig(ExternalToolConfig newConfig) {
-        if (newConfig != null) {
-            this.toolConfig.setArjunPath(newConfig.getArjunPath());
-            this.toolConfig.setBurpProxyAddress(newConfig.getBurpProxyAddress());
-            this.toolConfig.setThreadCount(newConfig.getThreadCount());
-            this.toolConfig.setTimeout(newConfig.getTimeout());
-            this.toolConfig.setCustomDictionary(newConfig.getCustomDictionary());
-            this.toolConfig.setEnableJsonOutput(newConfig.isEnableJsonOutput());
-            this.toolConfig.setEnableVerboseOutput(newConfig.isEnableVerboseOutput());
-            this.toolConfig.setSendToBurp(newConfig.isSendToBurp());
         }
     }
     

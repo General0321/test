@@ -439,12 +439,26 @@ public class ParameterCollector {
     
     /**
      * 提取主域名
+     * - 如果是IP地址，返回完整IP
+     * - 如果是域名，返回主域名（倒数第二级+顶级域名）
      */
     private String extractMainDomain(String host) {
         if (host == null || host.isEmpty()) {
             return host;
         }
         
+        // ✅ 检测是否为IP地址（IPv4）
+        if (host.matches("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")) {
+            // IP地址直接返回完整IP作为主域名
+            return host;
+        }
+        
+        // ✅ IPv6地址也直接返回
+        if (host.contains(":")) {
+            return host;
+        }
+        
+        // ✅ 域名：提取主域名（倒数第二级+顶级域名）
         String[] parts = host.split("\\.");
         if (parts.length >= 2) {
             return parts[parts.length - 2] + "." + parts[parts.length - 1];

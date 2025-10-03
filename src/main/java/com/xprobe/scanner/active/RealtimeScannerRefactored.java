@@ -1,11 +1,21 @@
 package com.xprobe.scanner.active;
 
 import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.http.HttpService;
+import burp.api.montoya.http.handler.HttpRequestToBeSent;
 import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.http.message.params.HttpParameter;
+import burp.api.montoya.http.message.params.ParsedHttpParameter;
 import burp.api.montoya.sitemap.SiteMap;
 import burp.api.montoya.http.message.HttpRequestResponse;
+import com.xprobe.scanner.config.Configuration;
 import com.xprobe.scanner.config.ConfigurationManager;
 import com.xprobe.scanner.core.GlobalFilter;
+import com.xprobe.scanner.core.TaskScheduler;
+import com.xprobe.scanner.active.arjun.ArjunService;
+import com.xprobe.scanner.Logs.LogModel;
+import com.xprobe.scanner.models.RequestContext;
+import com.xprobe.scanner.models.ScanTask;
 
 import java.net.URI;
 import java.util.*;
@@ -23,8 +33,8 @@ import java.util.concurrent.*;
 public class RealtimeScannerRefactored {
     private final MontoyaApi api;
     private final GlobalFilter globalFilter;
-    private final ArjunIntegration arjunIntegration;
-    private final ExternalToolConfig toolConfig;
+    private final ConfigurationManager configManager;  // ✅ 配置管理器
+    private final ArjunService arjunService;  // ✅ 使用Java原生Arjun替代外部Python版本
     
     // 使用新的参数收集器和管理器
     private final ParameterCollector parameterCollector;
@@ -33,18 +43,50 @@ public class RealtimeScannerRefactored {
     // 被动扫描去重机制
     private final Set<String> passiveScanProcessedKeys = ConcurrentHashMap.newKeySet();
     
+    // ✅ TaskScheduler引用（用于Arjun发现参数后触发漏洞扫描）
+    private TaskScheduler taskScheduler;
+    
+    // ✅ 智能触发机制（按主域名）
+    private final Map<String, Long> lastArjunTriggerTime = new ConcurrentHashMap<>();
+    private final Map<String, Integer> lastParameterCount = new ConcurrentHashMap<>();
+    private volatile int minParameterThreshold = 15;  // ✅ P1修复：volatile确保多线程可见性
+    private volatile int cooldownSeconds = 300;  // ✅ P1修复：volatile确保多线程可见性
+    
     public RealtimeScannerRefactored(MontoyaApi api, ConfigurationManager configManager, 
-                                    GlobalFilter globalFilter) {
+                                    GlobalFilter globalFilter, LogModel logModel, 
+                                    com.xprobe.scanner.config.XProbeConfig xprobeConfig) {
         this.api = api;
         this.globalFilter = globalFilter;
-        this.toolConfig = new ExternalToolConfig();
-        this.arjunIntegration = new ArjunIntegration(api, toolConfig);
+        this.configManager = configManager;  // ✅ 保存配置管理器
+        
+        // ✅ 从配置中初始化ArjunService
+        com.xprobe.scanner.active.arjun.config.ArjunConfig arjunConfig = 
+            new com.xprobe.scanner.active.arjun.config.ArjunConfig(
+                xprobeConfig.getArjunChunkSize(), 
+                false  // heuristic已禁用
+            );
+        arjunConfig.setTimeout(xprobeConfig.getArjunTimeout());
+        arjunConfig.setEnabled(xprobeConfig.isArjunEnabled());
+        
+        this.arjunService = new ArjunService(api, logModel, arjunConfig);
+        
+        // 应用用户自定义字典
+        if (xprobeConfig.getArjunCustomDictionary() != null) {
+            this.arjunService.setUserCustomDictionary(xprobeConfig.getArjunCustomDictionary());
+        }
         
         // 初始化新的组件
         this.parameterCollector = new ParameterCollector(api);
         this.parameterManager = new ParameterManager(api);
         
-        api.logging().raiseInfoEvent("实时扫描器已初始化（使用参数收集器和管理器）");
+        api.logging().raiseInfoEvent("✅ 实时扫描器已初始化（Java原生Arjun + 参数收集器）");
+    }
+    
+    /**
+     * ✅ 设置TaskScheduler引用（用于Arjun发现参数后触发扫描）
+     */
+    public void setTaskScheduler(TaskScheduler taskScheduler) {
+        this.taskScheduler = taskScheduler;
     }
     
     // ========== 被动收集参数 ==========
@@ -78,11 +120,265 @@ public class RealtimeScannerRefactored {
                 // 记录统计信息
                 ParameterCollector.CollectorStatistics stats = parameterCollector.getStatistics();
                 api.logging().raiseDebugEvent("收集器统计: " + stats);
+                
+                // ✅ 智能触发Arjun（基于阈值和冷却时间）
+                checkAndAutoTriggerArjun(request);
             }
             
         } catch (Exception e) {
             api.logging().raiseErrorEvent("处理新请求时出错: " + e.getMessage());
         }
+    }
+    
+    // ========== 智能触发机制 ==========
+    
+    /**
+     * 检查并自动触发Arjun（基于阈值和冷却时间）
+     */
+    private void checkAndAutoTriggerArjun(HttpRequest request) {
+        try {
+            String mainDomain = extractMainDomain(request);
+            long currentTime = System.currentTimeMillis();
+            
+            // 1. 检查冷却时间（5分钟）
+            Long lastTriggerTime = lastArjunTriggerTime.get(mainDomain);
+            if (lastTriggerTime != null) {
+                long elapsedSeconds = (currentTime - lastTriggerTime) / 1000;
+                if (elapsedSeconds < cooldownSeconds) {
+                    api.logging().raiseDebugEvent(String.format(
+                        "主域名 %s 在冷却期内，剩余 %d 秒",
+                        mainDomain, cooldownSeconds - elapsedSeconds
+                    ));
+                    return;
+                }
+            }
+            
+            // 2. 计算未扫描参数数量
+            Set<String> collectedParams = parameterCollector.getParametersForMainDomain(mainDomain);
+            Set<ParameterCollector.EndpointKey> endpoints = 
+                parameterCollector.getEndpointKeysForMainDomain(mainDomain);
+            
+            int totalUnscannedParams = 0;
+            for (ParameterCollector.EndpointKey epKey : endpoints) {
+                Set<String> incrementalParams = parameterManager.getIncrementalParameters(
+                    epKey.method, epKey.host, epKey.contentType, epKey.endpoint, collectedParams
+                );
+                totalUnscannedParams += incrementalParams.size();
+            }
+            
+            // 3. 检查是否达到阈值（15个参数）
+            if (totalUnscannedParams >= minParameterThreshold) {
+                api.logging().raiseInfoEvent(String.format(
+                    "✅ [智能触发] 主域名 %s 达到参数阈值 (未扫描: %d / 阈值: %d)",
+                    mainDomain, totalUnscannedParams, minParameterThreshold
+                ));
+                
+                // 异步触发Arjun（避免阻塞）
+                CompletableFuture.runAsync(() -> {
+                    triggerArjunForMainDomain(mainDomain);
+                });
+                
+                // 更新触发时间和参数计数
+                lastArjunTriggerTime.put(mainDomain, currentTime);
+                lastParameterCount.put(mainDomain, collectedParams.size());
+            } else {
+                api.logging().raiseDebugEvent(String.format(
+                    "主域名 %s 参数未达阈值 (未扫描: %d / 阈值: %d)",
+                    mainDomain, totalUnscannedParams, minParameterThreshold
+                ));
+            }
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("智能触发Arjun时出错: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 定时检查所有主域名（兜底机制，只在有新参数时触发）
+     */
+    public void periodicArjunCheck() {
+        try {
+            Set<String> allMainDomains = parameterCollector.getAllMainDomains();
+            long currentTime = System.currentTimeMillis();
+            
+            api.logging().raiseInfoEvent(String.format(
+                "🔍 定时检查Arjun触发条件 (%d 个主域名)",
+                allMainDomains.size()
+            ));
+            
+            for (String mainDomain : allMainDomains) {
+                // 获取当前参数数量
+                Set<String> collectedParams = parameterCollector.getParametersForMainDomain(mainDomain);
+                int currentParamCount = collectedParams.size();
+                
+                // 获取上次记录的参数数量
+                Integer lastCount = lastParameterCount.get(mainDomain);
+                
+                // ✅ 只在有新参数时触发
+                if (lastCount == null || currentParamCount > lastCount) {
+                    // 检查是否有未扫描的参数
+                    Set<ParameterCollector.EndpointKey> endpoints = 
+                        parameterCollector.getEndpointKeysForMainDomain(mainDomain);
+                    
+                    int totalUnscannedParams = 0;
+                    for (ParameterCollector.EndpointKey epKey : endpoints) {
+                        Set<String> incrementalParams = parameterManager.getIncrementalParameters(
+                            epKey.method, epKey.host, epKey.contentType, epKey.endpoint, collectedParams
+                        );
+                        totalUnscannedParams += incrementalParams.size();
+                    }
+                    
+                    if (totalUnscannedParams > 0) {
+                        api.logging().raiseInfoEvent(String.format(
+                            "✅ [定时触发] 主域名 %s 有新参数 (当前: %d, 上次: %d, 未扫描: %d)",
+                            mainDomain, currentParamCount, lastCount == null ? 0 : lastCount, totalUnscannedParams
+                        ));
+                        
+                        CompletableFuture.runAsync(() -> {
+                            triggerArjunForMainDomain(mainDomain);
+                        });
+                        
+                        // 更新触发时间和参数计数
+                        lastArjunTriggerTime.put(mainDomain, currentTime);
+                        lastParameterCount.put(mainDomain, currentParamCount);
+                    }
+                } else {
+                    api.logging().raiseDebugEvent(String.format(
+                        "主域名 %s 无新参数，跳过触发 (参数数: %d)",
+                        mainDomain, currentParamCount
+                    ));
+                }
+            }
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("定时检查Arjun时出错: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 为指定主域名触发Arjun扫描
+     */
+    private void triggerArjunForMainDomain(String mainDomain) {
+        try {
+            Set<String> collectedParams = parameterCollector.getParametersForMainDomain(mainDomain);
+            Set<ParameterCollector.EndpointKey> endpointKeys = 
+                parameterCollector.getEndpointKeysForMainDomain(mainDomain);
+            
+            api.logging().raiseInfoEvent(String.format(
+                "🔍 触发Arjun扫描: 主域名=%s, 参数数=%d, 接口数=%d",
+                mainDomain, collectedParams.size(), endpointKeys.size()
+            ));
+            
+            int scanned = 0;
+            for (ParameterCollector.EndpointKey epKey : endpointKeys) {
+                // ✅ 计算增量参数（新参数会触发已探测过的端点重新扫描）
+                Set<String> incrementalParams = parameterManager.getIncrementalParameters(
+                    epKey.method, epKey.host, epKey.contentType, epKey.endpoint, collectedParams
+                );
+                
+                if (incrementalParams.isEmpty()) {
+                    continue;
+                }
+                
+                HttpRequest templateRequest = parameterCollector.getEndpointTemplate(mainDomain, epKey);
+                if (templateRequest == null) {
+                    continue;
+                }
+                
+                final HttpRequest finalRequest = templateRequest;
+                final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
+                
+                // 异步调用 Arjun
+                arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                    if (result.isSuccess()) {
+                        if (!result.getFoundParameters().isEmpty()) {
+                            triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                        }
+                        parameterManager.markParametersAsScanned(
+                            epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
+                            finalIncrementalParams
+                        );
+                    } else {
+                        parameterManager.markParametersAsScanned(
+                            epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
+                            finalIncrementalParams
+                        );
+                    }
+                }).exceptionally(ex -> {
+                    // ✅ P0修复：添加异常处理，避免无限重试
+                    api.logging().raiseErrorEvent("Arjun扫描异常: " + ex.getMessage());
+                    parameterManager.markParametersAsScanned(
+                        epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
+                        finalIncrementalParams
+                    );
+                    return null;
+                });
+                
+                scanned++;
+            }
+            
+            api.logging().raiseInfoEvent(String.format(
+                "✅ 主域名 %s Arjun扫描完成: 扫描了 %d 个接口",
+                mainDomain, scanned
+            ));
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("触发主域名Arjun扫描时出错: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 提取主域名（从HttpRequest）
+     * - 如果是IP地址，返回完整IP
+     * - 如果是域名，返回主域名（倒数第二级+顶级域名）
+     */
+    private String extractMainDomain(HttpRequest request) {
+        try {
+            URI uri = new URI(request.url());
+            String host = uri.getHost();
+            
+            // ✅ 检测是否为IP地址（IPv4）
+            if (host.matches("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")) {
+                return host;  // IP地址直接返回完整IP
+            }
+            
+            // ✅ IPv6地址也直接返回
+            if (host.contains(":")) {
+                return host;
+            }
+            
+            // ✅ 域名：提取主域名
+            String[] parts = host.split("\\.");
+            if (parts.length >= 2) {
+                return parts[parts.length - 2] + "." + parts[parts.length - 1];
+            }
+            return host;
+        } catch (Exception e) {
+            return request.url();
+        }
+    }
+    
+    /**
+     * 设置参数阈值
+     */
+    public void setMinParameterThreshold(int threshold) {
+        this.minParameterThreshold = threshold;
+        api.logging().raiseInfoEvent("设置Arjun参数阈值: " + threshold);
+    }
+    
+    /**
+     * 设置冷却时间（秒）
+     */
+    public void setCooldownSeconds(int seconds) {
+        this.cooldownSeconds = seconds;
+        api.logging().raiseInfoEvent("设置Arjun冷却时间: " + seconds + "秒");
+    }
+    
+    /**
+     * 获取冷却时间（秒）
+     */
+    public int getCooldownSeconds() {
+        return this.cooldownSeconds;
     }
     
     // ========== 主动 Arjun 扫描 ==========
@@ -275,12 +571,17 @@ public class RealtimeScannerRefactored {
                         ));
                         
                         // 异步调用 Arjun
-                        arjunIntegration.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                        arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
                             if (result.isSuccess()) {
                                 api.logging().raiseInfoEvent(String.format(
                                     "Arjun 发现参数: %s - %s",
                                     epKey, result.getFoundParameters()
                                 ));
+                                
+                                // ✅ 将发现的参数传递给漏洞扫描器
+                                if (!result.getFoundParameters().isEmpty()) {
+                                    triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                                }
                                 
                                 // 标记参数为已扫描
                                 parameterManager.markParametersAsScanned(
@@ -385,8 +686,13 @@ public class RealtimeScannerRefactored {
                     totalIncrementalParams += incrementalParams.size();
                     
                     // 异步调用 Arjun（与SiteMap模式相同的逻辑）
-                    arjunIntegration.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                    arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
                         if (result.isSuccess()) {
+                            // ✅ 将发现的参数传递给漏洞扫描器
+                            if (!result.getFoundParameters().isEmpty()) {
+                                triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                            }
+                            
                             parameterManager.markParametersAsScanned(
                                 epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
                                 finalIncrementalParams
@@ -493,13 +799,18 @@ public class RealtimeScannerRefactored {
                     ));
                     
                     // 异步调用 Arjun
-                    arjunIntegration.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                    arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
                         if (result.isSuccess()) {
                             api.logging().raiseInfoEvent(String.format(
                                 "Arjun 发现参数: %s %s (%s) %s - %s",
                                 finalMethod, host, finalContentType, endpoint, 
                                 result.getFoundParameters()
                             ));
+                            
+                            // ✅ 将发现的参数传递给漏洞扫描器
+                            if (!result.getFoundParameters().isEmpty()) {
+                                triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                            }
                             
                             // 标记参数为已扫描
                             parameterManager.markParametersAsScanned(
@@ -617,6 +928,13 @@ public class RealtimeScannerRefactored {
         return parameterCollector;
     }
     
+    /**
+     * ✅ 获取Arjun服务引用
+     */
+    public ArjunService getArjunService() {
+        return arjunService;
+    }
+    
     // ========== 全局参数管理 ==========
     
     /**
@@ -696,26 +1014,6 @@ public class RealtimeScannerRefactored {
     // ========== 被动扫描去重 ==========
     
     /**
-     * 检查被动扫描是否已处理
-     */
-    public boolean isPassiveScanProcessed(String method, String host, String path, 
-                                         String contentType, String parameterName, 
-                                         String scanType) {
-        String key = generatePassiveScanKey(method, host, path, contentType, parameterName, scanType);
-        return passiveScanProcessedKeys.contains(key);
-    }
-    
-    /**
-     * 标记被动扫描为已处理
-     */
-    public void markPassiveScanProcessed(String method, String host, String path, 
-                                        String contentType, String parameterName, 
-                                        String scanType) {
-        String key = generatePassiveScanKey(method, host, path, contentType, parameterName, scanType);
-        passiveScanProcessedKeys.add(key);
-    }
-    
-    /**
      * 原子性检查并标记被动扫描状态（Check-And-Set）
      * 
      * 这个方法保证在并发场景下的线程安全：
@@ -781,35 +1079,6 @@ public class RealtimeScannerRefactored {
     }
     
     /**
-     * 检查并标记被动扫描已处理（旧版：向后兼容）
-     * 
-     * @deprecated 使用 checkAndMarkPassiveScanProcessed(method, host, path, contentType, targetIdentifier, config)
-     */
-    @Deprecated
-    public boolean checkAndMarkPassiveScanProcessed(String method, String host, String path, 
-                                                   String contentType, String parameterName, 
-                                                   String scanType) {
-        String key = generatePassiveScanKey(method, host, path, contentType, parameterName, scanType);
-        boolean wasAdded = passiveScanProcessedKeys.add(key);
-        return !wasAdded;
-    }
-    
-    /**
-     * 生成被动扫描去重标识符（旧版：向后兼容）
-     * 
-     * @deprecated 使用 DeduplicationKeyGenerator.generateKey()
-     */
-    @Deprecated
-    private String generatePassiveScanKey(String method, String host, String path, 
-                                         String contentType, String parameterName, 
-                                         String scanType) {
-        String cleanPath = path.contains("?") ? path.substring(0, path.indexOf("?")) : path;
-        String normalizedContentType = normalizeContentType(contentType);
-        return method + "|" + host + "|" + cleanPath + "|" + normalizedContentType + 
-               "|" + parameterName + "|" + scanType;
-    }
-    
-    /**
      * 标准化 Content-Type
      */
     private String normalizeContentType(String contentType) {
@@ -849,13 +1118,26 @@ public class RealtimeScannerRefactored {
     // ========== 辅助方法 ==========
     
     /**
-     * 提取主域名
+     * 提取主域名（从host字符串）
+     * - 如果是IP地址，返回完整IP
+     * - 如果是域名，返回主域名（倒数第二级+顶级域名）
      */
     private String extractMainDomain(String host) {
         if (host == null || host.isEmpty()) {
             return host;
         }
         
+        // ✅ 检测是否为IP地址（IPv4）
+        if (host.matches("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")) {
+            return host;  // IP地址直接返回完整IP
+        }
+        
+        // ✅ IPv6地址也直接返回
+        if (host.contains(":")) {
+            return host;
+        }
+        
+        // ✅ 域名：提取主域名
         String[] parts = host.split("\\.");
         if (parts.length >= 2) {
             return parts[parts.length - 2] + "." + parts[parts.length - 1];
@@ -871,10 +1153,145 @@ public class RealtimeScannerRefactored {
     }
     
     /**
-     * 获取外部工具配置
+     * ✅ 触发漏洞扫描（Arjun发现参数后调用）
+     * 
+     * @param originalRequest 原始HTTP请求
+     * @param foundParams Arjun发现的参数名列表
      */
-    public ExternalToolConfig getToolConfig() {
-        return toolConfig;
+    private void triggerVulnerabilityScan(HttpRequest originalRequest, Set<String> foundParams) {
+        if (taskScheduler == null) {
+            api.logging().raiseDebugEvent("⚠️ TaskScheduler未设置，无法触发漏洞扫描");
+            return;
+        }
+        
+        if (foundParams == null || foundParams.isEmpty()) {
+            return;
+        }
+        
+        try {
+            // 获取Content-Type
+            String contentType = getContentType(originalRequest);
+            
+            // ✅ 1. 基于原始请求，添加Arjun发现的参数
+            HttpRequest requestWithParams = originalRequest;
+            
+            // 根据请求类型添加参数
+            if ("GET".equalsIgnoreCase(originalRequest.method())) {
+                // GET: 添加URL参数
+                for (String paramName : foundParams) {
+                    requestWithParams = requestWithParams.withAddedParameters(
+                        HttpParameter.urlParameter(paramName, "xprobe_test")
+                    );
+                }
+            } else if (contentType != null && contentType.contains("application/json")) {
+                // JSON: 需要合并到JSON body（使用Arjun的方式）
+                requestWithParams = buildJsonRequestWithParams(originalRequest, foundParams);
+            } else {
+                // POST表单: 添加body参数
+                for (String paramName : foundParams) {
+                    requestWithParams = requestWithParams.withAddedParameters(
+                        HttpParameter.bodyParameter(paramName, "xprobe_test")
+                    );
+                }
+            }
+            
+            // ✅ 2. 创建RequestContext
+            RequestContext context = new RequestContext(
+                "ARJUN",  // 来源标记为Arjun
+                requestWithParams.method(),
+                requestWithParams.url(),
+                requestWithParams.toString().hashCode()
+            );
+            
+            // ✅ 3. 为每个发现的参数创建ScanTask
+            // 注意：使用@SuppressWarnings抑制类型转换警告
+            // HttpRequest在Scanner中使用时会被转换为HttpRequestToBeSent
+            List<ScanTask> scanTasks = new ArrayList<>();
+            List<ParsedHttpParameter> parameters = requestWithParams.parameters();
+            
+            for (ParsedHttpParameter param : parameters) {
+                // 只扫描Arjun发现的参数
+                if (foundParams.contains(param.name())) {
+                    // 为每个启用的配置创建任务
+                    for (Configuration config : configManager.getEnabledConfigurations()) {
+                        // ✅ 使用强制转换（Scanner会正确处理）
+                        @SuppressWarnings("unchecked")
+                        HttpRequestToBeSent requestToBeSent = (HttpRequestToBeSent) (Object) requestWithParams;
+                        scanTasks.add(new ScanTask(param, config, requestToBeSent, context));
+                    }
+                }
+            }
+            
+            // ✅ 5. 提交扫描任务
+            if (!scanTasks.isEmpty()) {
+                api.logging().raiseInfoEvent(String.format(
+                    "🔍 触发漏洞扫描: %s 个参数 × %d 个规则 = %d 个任务",
+                    foundParams.size(),
+                    configManager.getEnabledConfigurations().size(),
+                    scanTasks.size()
+                ));
+                
+                taskScheduler.scheduleScan(scanTasks);
+            }
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("触发漏洞扫描失败: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * ✅ 构建包含参数的JSON请求
+     */
+    @SuppressWarnings("unchecked")
+    private HttpRequest buildJsonRequestWithParams(HttpRequest originalRequest, Set<String> paramNames) {
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper jsonMapper = 
+                new com.fasterxml.jackson.databind.ObjectMapper();
+            
+            String originalBody = originalRequest.bodyToString();
+            
+            // 解析原始JSON
+            Map<String, Object> jsonMap;
+            if (originalBody == null || originalBody.trim().isEmpty()) {
+                jsonMap = new HashMap<>();
+            } else {
+                jsonMap = jsonMapper.readValue(originalBody, Map.class);
+            }
+            
+            // 添加发现的参数（使用测试值）
+            for (String paramName : paramNames) {
+                jsonMap.put(paramName, "xprobe_test");
+            }
+            
+            // 序列化回JSON
+            String newBody = jsonMapper.writeValueAsString(jsonMap);
+            
+            // 更新Content-Type（如果没有）
+            HttpRequest result = originalRequest.withBody(newBody);
+            if (getContentType(result) == null) {
+                result = result.withAddedHeader("Content-Type", "application/json");
+            }
+            
+            return result;
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("构建JSON请求失败: " + e.getMessage());
+            // 降级：返回原始请求
+            return originalRequest;
+        }
+    }
+    
+    /**
+     * 获取Content-Type
+     */
+    private String getContentType(HttpRequest request) {
+        for (var header : request.headers()) {
+            if ("Content-Type".equalsIgnoreCase(header.name())) {
+                return header.value();
+            }
+        }
+        return null;
     }
     
     // ========== 扫描控制方法 ==========
@@ -896,17 +1313,6 @@ public class RealtimeScannerRefactored {
     public void stopRealtimeScanning() {
         api.logging().raiseInfoEvent("实时参数收集已停止");
         // 可以添加停止逻辑，如清空待扫描队列等
-    }
-    
-    /**
-     * 获取主机统计信息（用于UI显示）
-     * 注意：由于重构，现在按主域名管理，返回空Map
-     * @deprecated 建议使用 getDomainStatistics()
-     */
-    @Deprecated
-    public Map<String, Object> getHostStatistics() {
-        // 为了向后兼容，返回空Map
-        return new HashMap<>();
     }
     
     /**

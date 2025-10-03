@@ -33,6 +33,7 @@ public class DashboardTab {
     private final RequestFilter requestFilter;
     private final LogModel logModel;
     private ParameterCollector parameterCollector;
+    private com.xprobe.scanner.active.arjun.ArjunService arjunService;  // ✅ Arjun服务引用
     
     // === 统计卡片标签 ===
     private JLabel totalRequestsValue;
@@ -93,6 +94,14 @@ public class DashboardTab {
      */
     public void setParameterCollector(ParameterCollector collector) {
         this.parameterCollector = collector;
+        updateStatistics();
+    }
+    
+    /**
+     * ✅ 设置Arjun服务引用（用于获取统计数据）
+     */
+    public void setArjunService(com.xprobe.scanner.active.arjun.ArjunService service) {
+        this.arjunService = service;
         updateStatistics();
     }
     
@@ -536,8 +545,14 @@ public class DashboardTab {
                 updateParamStatsDetails(stats);
             }
             
-            // Arjun扫描次数（暂时从发现表获取）
-            arjunScansValue.setText("0");
+            // ✅ Arjun扫描次数（从ArjunService获取）
+            if (arjunService != null) {
+                com.xprobe.scanner.active.arjun.ArjunService.ArjunStatistics arjunStats = 
+                    arjunService.getStatistics();
+                arjunScansValue.setText(String.valueOf(arjunStats.getTotalScans()));
+            } else {
+                arjunScansValue.setText("0");
+            }
         });
     }
     
