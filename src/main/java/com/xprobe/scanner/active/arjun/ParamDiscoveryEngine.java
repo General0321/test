@@ -6,19 +6,26 @@ import burp.api.montoya.http.message.responses.HttpResponse;
 import com.xprobe.scanner.active.arjun.core.*;
 import com.xprobe.scanner.active.arjun.http.BurpHttpRequester;
 import com.xprobe.scanner.active.arjun.model.*;
-import com.xprobe.scanner.active.arjun.config.SpecialParams;
+import com.xprobe.scanner.active.arjun.error.*;
+import com.xprobe.scanner.active.arjun.concurrent.ConcurrentProcessor;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 /**
- * 参数发现引擎 - Arjun核心实现
+ * 参数发现引擎 - Arjun核心实现（✅ 完全对应Python版本）
  * 
  * 工作流程：
  * 1. 稳定性探测 + 建立基线
- * 2. 启发式提取参数
- * 3. 分块爆破 + 递归缩小
- * 4. 最终验证
+ * 2. 分块爆破 + 递归缩小（✅ 并发处理）
+ * 3. 最终验证（✅ 带重试）
+ * 
+ * ✅ 新增功能（对应Python）：
+ * - ErrorHandler：错误处理和重试决策
+ * - RetryStrategy：递归重试机制
+ * - RateLimiter：速率限制
+ * - ConcurrentProcessor：并发处理chunks
  */
 public class ParamDiscoveryEngine {
     
@@ -26,30 +33,52 @@ public class ParamDiscoveryEngine {
     private final BurpHttpRequester requester;
     private final ResponseBaseline baseline;
     private final AnomalyDetector detector;
-    // 移除：private final ParamExtractor extractor;  // 不需要，参数收集由ParameterCollector完成
     private final ChunkProcessor chunkProcessor;
     private final ParamVerifier verifier;
     
+    // ✅ 新增：Python功能组件
+    private final ErrorHandler errorHandler;
+    private final RetryStrategy retryStrategy;
+    private final ConcurrentProcessor concurrentProcessor;
+    
     // 配置
     private final int chunkSize;
-    // 移除：private final boolean enableHeuristic;  // 不需要启发式提取
+    private final int threads;
     
-    // ✅ P1: 健康状态码检查
-    private static final Set<Integer> UNHEALTHY_CODES = Set.of(400, 413, 418, 429, 503);
-    
+    /**
+     * 默认构造函数
+     */
     public ParamDiscoveryEngine(MontoyaApi api) {
-        this(api, 250, true);
+        this(api, 250, 9999, false, 5, 5);
     }
     
-    public ParamDiscoveryEngine(MontoyaApi api, int chunkSize, boolean enableHeuristic) {
+    /**
+     * 完整构造函数
+     * @param chunkSize chunk大小（默认250）
+     * @param maxRequestsPerSecond 最大请求速率（默认9999）
+     * @param stableMode 稳定模式（默认false）
+     * @param threads 并发线程数（默认5）
+     * @param maxRetries 最大重试次数（默认5）
+     */
+    public ParamDiscoveryEngine(MontoyaApi api, 
+                                 int chunkSize,
+                                 int maxRequestsPerSecond,
+                                 boolean stableMode,
+                                 int threads,
+                                 int maxRetries) {
         this.api = api;
         this.chunkSize = chunkSize;
-        // enableHeuristic参数保留兼容性，但不使用（参数由ParameterCollector收集）
+        this.threads = threads;
         
-        this.requester = new BurpHttpRequester(api);
+        // ✅ 初始化Python功能组件
+        this.errorHandler = new ErrorHandler(api, 15, 60, stableMode);
+        this.retryStrategy = new RetryStrategy(api, maxRetries);
+        this.concurrentProcessor = new ConcurrentProcessor(api, threads);
+        this.requester = new BurpHttpRequester(api, maxRequestsPerSecond, stableMode, 15);
+        
+        // 初始化核心组件
         this.baseline = new ResponseBaseline(api);
         this.detector = new AnomalyDetector(api);
-        // 移除：this.extractor - 参数收集由ParameterCollector完成，Arjun只负责爆破验证
         this.chunkProcessor = new ChunkProcessor(chunkSize);
         this.verifier = new ParamVerifier(api, requester);
     }
@@ -76,20 +105,21 @@ public class ParamDiscoveryEngine {
                     return DiscoveryResult.error("目标不稳定");
                 }
                 
-                // 2. 合并特殊参数（专注爆破，不做参数发现）
-                // 参数收集已由 ParameterCollector 完成，Arjun只负责验证有效性
+                // 2. 检查字典
+                // ✅ 不使用默认参数，完全由用户自定义（ParameterCollector收集 + 用户上传）
                 api.logging().raiseInfoEvent("📦 阶段2: 准备字典...");
                 
-                // ✅ P1修复：合并特殊参数
-                int originalSize = context.getDictionary().size();
-                Set<String> specialParams = SpecialParams.getSpecialParamNames();
-                context.addDictionary(specialParams);
+                int dictSize = context.getDictionary().size();
+                
+                // ⚠️ 如果字典为空，直接跳过扫描
+                if (dictSize == 0) {
+                    api.logging().raiseErrorEvent("❌ 字典为空，跳过扫描");
+                    return DiscoveryResult.error("字典为空");
+                }
                 
                 api.logging().raiseInfoEvent(String.format(
-                    "📚 字典大小: %d 个参数 (普通: %d, 特殊: %d)",
-                    context.getDictionary().size(),
-                    originalSize,
-                    specialParams.size()
+                    "📚 字典大小: %d 个参数（完全由用户自定义）",
+                    dictSize
                 ));
                 
                 // 3. 分块爆破 + 递归缩小
@@ -135,7 +165,7 @@ public class ParamDiscoveryEngine {
     }
     
     /**
-     * 初始化：稳定性探测 + 建立基线
+     * 初始化：稳定性探测 + 建立基线（✅ 带重试）
      */
     private ScanContext initialize(HttpRequest originalRequest, Set<String> dictionary) {
         // 发送随机参数请求（2次）
@@ -154,19 +184,30 @@ public class ParamDiscoveryEngine {
             Map.of(randomParam2, randomValue2)
         );
         
-        api.logging().raiseDebugEvent("  发送基线请求1...");
-        HttpResponse response1 = requester.sendRequest(testRequest1);
+        // ✅ 使用RetryStrategy发送请求（带重试）
+        api.logging().raiseDebugEvent("  发送基线请求1（带重试）...");
+        HttpResponse response1 = retryStrategy.executeWithRetry(
+            () -> sendRequestWithRetry(testRequest1, null, true),
+            errorHandler,
+            "基线请求1"
+        );
         
         // ✅ P1: 健康状态码检查
-        int statusCode = Integer.valueOf(response1.statusCode());
-        if (UNHEALTHY_CODES.contains(statusCode)) {
+        int statusCode = response1.statusCode();
+        boolean isHealthy = !isUnhealthyStatusCode(statusCode);
+        
+        if (!isHealthy) {
             api.logging().raiseErrorEvent(
                 "  ⚠️ 目标返回错误状态码: " + statusCode + "，这可能影响扫描"
             );
         }
         
-        api.logging().raiseDebugEvent("  发送基线请求2...");
-        HttpResponse response2 = requester.sendRequest(testRequest2);
+        api.logging().raiseDebugEvent("  发送基线请求2（带重试）...");
+        HttpResponse response2 = retryStrategy.executeWithRetry(
+            () -> sendRequestWithRetry(testRequest2, null, isHealthy),
+            errorHandler,
+            "基线请求2"
+        );
         
         // 建立基线规则
         BaselineFactors factors = baseline.define(
@@ -193,11 +234,18 @@ public class ParamDiscoveryEngine {
                 Map.of(randomParam, randomValue)
             );
             
-            HttpResponse response = requester.sendRequest(testRequest);
+            // ✅ 使用RequestResult发送请求
+            BurpHttpRequester.RequestResult reqResult = requester.sendRequest(testRequest);
+            
+            if (!reqResult.isSuccess()) {
+                // 请求失败，继续尝试
+                retryCount++;
+                continue;
+            }
             
             // 检测异常
             AnomalyResult anomaly = detector.compare(
-                response, 
+                reqResult.getResponse(), 
                 factors, 
                 Map.of(randomParam, randomValue)
             );
@@ -205,6 +253,18 @@ public class ParamDiscoveryEngine {
             if (!anomaly.hasAnomaly()) {
                 // 找到稳定状态
                 api.logging().raiseInfoEvent("  ✓ 目标稳定（尝试 " + (retryCount + 1) + " 次）");
+                break;
+            }
+            
+            // ✅ 关键修复：检查因子数量，至少保留1个
+            int remainingFactors = countRemainingFactors(factors);
+            if (remainingFactors <= 1) {
+                api.logging().raiseInfoEvent(
+                    "  ⚠️ 已达最少因子数量（" + remainingFactors + "个），停止移除不稳定因子"
+                );
+                api.logging().raiseInfoEvent(
+                    "  将使用当前剩余因子继续扫描（准确度可能降低）"
+                );
                 break;
             }
             
@@ -219,12 +279,20 @@ public class ParamDiscoveryEngine {
             retryCount++;
         }
         
-        // 检查健康状态
-        boolean isHealthy = factors.hasAnyFactor();
+        // 检查健康状态（重命名避免重复）
+        boolean targetIsStable = factors.hasAnyFactor();
         
-        if (!isHealthy || retryCount >= maxRetries) {
+        if (!targetIsStable) {
+            // ✅ 所有因子都被移除（理论上不应发生，因为至少保留1个）
             api.logging().raiseErrorEvent(
-                "  ⚠️ 目标不稳定或所有因子都被移除（尝试 " + retryCount + " 次）"
+                "  ❌ 所有检测因子都被移除，目标过于不稳定，无法扫描"
+            );
+        } else if (retryCount >= maxRetries) {
+            api.logging().raiseErrorEvent(
+                "  ⚠️ 达到最大重试次数（" + maxRetries + "），目标可能不稳定"
+            );
+            api.logging().raiseInfoEvent(
+                "  当前剩余 " + countRemainingFactors(factors) + " 个检测因子，将继续扫描"
             );
         }
         
@@ -233,12 +301,12 @@ public class ParamDiscoveryEngine {
             factors,
             dictionary,
             response1,
-            isHealthy
+            targetIsStable && isHealthy
         );
     }
     
     /**
-     * 递归缩小参数范围
+     * 递归缩小参数范围（✅ 并发处理，对应Python的narrower()）
      */
     private Set<ParamCandidate> narrowDown(ScanContext context) {
         Set<ParamCandidate> allCandidates = new LinkedHashSet<>();
@@ -247,60 +315,27 @@ public class ParamDiscoveryEngine {
         List<Set<String>> chunks = chunkProcessor.createChunks(context.getDictionary());
         
         api.logging().raiseInfoEvent(String.format(
-            "  分块数量: %d (每块 %d 个参数)", 
-            chunks.size(), 
-            chunkSize
+            "  分块数量: %d (每块 %d 个参数), 并发线程: %d", 
+            chunks.size(), chunkSize, threads
         ));
         
-        // 第一轮：分块测试
-        List<Set<String>> anomalousChunks = new ArrayList<>();
-        
-        for (int i = 0; i < chunks.size(); i++) {
-            Set<String> chunk = chunks.get(i);
-            
-            // ✅ P1修复：使用特殊参数的特定值
-            Map<String, String> testParams = new HashMap<>();
-            Map<String, String> specialParams = SpecialParams.getSpecialParams();
-            
-            for (String param : chunk) {
-                if (specialParams.containsKey(param)) {
-                    // 使用特殊值
-                    testParams.put(param, specialParams.get(param));
-                } else {
-                    // 使用随机值
-                    testParams.put(param, generateRandomValue());
+        // ✅ 使用ConcurrentProcessor并发处理chunks（对应Python的ThreadPoolExecutor）
+        List<Set<String>> anomalousChunks = concurrentProcessor.processConcurrently(
+            chunks,
+            chunk -> testChunkForAnomaly(context, chunk),  // 处理函数
+            (completed, total) -> {                        // 进度回调
+                if (completed % 10 == 0 || completed == total) {
+                    api.logging().raiseInfoEvent(String.format(
+                        "  进度: %d/%d", completed, total));
                 }
-            }
-            
-            HttpRequest testRequest = requester.buildTestRequest(
-                context.getOriginalRequest(),
-                testParams
-            );
-            HttpResponse response = requester.sendRequest(testRequest);
-            
-            // 检测异常
-            AnomalyResult anomaly = detector.compare(
-                response, 
-                context.getFactors(), 
-                testParams
-            );
-            
-            if (anomaly.hasAnomaly()) {
-                api.logging().raiseDebugEvent(String.format(
-                    "  ✓ 发现异常分块 %d/%d (原因: %s)", 
-                    i + 1, chunks.size(), anomaly.getReason()
-                ));
-                anomalousChunks.add(chunk);
-            }
-            
-            // 定期输出进度
-            if ((i + 1) % 10 == 0 || i == chunks.size() - 1) {
-                api.logging().raiseInfoEvent(String.format(
-                    "  进度: %d/%d (发现 %d 个异常分块)", 
-                    i + 1, chunks.size(), anomalousChunks.size()
-                ));
-            }
-        }
+            },
+            () -> errorHandler.isKilled()                  // kill开关
+        );
+        
+        // 过滤null结果
+        anomalousChunks = anomalousChunks.stream()
+            .filter(Objects::nonNull)
+            .collect(Collectors.toList());
         
         api.logging().raiseInfoEvent(
             "  第一轮完成: " + anomalousChunks.size() + " 个异常分块"
@@ -308,10 +343,62 @@ public class ParamDiscoveryEngine {
         
         // 递归缩小异常分块
         for (Set<String> anomalousChunk : anomalousChunks) {
+            if (errorHandler.isKilled()) {
+                api.logging().raiseInfoEvent("⚠️ 扫描被终止（kill开关）");
+                break;
+            }
             allCandidates.addAll(recursiveNarrow(context, anomalousChunk, 1));
         }
         
         return allCandidates;
+    }
+    
+    /**
+     * 测试单个chunk是否有异常（带重试）
+     */
+    private Set<String> testChunkForAnomaly(ScanContext context, Set<String> chunk) {
+        try {
+            // ✅ 所有参数使用随机值
+            Map<String, String> testParams = new HashMap<>();
+            for (String param : chunk) {
+                testParams.put(param, generateRandomValue());
+            }
+            
+            HttpRequest testRequest = requester.buildTestRequest(
+                context.getOriginalRequest(), testParams);
+            
+            // ✅ 使用重试机制发送请求（对应Python的bruter()）
+            AnomalyResult anomaly = retryStrategy.executeWithRetry(
+                () -> {
+                    BurpHttpRequester.RequestResult result = requester.sendRequest(testRequest);
+                    
+                    if (!result.isSuccess()) {
+                        return RetryStrategy.RetryableResult.error(
+                            result.getException(), context.getFactors(), context.isHealthy());
+                    }
+                    
+                    AnomalyResult anom = detector.compare(
+                        result.getResponse(), context.getFactors(), testParams);
+                    
+                    return RetryStrategy.RetryableResult.success(
+                        anom, result.getResponse(), context.getFactors(), context.isHealthy());
+                },
+                errorHandler,
+                "chunk测试"
+            );
+            
+            if (anomaly.hasAnomaly()) {
+                api.logging().raiseDebugEvent(String.format(
+                    "  ✓ 发现异常chunk (原因: %s)", anomaly.getReason()));
+                return chunk;
+            }
+            
+            return null;
+            
+        } catch (Exception e) {
+            api.logging().raiseDebugEvent("chunk测试失败: " + e.getMessage());
+            return null;
+        }
     }
     
     /**
@@ -347,34 +434,19 @@ public class ParamDiscoveryEngine {
             depth, subChunks.size(), subChunkSize
         ));
         
-        // 测试每个子块
+        // 测试每个子块（✅ 带重试）
         List<Set<String>> anomalousSubChunks = new ArrayList<>();
-        Map<String, String> specialParams = SpecialParams.getSpecialParams();
         
         for (Set<String> subChunk : subChunks) {
-            Map<String, String> testParams = new HashMap<>();
-            for (String param : subChunk) {
-                if (specialParams.containsKey(param)) {
-                    testParams.put(param, specialParams.get(param));
-                } else {
-                    testParams.put(param, generateRandomValue());
-                }
+            // 检查kill开关
+            if (errorHandler.isKilled()) {
+                break;
             }
             
-            HttpRequest testRequest = requester.buildTestRequest(
-                context.getOriginalRequest(),
-                testParams
-            );
-            HttpResponse response = requester.sendRequest(testRequest);
-            
-            AnomalyResult anomaly = detector.compare(
-                response,
-                context.getFactors(),
-                testParams
-            );
-            
-            if (anomaly.hasAnomaly()) {
-                anomalousSubChunks.add(subChunk);
+            // 使用testChunkForAnomaly（已包含重试机制）
+            Set<String> result = testChunkForAnomaly(context, subChunk);
+            if (result != null) {
+                anomalousSubChunks.add(result);
             }
         }
         
@@ -426,6 +498,33 @@ public class ParamDiscoveryEngine {
     }
     
     /**
+     * 发送请求并包装为RetryableResult（用于重试机制）
+     */
+    private RetryStrategy.RetryableResult<HttpResponse> sendRequestWithRetry(
+            HttpRequest request,
+            BaselineFactors factors,
+            boolean isHealthy) {
+        
+        BurpHttpRequester.RequestResult result = requester.sendRequest(request);
+        
+        if (!result.isSuccess()) {
+            return RetryStrategy.RetryableResult.error(
+                result.getException(), factors, isHealthy);
+        }
+        
+        return RetryStrategy.RetryableResult.success(
+            result.getResponse(), result.getResponse(), factors, isHealthy);
+    }
+    
+    /**
+     * 检查是否为不健康状态码
+     */
+    private boolean isUnhealthyStatusCode(int statusCode) {
+        return statusCode == 400 || statusCode == 413 || 
+               statusCode == 418 || statusCode == 429 || statusCode == 503;
+    }
+    
+    /**
      * 生成随机字符串
      */
     private String generateRandomString(int length) {
@@ -445,6 +544,38 @@ public class ParamDiscoveryEngine {
      */
     private String generateRandomValue() {
         return generateRandomString(6);
+    }
+    
+    /**
+     * ✅ P0修复：关闭资源，防止线程池泄漏
+     */
+    public void shutdown() {
+        api.logging().raiseDebugEvent("关闭ParamDiscoveryEngine资源...");
+        
+        if (concurrentProcessor != null) {
+            concurrentProcessor.shutdown();
+        }
+        
+        // ErrorHandler的kill标志已设置为volatile，无需额外清理
+        // RateLimiter无需清理（无资源）
+    }
+    
+    /**
+     * ✅ 辅助方法：统计剩余因子数量
+     * 用于确保至少保留1个因子，防止全部移除导致检测失效
+     */
+    private int countRemainingFactors(BaselineFactors factors) {
+        int count = 0;
+        if (factors.getSameCode() != null) count++;
+        if (factors.getSameBody() != null) count++;
+        if (factors.getSamePlaintext() != null) count++;
+        if (factors.getLinesNum() != null) count++;
+        if (factors.getLinesDiff() != null && !factors.getLinesDiff().isEmpty()) count++;
+        if (factors.getSameHeaders() != null && !factors.getSameHeaders().isEmpty()) count++;
+        if (factors.getSameRedirect() != null) count++;
+        if (factors.getParamMissing() != null && !factors.getParamMissing().isEmpty()) count++;
+        if (factors.isValueMissing()) count++;
+        return count;
     }
 }
 

@@ -25,6 +25,19 @@ import java.util.stream.Collectors;
  * 
  * 新架构：使用请求-响应配对进行扫描
  * 每个配对代表一种检测方法
+ * 
+ * ✅ P0修复: Payload编码说明
+ * ==========================
+ * Burp API会自动处理以下编码:
+ * - URL参数: HttpParameter.urlParameter() 会自动URL编码
+ * - POST表单参数: HttpParameter.bodyParameter() 会自动URL编码
+ * - Cookie参数: HttpParameter.cookieParameter() 会自动URL编码
+ * - JSON Body: Jackson ObjectMapper会自动转义JSON特殊字符
+ * 
+ * 需要手动处理的场景:
+ * - Header值: 需要移除\r\n防止Header注入 (已修复)
+ * - Path: withPath()不会URL编码,但通常不需要
+ * - Body字符串拼接: 根据Content-Type需要手动编码
  */
 public class UniversalScanner extends AbstractScanner {
     
@@ -615,21 +628,34 @@ public class UniversalScanner extends AbstractScanner {
     
     /**
      * 判断目标名称是否匹配元素配置
+     * ✅ 修复：支持区分大小写配置
      */
     private boolean shouldMatchTarget(String targetName, UnifiedHttpConfig.HttpElementConfig element) {
-        // 1. 优先使用element.name
+        // 1. 优先使用element.name（支持区分大小写）
         String elementName = element.getName();
         if (elementName != null && !elementName.isEmpty()) {
-            return targetName.equals(elementName);
+            // ✅ 使用nameMatchConfig的caseSensitive设置
+            boolean caseSensitive = element.getNameMatchConfig() != null 
+                ? element.getNameMatchConfig().isCaseSensitive() 
+                : true;  // 默认区分大小写（参数/Header/Cookie名称通常区分）
+                
+            if (caseSensitive) {
+                return targetName.equals(elementName);
+            } else {
+                return targetName.equalsIgnoreCase(elementName);
+            }
         }
         
         // 2. 使用nameMatchConfig
         if (element.getNameMatchConfig() != null && 
             element.getNameMatchConfig().getValues() != null &&
             !element.getNameMatchConfig().getValues().isEmpty()) {
+            boolean caseSensitive = element.getNameMatchConfig().isCaseSensitive();
             for (String matchValue : element.getNameMatchConfig().getValues()) {
                 if (matchValue != null && !matchValue.isEmpty() &&
-                    matchesValue(targetName, matchValue, element.getNameMatchConfig().getMatchType())) {
+                    matchesValue(targetName, matchValue, 
+                                element.getNameMatchConfig().getMatchType(), 
+                                caseSensitive)) {
                     return true;
                 }
             }
@@ -675,11 +701,14 @@ public class UniversalScanner extends AbstractScanner {
                     break;
                     
                 case HEADER:
+                    // ✅ P0修复: Header注入时移除换行符
                     if (injTarget == UnifiedHttpConfig.InjectionTarget.VALUE) {
-                        modified = modified.withUpdatedHeader(target.name, payload);
+                        String safePayload = payload.replace("\r", "").replace("\n", "");
+                        modified = modified.withUpdatedHeader(target.name, safePayload);
                     } else if (injTarget == UnifiedHttpConfig.InjectionTarget.NAME) {
+                        String safeName = payload.replace("\r", "").replace("\n", "");
                         modified = modified.withRemovedHeader(target.name);
-                        modified = modified.withAddedHeader(payload, target.originalValue);
+                        modified = modified.withAddedHeader(safeName, target.originalValue);
                     }
                     break;
                     
@@ -724,35 +753,46 @@ public class UniversalScanner extends AbstractScanner {
     /**
      * 辅助方法：检查值是否匹配
      */
-    private boolean matchesValue(String actualValue, String matchValue, UnifiedHttpConfig.MatchType matchType) {
+    /**
+     * ✅ 修复：支持区分大小写配置
+     */
+    private boolean matchesValue(String actualValue, String matchValue, 
+                                 UnifiedHttpConfig.MatchType matchType, 
+                                 boolean caseSensitive) {
         if (actualValue == null || matchValue == null) {
             return false;
         }
+        
+        // 准备比较用的值
+        String compareActual = caseSensitive ? actualValue : actualValue.toLowerCase();
+        String compareMatch = caseSensitive ? matchValue : matchValue.toLowerCase();
         
         switch (matchType) {
             case ANY:
                 return true;
             case EQUALS:
-                return actualValue.equals(matchValue);
+                return compareActual.equals(compareMatch);
             case CONTAINS:
-                return actualValue.contains(matchValue);
+                return compareActual.contains(compareMatch);
             case REGEX:
                 try {
-                    java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(matchValue);
+                    java.util.regex.Pattern pattern = caseSensitive
+                        ? java.util.regex.Pattern.compile(matchValue)
+                        : java.util.regex.Pattern.compile(matchValue, java.util.regex.Pattern.CASE_INSENSITIVE);
                     return pattern.matcher(actualValue).find();
                 } catch (Exception e) {
                     return false;
                 }
             case STARTS_WITH:
-                return actualValue.startsWith(matchValue);
+                return compareActual.startsWith(compareMatch);
             case ENDS_WITH:
-                return actualValue.endsWith(matchValue);
+                return compareActual.endsWith(compareMatch);
             case NOT_EQUALS:
-                return !actualValue.equals(matchValue);
+                return !compareActual.equals(compareMatch);
             case NOT_CONTAINS:
-                return !actualValue.contains(matchValue);
+                return !compareActual.contains(compareMatch);
             default:
-                return actualValue.contains(matchValue);
+                return compareActual.contains(compareMatch);
         }
     }
     
@@ -775,9 +815,11 @@ public class UniversalScanner extends AbstractScanner {
                     break;
                     
                 case PATH:
-                    // 注入到路径
+                    // ✅ P0修复: 注入到路径（检查是否需要URL编码）
                     if (target == UnifiedHttpConfig.InjectionTarget.VALUE || 
                         target == UnifiedHttpConfig.InjectionTarget.ENTIRE) {
+                        // 注意: withPath可能不会自动URL编码,如果payload包含特殊字符可能导致请求无效
+                        // 但URL编码的Path可能也不符合预期,所以保持原样,让用户在payload中控制
                         modified = modified.withPath(payload);
                     }
                     break;
@@ -865,23 +907,29 @@ public class UniversalScanner extends AbstractScanner {
                     break;
                     
                 case HEADER:
-                    // ✅ 改进：支持通过nameMatchConfig匹配多个Header名
+                    // ✅ P0修复: 支持通过nameMatchConfig匹配多个Header名，并防止Header注入
                     for (var header : originalRequest.headers()) {
                         boolean shouldInject = false;
                         
-                        // 1. 如果element.name有值，优先使用name匹配
+                        // 1. 如果element.name有值，优先使用name匹配（支持区分大小写）
                         String elementName = element.getName();
                         if (elementName != null && !elementName.isEmpty()) {
-                            shouldInject = header.name().equals(elementName);
+                            boolean caseSensitive = element.getNameMatchConfig() != null 
+                                ? element.getNameMatchConfig().isCaseSensitive() 
+                                : false;  // Header名称默认不区分大小写
+                            shouldInject = caseSensitive 
+                                ? header.name().equals(elementName)
+                                : header.name().equalsIgnoreCase(elementName);
                         } 
                         // 2. 否则，使用nameMatchConfig匹配
                         else if (element.getNameMatchConfig() != null && 
                                  element.getNameMatchConfig().getValues() != null &&
                                  !element.getNameMatchConfig().getValues().isEmpty()) {
                             // 检查Header名是否匹配配置的任何一个值
+                            boolean caseSensitive = element.getNameMatchConfig().isCaseSensitive();
                             for (String matchValue : element.getNameMatchConfig().getValues()) {
                                 if (matchValue != null && !matchValue.isEmpty() && 
-                                    matchesValue(header.name(), matchValue, element.getNameMatchConfig().getMatchType())) {
+                                    matchesValue(header.name(), matchValue, element.getNameMatchConfig().getMatchType(), caseSensitive)) {
                                     shouldInject = true;
                                     break;
                                 }
@@ -891,10 +939,14 @@ public class UniversalScanner extends AbstractScanner {
                         // 如果匹配成功，执行注入
                         if (shouldInject) {
                             if (target == UnifiedHttpConfig.InjectionTarget.VALUE) {
-                                modified = modified.withUpdatedHeader(header.name(), payload);
+                                // ✅ P0修复: 移除payload中的换行符，防止Header注入攻击
+                                String safePayload = payload.replace("\r", "").replace("\n", "");
+                                modified = modified.withUpdatedHeader(header.name(), safePayload);
                             } else if (target == UnifiedHttpConfig.InjectionTarget.NAME) {
+                                // Header名称也需要防止换行符
+                                String safeName = payload.replace("\r", "").replace("\n", "");
                                 modified = modified.withRemovedHeader(header.name());
-                                modified = modified.withAddedHeader(payload, header.value());
+                                modified = modified.withAddedHeader(safeName, header.value());
                             }
                         }
                     }
@@ -909,19 +961,25 @@ public class UniversalScanner extends AbstractScanner {
                         
                         boolean shouldInject = false;
                         
-                        // 1. 如果element.name有值，优先使用name匹配
+                        // 1. 如果element.name有值，优先使用name匹配（支持区分大小写）
                         String elementName = element.getName();
                         if (elementName != null && !elementName.isEmpty()) {
-                            shouldInject = param.name().equals(elementName);
+                            boolean caseSensitive = element.getNameMatchConfig() != null 
+                                ? element.getNameMatchConfig().isCaseSensitive() 
+                                : true;  // Cookie名称默认区分大小写
+                            shouldInject = caseSensitive 
+                                ? param.name().equals(elementName)
+                                : param.name().equalsIgnoreCase(elementName);
                         } 
                         // 2. 否则，使用nameMatchConfig匹配
                         else if (element.getNameMatchConfig() != null && 
                                  element.getNameMatchConfig().getValues() != null &&
                                  !element.getNameMatchConfig().getValues().isEmpty()) {
                             // 检查Cookie名是否匹配配置的任何一个值
+                            boolean caseSensitive = element.getNameMatchConfig().isCaseSensitive();
                             for (String matchValue : element.getNameMatchConfig().getValues()) {
                                 if (matchValue != null && !matchValue.isEmpty() && 
-                                    matchesValue(param.name(), matchValue, element.getNameMatchConfig().getMatchType())) {
+                                    matchesValue(param.name(), matchValue, element.getNameMatchConfig().getMatchType(), caseSensitive)) {
                                     shouldInject = true;
                                     break;
                                 }

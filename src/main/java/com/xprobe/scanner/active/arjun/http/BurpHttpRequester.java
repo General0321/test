@@ -6,38 +6,88 @@ import burp.api.montoya.http.message.params.HttpParameter;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.xprobe.scanner.active.arjun.error.RateLimiter;
 
 import java.util.*;
 
 /**
  * HTTP请求执行器 - 使用Burp API发送请求
+ * ✅ 集成速率限制和错误处理（对应Python的requester.py）
  */
 public class BurpHttpRequester {
     
     private final MontoyaApi api;
     private final ObjectMapper jsonMapper;
+    private final RateLimiter rateLimiter;    // ✅ 新增：速率限制器
+    private final int timeout;                 // ✅ 新增：超时时间（秒）
     
     public BurpHttpRequester(MontoyaApi api) {
+        this(api, 9999, false, 15);  // 默认：9999 req/s, 非稳定模式, 15秒超时
+    }
+    
+    public BurpHttpRequester(MontoyaApi api, int maxRequestsPerSecond, boolean stableMode, int timeout) {
         this.api = api;
         this.jsonMapper = new ObjectMapper();
+        this.rateLimiter = new RateLimiter(api, maxRequestsPerSecond, stableMode);
+        this.timeout = timeout;
     }
     
     /**
-     * 发送HTTP请求
+     * 发送HTTP请求（对应Python的requester()）
+     * ✅ 集成速率限制（@limits装饰器）
+     * ✅ 捕获异常并包装为RequestResult
      */
-    public HttpResponse sendRequest(HttpRequest request) {
+    public RequestResult sendRequest(HttpRequest request) {
         try {
+            // ✅ 速率限制（Python: @limits + time.sleep(delay)）
+            rateLimiter.acquire();
+            
+            // 发送请求
             HttpRequestResponse result = api.http().sendRequest(request);
             
             if (result.response() == null) {
-                throw new RuntimeException("响应为空");
+                return RequestResult.error(new RuntimeException("响应为空"));
             }
             
-            return result.response();
+            return RequestResult.success(result.response());
             
         } catch (Exception e) {
-            api.logging().raiseErrorEvent("发送请求失败: " + e.getMessage());
-            throw new RuntimeException("请求失败", e);
+            // ✅ Python: 捕获所有异常返回字符串（requester.py line 79-80）
+            api.logging().raiseDebugEvent("请求异常: " + e.getMessage());
+            return RequestResult.error(e);
+        }
+    }
+    
+    /**
+     * 请求结果包装器（用于错误处理）
+     */
+    public static class RequestResult {
+        private final HttpResponse response;
+        private final Exception exception;
+        
+        private RequestResult(HttpResponse response, Exception exception) {
+            this.response = response;
+            this.exception = exception;
+        }
+        
+        public static RequestResult success(HttpResponse response) {
+            return new RequestResult(response, null);
+        }
+        
+        public static RequestResult error(Exception exception) {
+            return new RequestResult(null, exception);
+        }
+        
+        public boolean isSuccess() {
+            return exception == null && response != null;
+        }
+        
+        public HttpResponse getResponse() {
+            return response;
+        }
+        
+        public Exception getException() {
+            return exception;
         }
     }
     

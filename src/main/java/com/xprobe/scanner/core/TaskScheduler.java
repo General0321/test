@@ -4,6 +4,7 @@ import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
 import com.xprobe.scanner.Logs.LogModel;
+import com.xprobe.scanner.config.XProbeConfig;
 import com.xprobe.scanner.config.XProbeConfigManager;
 import com.xprobe.scanner.models.ScanResult;
 import com.xprobe.scanner.models.ScanTask;
@@ -11,10 +12,7 @@ import com.xprobe.scanner.scanners.Scanner;
 import com.xprobe.scanner.scanners.ScannerFactory;
 
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -33,10 +31,50 @@ public class TaskScheduler {
         this.scannerFactory = scannerFactory;
         this.logModel = logModel;
         this.xprobeConfigManager = xprobeConfigManager;  // ✅ 改为配置管理器
-        // 创建固定大小的线程池
-        this.executorService = Executors.newFixedThreadPool(
-            Runtime.getRuntime().availableProcessors() * 2
+        
+        // ✅ 修复：创建可伸缩线程池（从配置读取参数）
+        XProbeConfig config = xprobeConfigManager.getConfig();
+        int cpuCount = Runtime.getRuntime().availableProcessors();
+        
+        // 核心线程数：-1表示自动（CPU×2），否则使用配置值
+        int corePoolSize = config.getScannerCoreThreads() == -1 
+            ? cpuCount * 2 
+            : config.getScannerCoreThreads();
+        
+        // 最大线程数：-1表示自动（核心×2），否则使用配置值
+        int maximumPoolSize = config.getScannerMaxThreads() == -1 
+            ? corePoolSize * 2 
+            : config.getScannerMaxThreads();
+        
+        // 队列大小和空闲时间从配置读取
+        int queueSize = config.getScannerQueueSize();
+        long keepAliveTime = config.getScannerKeepAliveSeconds();
+        
+        BlockingQueue<Runnable> workQueue = new LinkedBlockingQueue<>(queueSize);
+        
+        this.executorService = new ThreadPoolExecutor(
+            corePoolSize,           // 核心线程数
+            maximumPoolSize,        // 最大线程数
+            keepAliveTime,          // 空闲线程存活时间
+            TimeUnit.SECONDS,
+            workQueue,              // 有界队列
+            new ThreadFactory() {
+                private final AtomicInteger threadNumber = new AtomicInteger(1);
+                @Override
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "XProbe-Scanner-" + threadNumber.getAndIncrement());
+                    t.setDaemon(true);  // 守护线程，随主线程退出
+                    return t;
+                }
+            },
+            new ThreadPoolExecutor.CallerRunsPolicy()  // 拒绝策略：由调用者线程执行
         );
+        
+        api.logging().raiseInfoEvent(String.format(
+            "✅ 线程池初始化完成: CPU=%d核, 核心线程=%d, 最大线程=%d, 队列=%d, 空闲回收=%d秒%s",
+            cpuCount, corePoolSize, maximumPoolSize, queueSize, keepAliveTime,
+            config.getScannerCoreThreads() == -1 ? " (自动)" : " (用户配置)"
+        ));
     }
     
     /**

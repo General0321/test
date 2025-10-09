@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * ✅ 跨平台（不受macOS SIP等安全限制）
  * ✅ 更强大的异常检测算法
  * ✅ 支持GET/POST/POST-JSON
- * ✅ 内置152个特殊参数
+ * ✅ 完全用户自定义参数字典（无默认参数）
  * ✅ 动态稳定性因子调整
  */
 public class ArjunService {
@@ -42,12 +42,43 @@ public class ArjunService {
     }
     
     public ArjunService(MontoyaApi api, LogModel logModel, ArjunConfig config) {
+        this(api, logModel, config, null);  // 委托到完整构造函数
+    }
+    
+    public ArjunService(MontoyaApi api, LogModel logModel, ArjunConfig config, com.xprobe.scanner.config.XProbeConfig xprobeConfig) {
         this.api = api;
         this.logModel = logModel;
         this.config = config;
-        this.engine = new ParamDiscoveryEngine(api, config.getChunkSize(), false);
         
-        api.logging().raiseInfoEvent("✅ Arjun服务初始化完成（Java原生实现）");
+        // ✅ 使用XProbeConfig中的高级配置（如果提供）
+        int rateLimit = 9999;
+        boolean stableMode = false;
+        int threads = 5;
+        int maxRetries = 5;
+        
+        if (xprobeConfig != null) {
+            rateLimit = xprobeConfig.getArjunRateLimit();
+            stableMode = xprobeConfig.isArjunStableMode();
+            threads = xprobeConfig.getArjunThreads();
+            maxRetries = xprobeConfig.getArjunMaxRetries();
+        }
+        
+        this.engine = new ParamDiscoveryEngine(
+            api, 
+            config.getChunkSize(),     // chunk大小
+            rateLimit,                  // ✅ 从配置读取
+            stableMode,                 // ✅ 从配置读取
+            threads,                    // ✅ 从配置读取
+            maxRetries                  // ✅ 从配置读取
+        );
+        
+        api.logging().raiseInfoEvent(String.format(
+            "✅ Arjun服务初始化完成 (稳定模式:%s 线程:%d 重试:%d 速率:%d req/s)",
+            stableMode ? "开启" : "关闭",
+            threads,
+            maxRetries,
+            rateLimit
+        ));
     }
     
     /**
@@ -62,6 +93,12 @@ public class ArjunService {
         
         String url = request.url();
         String method = request.method();
+        
+        // ✅ 过滤静态资源（包括JS）- Arjun不应该扫描静态资源
+        if (!com.xprobe.scanner.utils.StaticResourceFilter.shouldScanWithArjun(url)) {
+            api.logging().raiseDebugEvent("Arjun跳过静态资源: " + url);
+            return CompletableFuture.completedFuture(ArjunResult.error("跳过静态资源: " + url));
+        }
         
         // 合并用户自定义字典
         Set<String> mergedDictionary = new HashSet<>(customDictionary);
@@ -240,6 +277,17 @@ public class ArjunService {
             } else {
                 return "ArjunResult{error='" + errorMessage + "'}";
             }
+        }
+    }
+    
+    /**
+     * ✅ P0修复：关闭Arjun服务资源
+     */
+    public void shutdown() {
+        api.logging().raiseInfoEvent("关闭ArjunService资源...");
+        
+        if (engine != null) {
+            engine.shutdown();
         }
     }
     

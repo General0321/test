@@ -25,26 +25,11 @@ public class ParameterManager {
     // Key: method|host|contentType|endpoint, Value: 已扫描的参数集合
     private final Map<String, Set<String>> arjunScannedParameters = new ConcurrentHashMap<>();
     
-    // 常见参数（默认参数字典）
-    private static final String[] COMMON_PARAMETERS = {
-        "id", "user", "username", "password", "token", "key", "page", "limit",
-        "offset", "sort", "order", "filter", "search", "q", "query", "action",
-        "method", "callback", "format", "type", "category", "status", "level",
-        "api_key", "access_token", "auth", "authorization", "debug", "test"
-    };
-    
     public ParameterManager(MontoyaApi api) {
         this.api = api;
-        // 初始化时添加常见参数到全局字典
-        initializeCommonParameters();
-    }
-    
-    /**
-     * 初始化常见参数
-     */
-    private void initializeCommonParameters() {
-        globalCustomParameters.addAll(Arrays.asList(COMMON_PARAMETERS));
-        api.logging().raiseDebugEvent("初始化了 " + COMMON_PARAMETERS.length + " 个常见参数");
+        // ✅ 不再初始化默认参数，完全依靠从流量收集和用户自定义
+        // 特殊参数（用于WAF绕过）由ArjunDictionary.getSpecialParams()提供
+        api.logging().raiseDebugEvent("参数管理器已初始化（无默认参数，依靠流量收集）");
     }
     
     // ========== 全局参数管理 ==========
@@ -83,11 +68,10 @@ public class ParameterManager {
     }
     
     /**
-     * 清空全局自定义参数（不包括常见参数）
+     * 清空全局自定义参数
      */
     public void clearGlobalCustomParameters() {
         globalCustomParameters.clear();
-        initializeCommonParameters();  // 重新添加常见参数
         api.logging().raiseInfoEvent("清空全局自定义参数");
     }
     

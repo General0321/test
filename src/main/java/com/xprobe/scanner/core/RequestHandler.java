@@ -68,8 +68,10 @@ public class RequestHandler implements HttpHandler {
             taskScheduler.scheduleScan(scanTasks);
         }
         
-        // 5. 将请求发送给实时扫描器处理
-        realtimeScanner.processNewRequest(requestToBeSent);
+        // 5. 将请求发送给实时扫描器处理（只处理PROXY流量）
+        if (requestToBeSent.toolSource().isFromTool(burp.api.montoya.core.ToolType.PROXY)) {
+            realtimeScanner.processNewRequest(requestToBeSent);
+        }
         
         // 6. 立即返回，不阻塞请求
         return RequestToBeSentAction.continueWith(requestToBeSent);
@@ -77,7 +79,19 @@ public class RequestHandler implements HttpHandler {
     
     @Override
     public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived responseReceived) {
-        // 当前不处理响应
+        // ✅ 只处理PROXY流量（与请求处理保持一致）
+        if (responseReceived.toolSource().isFromTool(burp.api.montoya.core.ToolType.PROXY)) {
+            try {
+                // 收集响应中的参数和关键词
+                realtimeScanner.processResponse(
+                    responseReceived.initiatingRequest(), 
+                    responseReceived
+                );
+            } catch (Exception e) {
+                api.logging().raiseErrorEvent("处理响应时出错: " + e.getMessage());
+            }
+        }
+        
         return ResponseReceivedAction.continueWith(responseReceived);
     }
     

@@ -26,6 +26,12 @@ import java.awt.*;
 public class XProbe implements BurpExtension {
     private TaskScheduler taskScheduler;
     private XProbeConfigManager xprobeConfigManager;
+    private com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner;  // ✅ P0修复：保存引用以便关闭
+    
+    // ✅ 修复：保存UI Tab引用以便清理资源
+    private DashboardTab dashboardTab;
+    private ScanResultTab scanResultTab;
+    private ActiveProbeTab activeProbeTab;
     
     @Override
     public void initialize(MontoyaApi api) {
@@ -84,7 +90,7 @@ public class XProbe implements BurpExtension {
         
         // 创建重构后的RealtimeScanner (必须在ScannerFactory之前创建)
         // ✅ 传入 XProbeConfig 以正确初始化 ArjunService
-        com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner = 
+        realtimeScanner = 
             new com.xprobe.scanner.active.RealtimeScannerRefactored(api, configManager, globalFilter, logModel, config);
         
         // 应用参数收集模式
@@ -132,11 +138,32 @@ public class XProbe implements BurpExtension {
         // ✅ 创建并注册UI界面（传入 realtimeScanner 和 xprobeConfigManager）
         api.userInterface().registerSuiteTab("XProbe", constructMainTab(api, logModel, configManager, requestFilter, globalFilter, realtimeScanner));
         
-        // 注册扩展卸载处理器
+        // ✅ P0修复：注册完整的资源清理处理器
         api.extension().registerUnloadingHandler(() -> {
+            api.logging().raiseInfoEvent("🛑 正在关闭XProbe插件...");
+            
+            // ✅ 修复：清理UI Tab资源
+            if (dashboardTab != null) {
+                dashboardTab.cleanup();
+            }
+            
+            if (scanResultTab != null) {
+                scanResultTab.cleanup();
+            }
+            
+            if (activeProbeTab != null) {
+                activeProbeTab.cleanup();
+            }
+            
             if (taskScheduler != null) {
                 taskScheduler.shutdown();
             }
+            
+            if (realtimeScanner != null) {
+                realtimeScanner.shutdown();
+            }
+            
+            api.logging().raiseInfoEvent("✅ XProbe插件已安全关闭");
         });
         
         api.logging().raiseInfoEvent("🚀 XProbe 插件初始化完成");
@@ -148,14 +175,14 @@ public class XProbe implements BurpExtension {
         JTabbedPane tabbedPane = new JTabbedPane();
 
         // 1. 仪表板 - 总览
-        DashboardTab dashboardTab = new DashboardTab(api, configManager, requestFilter, logModel);
-        dashboardTab.setParameterCollector(realtimeScanner.getParameterCollector());
-        dashboardTab.setArjunService(realtimeScanner.getArjunService());  // ✅ 设置Arjun服务
-        tabbedPane.addTab("📊 仪表板", dashboardTab.getComponent());
+        this.dashboardTab = new DashboardTab(api, configManager, requestFilter, logModel);
+        this.dashboardTab.setParameterCollector(realtimeScanner.getParameterCollector());
+        this.dashboardTab.setArjunService(realtimeScanner.getArjunService());  // ✅ 设置Arjun服务
+        tabbedPane.addTab("📊 仪表板", this.dashboardTab.getComponent());
 
         // 2. 扫描结果 - 结果展示
-        ScanResultTab scanResultTab = new ScanResultTab(api, logModel);
-        tabbedPane.addTab("📋 扫描结果", scanResultTab.getComponent());
+        this.scanResultTab = new ScanResultTab(api, logModel);
+        tabbedPane.addTab("📋 扫描结果", this.scanResultTab.getComponent());
 
         // 3. 被动扫描规则 - 核心功能
         com.xprobe.scanner.ui.PassiveScanConfigTab passiveScanTab = 
@@ -163,8 +190,8 @@ public class XProbe implements BurpExtension {
         tabbedPane.addTab("🔍 被动扫描规则", passiveScanTab.getComponent());
 
         // 4. 主动探测 - 辅助功能（参数挖掘）
-        ActiveProbeTab activeProbeTab = new ActiveProbeTab(api, configManager, realtimeScanner);
-        tabbedPane.addTab("✨ 主动探测", activeProbeTab.getComponent());
+        this.activeProbeTab = new ActiveProbeTab(api, configManager, realtimeScanner);
+        tabbedPane.addTab("✨ 主动探测", this.activeProbeTab.getComponent());
 
         // 5. 配置中心 - 全局配置（黑白名单、工具配置等）
         UnifiedConfigTab unifiedConfigTab = new UnifiedConfigTab(api, configManager, globalFilter, realtimeScanner, xprobeConfigManager);

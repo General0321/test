@@ -4,6 +4,7 @@ import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.HttpService;
 import burp.api.montoya.http.handler.HttpRequestToBeSent;
 import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.http.message.responses.HttpResponse;
 import burp.api.montoya.http.message.params.HttpParameter;
 import burp.api.montoya.http.message.params.ParsedHttpParameter;
 import burp.api.montoya.sitemap.SiteMap;
@@ -16,6 +17,7 @@ import com.xprobe.scanner.active.arjun.ArjunService;
 import com.xprobe.scanner.Logs.LogModel;
 import com.xprobe.scanner.models.RequestContext;
 import com.xprobe.scanner.models.ScanTask;
+import com.xprobe.scanner.utils.BoundedCache;
 
 import java.net.URI;
 import java.util.*;
@@ -40,8 +42,9 @@ public class RealtimeScannerRefactored {
     private final ParameterCollector parameterCollector;
     private final ParameterManager parameterManager;
     
-    // 被动扫描去重机制
-    private final Set<String> passiveScanProcessedKeys = ConcurrentHashMap.newKeySet();
+    // ✅ P0修复: 被动扫描去重机制 - 使用有界缓存（FIFO）防止内存泄漏
+    // 最多保存10万条记录，超过则自动淘汰最早插入的记录
+    private final BoundedCache<String, Boolean> passiveScanProcessedKeys = new BoundedCache<>(100_000);
     
     // ✅ TaskScheduler引用（用于Arjun发现参数后触发漏洞扫描）
     private TaskScheduler taskScheduler;
@@ -51,6 +54,12 @@ public class RealtimeScannerRefactored {
     private final Map<String, Integer> lastParameterCount = new ConcurrentHashMap<>();
     private volatile int minParameterThreshold = 15;  // ✅ P1修复：volatile确保多线程可见性
     private volatile int cooldownSeconds = 300;  // ✅ P1修复：volatile确保多线程可见性
+    
+    // ✅ 修复：主动探测总开关（控制Arjun触发）
+    private volatile boolean arjunEnabled = false;
+    
+    // ✅ 修复：触发模式（手动 vs 实时）
+    private volatile boolean isRealtimeMode = false;  // 默认手动模式
     
     public RealtimeScannerRefactored(MontoyaApi api, ConfigurationManager configManager, 
                                     GlobalFilter globalFilter, LogModel logModel, 
@@ -68,7 +77,8 @@ public class RealtimeScannerRefactored {
         arjunConfig.setTimeout(xprobeConfig.getArjunTimeout());
         arjunConfig.setEnabled(xprobeConfig.isArjunEnabled());
         
-        this.arjunService = new ArjunService(api, logModel, arjunConfig);
+        // ✅ P0修复：传递xprobeConfig以启用高级配置（稳定模式、线程数、重试次数、速率限制）
+        this.arjunService = new ArjunService(api, logModel, arjunConfig, xprobeConfig);
         
         // 应用用户自定义字典
         if (xprobeConfig.getArjunCustomDictionary() != null) {
@@ -96,6 +106,41 @@ public class RealtimeScannerRefactored {
      * 
      * @param request HTTP 请求
      */
+    /**
+     * 处理HTTP响应，从中收集参数和关键词
+     * 
+     * @param request 原始请求
+     * @param responseReceived HTTP响应事件
+     */
+    public void processResponse(HttpRequest request, burp.api.montoya.http.handler.HttpResponseReceived responseReceived) {
+        try {
+            String url = request.url();
+            
+            // 跳过 Arjun 触发的流量
+            for (var header : request.headers()) {
+                if ("X-XProbe-Arjun".equalsIgnoreCase(header.name())) {
+                    return;
+                }
+            }
+            
+            // 检查全局过滤器
+            if (!globalFilter.shouldProcessActive(url)) {
+                return;
+            }
+            
+            // ✅ 只收集响应参数（请求参数已在 processNewRequest 中收集）
+            parameterCollector.collectFromResponse(request, responseReceived);
+            
+            // 可选：根据请求参数触发智能扫描
+            URI uri = new URI(url);
+            String mainDomain = extractMainDomain(uri.getHost());
+            api.logging().raiseDebugEvent("处理主域名: " + mainDomain + " 的响应");
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("处理响应时出错: " + e.getMessage());
+        }
+    }
+    
     public void processNewRequest(HttpRequest request) {
         try {
             String url = request.url();
@@ -134,9 +179,15 @@ public class RealtimeScannerRefactored {
     
     /**
      * 检查并自动触发Arjun（基于阈值和冷却时间）
+     * ✅ 只在实时模式下执行
      */
     private void checkAndAutoTriggerArjun(HttpRequest request) {
         try {
+            // ✅ 修复：检查主开关和模式
+            if (!arjunEnabled || !isRealtimeMode) {
+                return;  // 主开关关闭或非实时模式，不自动触发
+            }
+            
             String mainDomain = extractMainDomain(request);
             long currentTime = System.currentTimeMillis();
             
@@ -195,9 +246,15 @@ public class RealtimeScannerRefactored {
     
     /**
      * 定时检查所有主域名（兜底机制，只在有新参数时触发）
+     * ✅ 只在实时模式下执行
      */
     public void periodicArjunCheck() {
         try {
+            // ✅ 修复：检查主开关和模式
+            if (!arjunEnabled || !isRealtimeMode) {
+                return;  // 主开关关闭或非实时模式，不定时触发
+            }
+            
             Set<String> allMainDomains = parameterCollector.getAllMainDomains();
             long currentTime = System.currentTimeMillis();
             
@@ -260,6 +317,12 @@ public class RealtimeScannerRefactored {
      */
     private void triggerArjunForMainDomain(String mainDomain) {
         try {
+            // ✅ 修复：检查主动探测总开关
+            if (!arjunEnabled) {
+                api.logging().raiseDebugEvent("主动探测已禁用，跳过Arjun扫描: " + mainDomain);
+                return;
+            }
+            
             Set<String> collectedParams = parameterCollector.getParametersForMainDomain(mainDomain);
             Set<ParameterCollector.EndpointKey> endpointKeys = 
                 parameterCollector.getEndpointKeysForMainDomain(mainDomain);
@@ -395,6 +458,12 @@ public class RealtimeScannerRefactored {
      */
     public void triggerManualArjunScan() {
         try {
+            // ✅ 修复：检查主动探测总开关
+            if (!arjunEnabled) {
+                api.logging().raiseInfoEvent("主动探测已禁用，跳过Arjun扫描");
+                return;
+            }
+            
             api.logging().raiseInfoEvent("从 SiteMap 历史流量触发 Arjun 扫描...");
             
             CompletableFuture.runAsync(() -> {
@@ -421,6 +490,12 @@ public class RealtimeScannerRefactored {
      */
     public void triggerArjunScanFromProxy() {
         try {
+            // ✅ 修复：检查主动探测总开关
+            if (!arjunEnabled) {
+                api.logging().raiseInfoEvent("主动探测已禁用，跳过Arjun扫描");
+                return;
+            }
+            
             api.logging().raiseInfoEvent("从 Proxy 实时流量触发 Arjun 扫描...");
             
             CompletableFuture.runAsync(() -> {
@@ -1047,14 +1122,14 @@ public class RealtimeScannerRefactored {
             method, host, path, contentType, config, targetIdentifier
         );
         
-        // Set.add()对于ConcurrentHashMap.newKeySet()来说是原子操作
-        // 如果key已存在，返回false；如果key不存在，添加并返回true
-        boolean wasAdded = passiveScanProcessedKeys.add(key);
+        // ✅ P0修复: 使用LRUCache.put()原子操作
+        // put()返回true表示首次添加(未被处理过)，返回false表示已存在(已被处理过)
+        boolean wasNew = passiveScanProcessedKeys.put(key, Boolean.TRUE);
         
         // 返回相反值：
-        // wasAdded=true 表示首次添加（未被处理过），返回false（应该扫描）
-        // wasAdded=false 表示已存在（已被处理过），返回true（应该跳过）
-        return !wasAdded;
+        // wasNew=true 表示首次添加（未被处理过），返回false（应该扫描）
+        // wasNew=false 表示已存在（已被处理过），返回true（应该跳过）
+        return !wasNew;
     }
     
     /**
@@ -1065,7 +1140,7 @@ public class RealtimeScannerRefactored {
      * @return true=已处理（跳过），false=未处理（继续）
      */
     public boolean isAlreadyProcessed(String key) {
-        return passiveScanProcessedKeys.contains(key);
+        return passiveScanProcessedKeys.containsKey(key);
     }
     
     /**
@@ -1075,7 +1150,7 @@ public class RealtimeScannerRefactored {
      * @param key 去重key
      */
     public void markAsProcessed(String key) {
-        passiveScanProcessedKeys.add(key);
+        passiveScanProcessedKeys.put(key, Boolean.TRUE);
     }
     
     /**
@@ -1214,10 +1289,8 @@ public class RealtimeScannerRefactored {
                 if (foundParams.contains(param.name())) {
                     // 为每个启用的配置创建任务
                     for (Configuration config : configManager.getEnabledConfigurations()) {
-                        // ✅ 使用强制转换（Scanner会正确处理）
-                        @SuppressWarnings("unchecked")
-                        HttpRequestToBeSent requestToBeSent = (HttpRequestToBeSent) (Object) requestWithParams;
-                        scanTasks.add(new ScanTask(param, config, requestToBeSent, context));
+                        // ✅ 修复：直接使用HttpRequest，不需要强制转换
+                        scanTasks.add(new ScanTask(param, config, requestWithParams, context));
                     }
                 }
             }
@@ -1301,9 +1374,9 @@ public class RealtimeScannerRefactored {
      * 注意：实时扫描自动运行，此方法主要用于UI控制
      */
     public void startRealtimeScanning() {
-        api.logging().raiseInfoEvent("实时参数收集已启动");
-        // 实际上参数收集是自动进行的，通过 processNewRequest() 被动收集
-        // 这里可以添加额外的启动逻辑，比如清理缓存等
+        arjunEnabled = true;  // ✅ 修复：启用Arjun触发
+        // 注意：默认是手动模式，需要UI明确设置为实时模式
+        api.logging().raiseInfoEvent("✅ 主动探测已启用（默认手动模式）");
     }
     
     /**
@@ -1311,8 +1384,32 @@ public class RealtimeScannerRefactored {
      * 注意：实际上只是停止Arjun主动探测，被动收集继续进行
      */
     public void stopRealtimeScanning() {
-        api.logging().raiseInfoEvent("实时参数收集已停止");
-        // 可以添加停止逻辑，如清空待扫描队列等
+        arjunEnabled = false;  // ✅ 修复：禁用Arjun触发
+        isRealtimeMode = false;  // 同时关闭实时模式
+        api.logging().raiseInfoEvent("⚫ 主动探测已禁用（被动参数收集继续进行）");
+    }
+    
+    /**
+     * 设置为实时模式
+     */
+    public void setRealtimeMode(boolean enabled) {
+        if (!arjunEnabled && enabled) {
+            api.logging().raiseInfoEvent("⚠️ 主开关未启用，无法切换到实时模式");
+            return;
+        }
+        this.isRealtimeMode = enabled;
+        if (enabled) {
+            api.logging().raiseInfoEvent("✅ 切换到实时模式（自动触发Arjun）");
+        } else {
+            api.logging().raiseInfoEvent("✅ 切换到手动模式（需点击按钮触发）");
+        }
+    }
+    
+    /**
+     * 获取当前模式
+     */
+    public boolean isRealtimeMode() {
+        return isRealtimeMode;
     }
     
     /**
@@ -1327,13 +1424,16 @@ public class RealtimeScannerRefactored {
             Set<String> parameters = parameterCollector.getParametersForMainDomain(mainDomain);
             Set<String> keywords = parameterCollector.getKeywordsForMainDomain(mainDomain);
             
+            // ✅ 使用实际的最后更新时间，而不是当前时间
+            long lastUpdateTime = parameterCollector.getLastUpdateTimeForDomain(mainDomain);
+            
             stats.put(mainDomain, new DomainStatistics(
                 mainDomain,
                 hosts.size(),
                 endpoints.size(),
                 parameters.size(),
                 keywords.size(),
-                System.currentTimeMillis()
+                lastUpdateTime  // ✅ 使用实际数据变化时间
             ));
         }
         
@@ -1374,6 +1474,17 @@ public class RealtimeScannerRefactored {
         public String getLastUpdateTimeFormatted() {
             java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("HH:mm:ss");
             return sdf.format(new java.util.Date(lastUpdateTime));
+        }
+    }
+    
+    /**
+     * ✅ P0修复：关闭RealtimeScanner资源
+     */
+    public void shutdown() {
+        api.logging().raiseInfoEvent("关闭RealtimeScanner资源...");
+        
+        if (arjunService != null) {
+            arjunService.shutdown();
         }
     }
 }

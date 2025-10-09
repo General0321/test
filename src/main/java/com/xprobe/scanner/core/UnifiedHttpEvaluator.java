@@ -197,29 +197,54 @@ public class UnifiedHttpEvaluator {
     
     /**
      * 评估Header
+     * ✅ 修复：支持区分大小写配置
      */
     private static boolean evaluateHeader(HttpRequest request, HttpElementConfig element) {
-        String headerName = element.getName();
-        if (headerName == null || headerName.isEmpty()) {
-            return false;
+        // 遍历所有header
+        for (var header : request.headers()) {
+            // 1. 检查header名称是否匹配
+            boolean nameMatches = false;
+            
+            // 优先使用element.name（精确匹配，支持区分大小写）
+            String elementName = element.getName();
+            if (elementName != null && !elementName.isEmpty()) {
+                // ✅ 使用nameMatchConfig的caseSensitive设置
+                boolean caseSensitive = element.getNameMatchConfig() != null 
+                    ? element.getNameMatchConfig().isCaseSensitive() 
+                    : false;  // 默认不区分大小写（符合HTTP规范）
+                    
+                if (caseSensitive) {
+                    nameMatches = header.name().equals(elementName);
+                } else {
+                    nameMatches = header.name().equalsIgnoreCase(elementName);
+                }
+            } 
+            // 其次使用nameMatchConfig（支持多种匹配模式和大小写）
+            else if (element.getNameMatchConfig() != null) {
+                nameMatches = matchValue(header.name(), element.getNameMatchConfig());
+            } 
+            // 如果两者都没有，跳过（必须指定header名称）
+            else {
+                continue;
+            }
+            
+            if (!nameMatches) {
+                continue;
+            }
+            
+            // 2. 检查header值是否匹配（支持区分大小写）
+            boolean valueMatches = matchValue(header.value(), element.getValueMatchConfig());
+            if (valueMatches) {
+                return true;  // 找到匹配的header
+            }
         }
         
-        // 获取Header值
-        String headerValue = request.headers().stream()
-            .filter(h -> h.name().equalsIgnoreCase(headerName))
-            .findFirst()
-            .map(h -> h.value())
-            .orElse(null);
-        
-        if (headerValue == null) {
-            return false;
-        }
-        
-        return matchValue(headerValue, element.getValueMatchConfig());
+        return false;  // 没有找到匹配的header
     }
     
     /**
      * 评估Cookie
+     * ✅ 修复：支持区分大小写配置
      */
     private static boolean evaluateCookie(HttpRequest request, HttpElementConfig element) {
         String cookieName = element.getName();
@@ -227,11 +252,24 @@ public class UnifiedHttpEvaluator {
             return false;
         }
         
+        // ✅ 获取区分大小写设置
+        boolean caseSensitive = element.getNameMatchConfig() != null 
+            ? element.getNameMatchConfig().isCaseSensitive() 
+            : true;  // Cookie名称默认区分大小写
+        
         // 查找Cookie
         for (ParsedHttpParameter param : request.parameters()) {
-            if (param.type() == HttpParameterType.COOKIE &&
-                param.name().equals(cookieName)) {
-                return matchValue(param.value(), element.getValueMatchConfig());
+            if (param.type() == HttpParameterType.COOKIE) {
+                boolean nameMatches;
+                if (caseSensitive) {
+                    nameMatches = param.name().equals(cookieName);
+                } else {
+                    nameMatches = param.name().equalsIgnoreCase(cookieName);
+                }
+                
+                if (nameMatches) {
+                    return matchValue(param.value(), element.getValueMatchConfig());
+                }
             }
         }
         

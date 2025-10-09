@@ -6,7 +6,6 @@ import burp.api.montoya.http.message.responses.HttpResponse;
 import com.xprobe.scanner.active.arjun.http.BurpHttpRequester;
 import com.xprobe.scanner.active.arjun.model.AnomalyResult;
 import com.xprobe.scanner.active.arjun.model.BaselineFactors;
-import com.xprobe.scanner.active.arjun.config.SpecialParams;
 
 import java.util.*;
 
@@ -37,15 +36,8 @@ public class ParamVerifier {
                                String param, 
                                BaselineFactors factors) {
         
-        // ✅ P1修复：使用特殊参数的特定值
-        Map<String, String> specialParams = SpecialParams.getSpecialParams();
-        String testValue;
-        
-        if (specialParams.containsKey(param)) {
-            testValue = specialParams.get(param);  // 使用特殊值
-        } else {
-            testValue = generateRandomValue(6);    // 使用随机值
-        }
+        // ✅ 所有参数使用随机值（不使用特殊参数）
+        String testValue = generateRandomValue(6);
         
         // 构建测试请求
         Map<String, String> testParams = new HashMap<>();
@@ -53,11 +45,16 @@ public class ParamVerifier {
         
         HttpRequest testRequest = requester.buildTestRequest(originalRequest, testParams);
         
-        // 发送请求
-        HttpResponse response = requester.sendRequest(testRequest);
+        // ✅ 发送请求（使用新的RequestResult）
+        BurpHttpRequester.RequestResult result = requester.sendRequest(testRequest);
+        
+        if (!result.isSuccess()) {
+            // 请求失败
+            return null;
+        }
         
         // 检测异常
-        AnomalyResult anomaly = detector.compare(response, factors, testParams);
+        AnomalyResult anomaly = detector.compare(result.getResponse(), factors, testParams);
         
         if (anomaly.hasAnomaly()) {
             return anomaly.getAnomalyType();

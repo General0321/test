@@ -1,20 +1,21 @@
 package com.xprobe.scanner.models;
 
-import burp.api.montoya.http.handler.HttpRequestToBeSent;
+import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.params.ParsedHttpParameter;
 import com.xprobe.scanner.config.Configuration;
 
 /**
  * 扫描任务
+ * ✅ 修复：使用HttpRequest代替HttpRequestToBeSent，避免类型转换错误
  */
 public class ScanTask {
     private final ParsedHttpParameter parameter;
     private final Configuration configuration;
-    private final HttpRequestToBeSent request;
+    private final HttpRequest request;  // ✅ 改为HttpRequest
     private final RequestContext context;
     
     public ScanTask(ParsedHttpParameter parameter, Configuration configuration, 
-                    HttpRequestToBeSent request, RequestContext context) {
+                    HttpRequest request, RequestContext context) {
         this.parameter = parameter;
         this.configuration = configuration;
         this.request = request;
@@ -29,7 +30,7 @@ public class ScanTask {
         return configuration;
     }
     
-    public HttpRequestToBeSent getRequest() {
+    public HttpRequest getRequest() {  // ✅ 改为HttpRequest
         return request;
     }
     

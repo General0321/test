@@ -62,9 +62,21 @@ public class UnifiedConfigTab {
     private JTextArea arjunCustomDictArea;
     private JLabel arjunDictCountLabel;
     
+    // ✅ Arjun高级配置组件（新增）
+    private JCheckBox arjunStableModeCheckBox;      // 稳定模式
+    private JSpinner arjunThreadsSpinner;           // 并发线程数
+    private JSpinner arjunMaxRetriesSpinner;        // 最大重试次数
+    private JSpinner arjunRateLimitSpinner;         // 速率限制（req/s）
+    
     // Arjun实时模式配置组件
     private JSpinner arjunRealtimeIntervalSpinner;
     private JSpinner arjunRealtimeThresholdSpinner;
+    
+    // ✅ 线程池配置组件（新增）
+    private JSpinner scannerCoreThreadsSpinner;       // 核心线程数
+    private JSpinner scannerMaxThreadsSpinner;        // 最大线程数
+    private JSpinner scannerQueueSizeSpinner;         // 队列大小
+    private JSpinner scannerKeepAliveSecondsSpinner;  // 空闲回收时间
     
     // ✅ 配置管理器
     private XProbeConfigManager xprobeConfigManager;
@@ -129,6 +141,18 @@ public class UnifiedConfigTab {
         // Arjun实时模式配置组件
         arjunRealtimeIntervalSpinner = new JSpinner(new SpinnerNumberModel(300, 60, 3600, 30));  // 60秒-60分钟，步长30秒
         arjunRealtimeThresholdSpinner = new JSpinner(new SpinnerNumberModel(15, 1, 100, 5));  // 1-100个，步长5
+        
+        // ✅ Arjun高级配置组件（新增）
+        arjunStableModeCheckBox = new JCheckBox("🐢 稳定模式（随机延迟3-10秒，应对速率限制）");
+        arjunThreadsSpinner = new JSpinner(new SpinnerNumberModel(5, 1, 20, 1));  // 1-20线程
+        arjunMaxRetriesSpinner = new JSpinner(new SpinnerNumberModel(5, 1, 10, 1));  // 1-10次重试
+        arjunRateLimitSpinner = new JSpinner(new SpinnerNumberModel(9999, 1, 10000, 100));  // 1-10000 req/s
+        
+        // ✅ 线程池配置组件（新增）
+        scannerCoreThreadsSpinner = new JSpinner(new SpinnerNumberModel(-1, -1, 128, 1));  // -1=自动
+        scannerMaxThreadsSpinner = new JSpinner(new SpinnerNumberModel(-1, -1, 256, 1));   // -1=自动
+        scannerQueueSizeSpinner = new JSpinner(new SpinnerNumberModel(2000, 100, 10000, 100));  // 100-10000
+        scannerKeepAliveSecondsSpinner = new JSpinner(new SpinnerNumberModel(120, 10, 600, 10));  // 10-600秒
     }
     
     private void setupLayout() {
@@ -139,6 +163,7 @@ public class UnifiedConfigTab {
         JTabbedPane tabbedPane = new JTabbedPane();
         tabbedPane.addTab("🔐 黑白名单", createFilterPanel());
         tabbedPane.addTab("⚡ 主动探测", createActiveScanPanel());
+        tabbedPane.addTab("🧵 线程池", createThreadPoolPanel());
         tabbedPane.addTab("🌐 代理池", createProxyPoolPanel());
         
         panel.add(tabbedPane, BorderLayout.CENTER);
@@ -554,6 +579,75 @@ public class UnifiedConfigTab {
         realtimeHint.setForeground(Color.GRAY);
         javaArjunContent.add(realtimeHint, gbc2);
         
+        // ✅ 高级配置分隔线
+        gbc2.gridx = 0; gbc2.gridy = 14; gbc2.gridwidth = 3; gbc2.weightx = 1.0;
+        JSeparator advSep = new JSeparator();
+        advSep.setBorder(new EmptyBorder(15, 0, 10, 0));
+        javaArjunContent.add(advSep, gbc2);
+        gbc2.gridwidth = 1;
+        
+        // ✅ 高级配置标题
+        gbc2.gridx = 0; gbc2.gridy = 15; gbc2.gridwidth = 3;
+        JLabel advLabel = new JLabel("⚙️ 高级配置（性能优化）");
+        advLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+        advLabel.setForeground(new Color(231, 76, 60));
+        javaArjunContent.add(advLabel, gbc2);
+        gbc2.gridwidth = 1;
+        
+        // ✅ 稳定模式
+        gbc2.gridx = 0; gbc2.gridy = 16; gbc2.gridwidth = 3;
+        arjunStableModeCheckBox.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(arjunStableModeCheckBox, gbc2);
+        gbc2.gridwidth = 1;
+        
+        // ✅ 并发线程数
+        gbc2.gridx = 0; gbc2.gridy = 17; gbc2.weightx = 0;
+        JLabel threadsLabel = new JLabel("🔀 并发线程数:");
+        threadsLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(threadsLabel, gbc2);
+        
+        gbc2.gridx = 1; gbc2.weightx = 0.3;
+        arjunThreadsSpinner.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(arjunThreadsSpinner, gbc2);
+        
+        gbc2.gridx = 2; gbc2.weightx = 0.7;
+        JLabel threadsUnit = new JLabel("个线程 (1-20，默认5，提升扫描速度)");
+        threadsUnit.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+        threadsUnit.setForeground(Color.GRAY);
+        javaArjunContent.add(threadsUnit, gbc2);
+        
+        // ✅ 最大重试次数
+        gbc2.gridx = 0; gbc2.gridy = 18; gbc2.weightx = 0;
+        JLabel retriesLabel = new JLabel("🔄 最大重试次数:");
+        retriesLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(retriesLabel, gbc2);
+        
+        gbc2.gridx = 1; gbc2.weightx = 0.3;
+        arjunMaxRetriesSpinner.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(arjunMaxRetriesSpinner, gbc2);
+        
+        gbc2.gridx = 2; gbc2.weightx = 0.7;
+        JLabel retriesUnit = new JLabel("次 (1-10，默认5，提升可靠性)");
+        retriesUnit.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+        retriesUnit.setForeground(Color.GRAY);
+        javaArjunContent.add(retriesUnit, gbc2);
+        
+        // ✅ 速率限制
+        gbc2.gridx = 0; gbc2.gridy = 19; gbc2.weightx = 0;
+        JLabel rateLimitLabel = new JLabel("⏱️ 速率限制:");
+        rateLimitLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(rateLimitLabel, gbc2);
+        
+        gbc2.gridx = 1; gbc2.weightx = 0.3;
+        arjunRateLimitSpinner.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        javaArjunContent.add(arjunRateLimitSpinner, gbc2);
+        
+        gbc2.gridx = 2; gbc2.weightx = 0.7;
+        JLabel rateLimitUnit = new JLabel("req/s (最大每秒请求数，默认9999)");
+        rateLimitUnit.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+        rateLimitUnit.setForeground(Color.GRAY);
+        javaArjunContent.add(rateLimitUnit, gbc2);
+        
         javaArjunConfigPanel.add(javaArjunContent, BorderLayout.CENTER);
         configContainer.add(javaArjunConfigPanel);
         configContainer.add(Box.createVerticalStrut(10));
@@ -620,6 +714,220 @@ public class UnifiedConfigTab {
         return panel;
     }
     
+    /**
+     * ✅ 创建线程池配置面板（增强版，带参考值）
+     */
+    private JPanel createThreadPoolPanel() {
+        JPanel mainPanel = new JPanel(new BorderLayout(10, 10));
+        mainPanel.setBorder(new EmptyBorder(10, 10, 10, 10));
+        
+        // 获取系统信息用于计算参考值
+        int cpuCount = Runtime.getRuntime().availableProcessors();
+        long maxMemoryMB = Runtime.getRuntime().maxMemory() / (1024 * 1024);
+        
+        // 顶部：系统信息和参考值
+        JPanel topPanel = new JPanel(new BorderLayout(10, 10));
+        
+        // 系统信息
+        JPanel systemInfoPanel = new JPanel(new GridLayout(3, 1, 5, 5));
+        systemInfoPanel.setBorder(BorderFactory.createCompoundBorder(
+            new TitledBorder("💻 当前系统信息"),
+            new EmptyBorder(10, 10, 10, 10)
+        ));
+        systemInfoPanel.setBackground(new Color(240, 248, 255));
+        
+        JLabel cpuLabel = new JLabel(String.format("  CPU核心数: %d 核", cpuCount));
+        cpuLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
+        systemInfoPanel.add(cpuLabel);
+        
+        JLabel memoryLabel = new JLabel(String.format("  可用内存: %d MB", maxMemoryMB));
+        memoryLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
+        systemInfoPanel.add(memoryLabel);
+        
+        JLabel recommendLabel = new JLabel(String.format("  📊 推荐配置: 核心=%d, 最大=%d, 队列=2000", 
+            cpuCount * 2, cpuCount * 4));
+        recommendLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
+        recommendLabel.setForeground(new Color(0, 128, 0));
+        systemInfoPanel.add(recommendLabel);
+        
+        topPanel.add(systemInfoPanel, BorderLayout.CENTER);
+        
+        // 快捷配置按钮
+        JPanel presetsPanel = new JPanel(new GridLayout(2, 2, 10, 10));
+        presetsPanel.setBorder(BorderFactory.createCompoundBorder(
+            new TitledBorder("⚡ 快捷配置"),
+            new EmptyBorder(10, 10, 10, 10)
+        ));
+        
+        // 自动模式按钮
+        JButton autoButton = new JButton("<html><center>🤖 自动模式<br><small>核心=-1, 最大=-1</small></center></html>");
+        autoButton.setToolTipText("自动根据CPU核心数设置（推荐）");
+        autoButton.setPreferredSize(new Dimension(150, 50));
+        autoButton.addActionListener(e -> {
+            scannerCoreThreadsSpinner.setValue(-1);
+            scannerMaxThreadsSpinner.setValue(-1);
+            scannerQueueSizeSpinner.setValue(2000);
+            scannerKeepAliveSecondsSpinner.setValue(120);
+            api.logging().raiseInfoEvent("✅ 线程池已设置为自动模式（推荐）");
+        });
+        presetsPanel.add(autoButton);
+        
+        // 保守模式按钮
+        JButton conservativeButton = new JButton(String.format(
+            "<html><center>🐌 保守模式<br><small>核心=%d, 最大=%d</small></center></html>",
+            Math.max(4, cpuCount), Math.max(8, cpuCount * 2)
+        ));
+        conservativeButton.setToolTipText("适合稳定优先、资源有限的场景");
+        conservativeButton.setPreferredSize(new Dimension(150, 50));
+        conservativeButton.addActionListener(e -> {
+            scannerCoreThreadsSpinner.setValue(Math.max(4, cpuCount));
+            scannerMaxThreadsSpinner.setValue(Math.max(8, cpuCount * 2));
+            scannerQueueSizeSpinner.setValue(3000);
+            scannerKeepAliveSecondsSpinner.setValue(180);
+            api.logging().raiseInfoEvent("✅ 线程池已设置为保守模式");
+        });
+        presetsPanel.add(conservativeButton);
+        
+        // 激进模式按钮
+        JButton aggressiveButton = new JButton(String.format(
+            "<html><center>🚀 激进模式<br><small>核心=%d, 最大=%d</small></center></html>",
+            cpuCount * 2, cpuCount * 4
+        ));
+        aggressiveButton.setToolTipText("适合高性能机器、追求速度的场景");
+        aggressiveButton.setPreferredSize(new Dimension(150, 50));
+        aggressiveButton.addActionListener(e -> {
+            scannerCoreThreadsSpinner.setValue(cpuCount * 2);
+            scannerMaxThreadsSpinner.setValue(cpuCount * 4);
+            scannerQueueSizeSpinner.setValue(1000);
+            scannerKeepAliveSecondsSpinner.setValue(60);
+            api.logging().raiseInfoEvent("✅ 线程池已设置为激进模式（高性能）");
+        });
+        presetsPanel.add(aggressiveButton);
+        
+        // 低配模式按钮
+        JButton lowEndButton = new JButton("<html><center>💻 低配模式<br><small>核心=4, 最大=8</small></center></html>");
+        lowEndButton.setToolTipText("适合低配机器或内存有限的场景");
+        lowEndButton.setPreferredSize(new Dimension(150, 50));
+        lowEndButton.addActionListener(e -> {
+            scannerCoreThreadsSpinner.setValue(4);
+            scannerMaxThreadsSpinner.setValue(8);
+            scannerQueueSizeSpinner.setValue(500);
+            scannerKeepAliveSecondsSpinner.setValue(120);
+            api.logging().raiseInfoEvent("✅ 线程池已设置为低配模式");
+        });
+        presetsPanel.add(lowEndButton);
+        
+        topPanel.add(presetsPanel, BorderLayout.EAST);
+        mainPanel.add(topPanel, BorderLayout.NORTH);
+        
+        // 中间：详细配置面板
+        JPanel configPanel = new JPanel(new GridBagLayout());
+        configPanel.setBorder(BorderFactory.createCompoundBorder(
+            new TitledBorder("⚙️ 详细配置"),
+            new EmptyBorder(10, 10, 10, 10)
+        ));
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(8, 10, 8, 10);
+        gbc.anchor = GridBagConstraints.WEST;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        
+        // 核心线程数
+        gbc.gridx = 0; gbc.gridy = 0; gbc.weightx = 0.25;
+        JLabel coreLabel = new JLabel("核心线程数:");
+        coreLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+        configPanel.add(coreLabel, gbc);
+        
+        gbc.gridx = 1; gbc.weightx = 0.25;
+        configPanel.add(scannerCoreThreadsSpinner, gbc);
+        
+        gbc.gridx = 2; gbc.weightx = 0.5;
+        JLabel coreHint = new JLabel(String.format(
+            "  -1=自动(%d核×2=%d)  |  参考: 低配=4, 中等=%d, 高配=%d",
+            cpuCount, cpuCount * 2, cpuCount * 2, cpuCount * 3
+        ));
+        coreHint.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+        coreHint.setForeground(Color.GRAY);
+        configPanel.add(coreHint, gbc);
+        
+        // 最大线程数
+        gbc.gridx = 0; gbc.gridy = 1; gbc.weightx = 0.25;
+        JLabel maxLabel = new JLabel("最大线程数:");
+        maxLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+        configPanel.add(maxLabel, gbc);
+        
+        gbc.gridx = 1; gbc.weightx = 0.25;
+        configPanel.add(scannerMaxThreadsSpinner, gbc);
+        
+        gbc.gridx = 2; gbc.weightx = 0.5;
+        JLabel maxHint = new JLabel(String.format(
+            "  -1=自动(核心×2=%d)  |  参考: 保守=%d, 激进=%d, 极限=%d",
+            cpuCount * 4, cpuCount * 2, cpuCount * 4, cpuCount * 6
+        ));
+        maxHint.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+        maxHint.setForeground(Color.GRAY);
+        configPanel.add(maxHint, gbc);
+        
+        // 队列大小
+        gbc.gridx = 0; gbc.gridy = 2; gbc.weightx = 0.25;
+        JLabel queueLabel = new JLabel("任务队列大小:");
+        queueLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+        configPanel.add(queueLabel, gbc);
+        
+        gbc.gridx = 1; gbc.weightx = 0.25;
+        configPanel.add(scannerQueueSizeSpinner, gbc);
+        
+        gbc.gridx = 2; gbc.weightx = 0.5;
+        JLabel queueHint = new JLabel("  参考: 低配=500, 中等=2000, 高配=5000  |  过大可能导致内存占用");
+        queueHint.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+        queueHint.setForeground(Color.GRAY);
+        configPanel.add(queueHint, gbc);
+        
+        // 空闲回收时间
+        gbc.gridx = 0; gbc.gridy = 3; gbc.weightx = 0.25;
+        JLabel keepAliveLabel = new JLabel("空闲回收时间:");
+        keepAliveLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+        configPanel.add(keepAliveLabel, gbc);
+        
+        gbc.gridx = 1; gbc.weightx = 0.25;
+        configPanel.add(scannerKeepAliveSecondsSpinner, gbc);
+        
+        gbc.gridx = 2; gbc.weightx = 0.5;
+        JLabel keepAliveHint = new JLabel("  参考: 快速回收=60秒, 平衡=120秒, 稳定=180秒");
+        keepAliveHint.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+        keepAliveHint.setForeground(Color.GRAY);
+        configPanel.add(keepAliveHint, gbc);
+        
+        mainPanel.add(configPanel, BorderLayout.CENTER);
+        
+        // 底部：说明文字
+        JTextArea helpText = new JTextArea();
+        helpText.setText(
+            "📖 配置说明:\n" +
+            "• 核心线程数: 始终保持活跃的线程数，-1表示自动设置为CPU核心数×2（推荐）\n" +
+            "• 最大线程数: 高负载时可扩展到的线程数，-1表示自动设置为核心线程数×2\n" +
+            "• 队列大小: 线程池满时任务排队的容量，避免任务堆积导致内存溢出\n" +
+            "• 空闲回收: 超过核心线程数的空闲线程多久后被回收，降低资源占用\n\n" +
+            "⚠️ 重要提示: 修改配置后需要重启Burp Suite才能生效！\n\n" +
+            "💡 性能参考:\n" +
+            "  低配模式: 适合2-4核CPU，内存<8GB的机器\n" +
+            "  保守模式: 适合4-8核CPU，稳定性优先\n" +
+            "  自动模式: 智能适配，适合大多数场景（推荐）\n" +
+            "  激进模式: 适合8核+CPU，内存16GB+，追求速度"
+        );
+        helpText.setEditable(false);
+        helpText.setLineWrap(true);
+        helpText.setWrapStyleWord(true);
+        helpText.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        helpText.setBackground(new Color(255, 255, 230));
+        helpText.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(200, 200, 150), 1),
+            new EmptyBorder(10, 10, 10, 10)
+        ));
+        
+        mainPanel.add(helpText, BorderLayout.SOUTH);
+        
+        return mainPanel;
+    }
     
     private JPanel createProxyPoolPanel() {
         JPanel mainPanel = new JPanel(new BorderLayout(10, 10));
@@ -762,6 +1070,18 @@ public class UnifiedConfigTab {
         arjunRealtimeIntervalSpinner.setValue(config.getArjunRealtimeInterval());
         arjunRealtimeThresholdSpinner.setValue(config.getArjunRealtimeThreshold());
         
+        // ✅ Arjun高级配置
+        arjunStableModeCheckBox.setSelected(config.isArjunStableMode());
+        arjunThreadsSpinner.setValue(config.getArjunThreads());
+        arjunMaxRetriesSpinner.setValue(config.getArjunMaxRetries());
+        arjunRateLimitSpinner.setValue(config.getArjunRateLimit());
+        
+        // ✅ 线程池配置
+        scannerCoreThreadsSpinner.setValue(config.getScannerCoreThreads());
+        scannerMaxThreadsSpinner.setValue(config.getScannerMaxThreads());
+        scannerQueueSizeSpinner.setValue(config.getScannerQueueSize());
+        scannerKeepAliveSecondsSpinner.setValue(config.getScannerKeepAliveSeconds());
+        
         // 代理池
         enableProxyPoolCheckBox.setSelected(config.isEnableProxyPool());
         proxyTimeoutSpinner.setValue(config.getProxyTimeout());
@@ -785,6 +1105,19 @@ public class UnifiedConfigTab {
             );
         }
         
+        // ✅ P1修复：检测Arjun高级配置变化
+        boolean advancedConfigChanged = false;
+        try {
+            XProbeConfig oldConfig = xprobeConfigManager.getConfig();
+            advancedConfigChanged = 
+                oldConfig.isArjunStableMode() != config.isArjunStableMode() ||
+                oldConfig.getArjunThreads() != config.getArjunThreads() ||
+                oldConfig.getArjunMaxRetries() != config.getArjunMaxRetries() ||
+                oldConfig.getArjunRateLimit() != config.getArjunRateLimit();
+        } catch (Exception e) {
+            // 配置读取失败，忽略
+        }
+        
         // 应用Java原生Arjun配置
         if (arjunService != null) {
             com.xprobe.scanner.active.arjun.config.ArjunConfig arjunConfig = arjunService.getConfig();
@@ -796,10 +1129,17 @@ public class UnifiedConfigTab {
             arjunService.setUserCustomDictionary(config.getArjunCustomDictionary());
             
             api.logging().raiseInfoEvent(String.format(
-                "✅ Arjun配置已更新: 启用=%b, 块大小=%d, 超时=%d秒, 自定义字典=%d个",
+                "✅ Arjun基础配置已更新: 启用=%b, 块大小=%d, 超时=%d秒, 自定义字典=%d个",
                 config.isArjunEnabled(), config.getArjunChunkSize(), config.getArjunTimeout(),
                 config.getArjunCustomDictionary().size()
             ));
+            
+            // ✅ P1修复：提示高级配置变化需要重启
+            if (advancedConfigChanged) {
+                api.logging().raiseInfoEvent(
+                    "⚠️ Arjun高级配置（稳定模式/线程数/重试次数/速率限制）已变化，需要重新加载插件才能生效"
+                );
+            }
         }
         
         // ✅ 应用实时模式配置到实时扫描器
@@ -834,6 +1174,19 @@ public class UnifiedConfigTab {
                 return;
             }
             
+            // ✅ P1修复：保存前检测Arjun高级配置变化
+            boolean advancedConfigChanged = false;
+            try {
+                XProbeConfig oldConfig = xprobeConfigManager.getConfig();
+                advancedConfigChanged = 
+                    oldConfig.isArjunStableMode() != config.isArjunStableMode() ||
+                    oldConfig.getArjunThreads() != config.getArjunThreads() ||
+                    oldConfig.getArjunMaxRetries() != config.getArjunMaxRetries() ||
+                    oldConfig.getArjunRateLimit() != config.getArjunRateLimit();
+            } catch (Exception e) {
+                // 配置读取失败，忽略
+            }
+            
             // 应用到后端组件
             applyConfigToComponents(config);
             
@@ -843,6 +1196,22 @@ public class UnifiedConfigTab {
             // 显示成功提示
             showStatus("✓ 所有配置已成功保存到磁盘！", true);
             api.logging().raiseInfoEvent("所有配置已保存到: " + xprobeConfigManager.getConfigFilePath());
+            
+            // ✅ P1修复：高级配置变化时弹出提示
+            if (advancedConfigChanged) {
+                SwingUtilities.invokeLater(() -> {
+                    JOptionPane.showMessageDialog(
+                        panel,
+                        "Arjun高级配置已保存，但需要重新加载插件才能生效。\n\n" +
+                        "变化的配置：稳定模式/并发线程数/最大重试次数/速率限制\n\n" +
+                        "操作步骤：\n" +
+                        "1. Extensions → XProbe → 右键卸载\n" +
+                        "2. Add → 选择XProbe-1.0.0.jar → 加载",
+                        "⚠️ 需要重新加载插件",
+                        JOptionPane.INFORMATION_MESSAGE
+                    );
+                });
+            }
             
         } catch (Exception e) {
             showStatus("✗ 保存配置失败: " + e.getMessage(), false);
@@ -891,6 +1260,18 @@ public class UnifiedConfigTab {
         config.setArjunCustomDictionary(new HashSet<>(parseTextAreaToList(arjunCustomDictArea)));
         config.setArjunRealtimeInterval((Integer) arjunRealtimeIntervalSpinner.getValue());
         config.setArjunRealtimeThreshold((Integer) arjunRealtimeThresholdSpinner.getValue());
+        
+        // ✅ Arjun高级配置
+        config.setArjunStableMode(arjunStableModeCheckBox.isSelected());
+        config.setArjunThreads((Integer) arjunThreadsSpinner.getValue());
+        config.setArjunMaxRetries((Integer) arjunMaxRetriesSpinner.getValue());
+        config.setArjunRateLimit((Integer) arjunRateLimitSpinner.getValue());
+        
+        // ✅ 线程池配置
+        config.setScannerCoreThreads((Integer) scannerCoreThreadsSpinner.getValue());
+        config.setScannerMaxThreads((Integer) scannerMaxThreadsSpinner.getValue());
+        config.setScannerQueueSize((Integer) scannerQueueSizeSpinner.getValue());
+        config.setScannerKeepAliveSeconds((Integer) scannerKeepAliveSecondsSpinner.getValue());
         
         // 代理池
         config.setEnableProxyPool(enableProxyPoolCheckBox.isSelected());
@@ -1020,7 +1401,7 @@ public class UnifiedConfigTab {
                 showStatus(String.format("✓ 上传成功！合并了 %d 个参数", newParams.size()), true);
                 api.logging().raiseInfoEvent("Arjun字典上传成功: " + file.getName());
                 
-            } catch (Exception e) {
+        } catch (Exception e) {
                 showStatus("✗ 上传失败: " + e.getMessage(), false);
                 api.logging().raiseErrorEvent("Arjun字典上传失败: " + e.getMessage());
             }

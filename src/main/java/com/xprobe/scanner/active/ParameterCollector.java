@@ -3,11 +3,13 @@ package com.xprobe.scanner.active;
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.params.ParsedHttpParameter;
+import com.xprobe.scanner.utils.BoundedCache;
 
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 /**
  * 参数收集器 - 负责从 HTTP 流量中收集参数
@@ -35,9 +37,8 @@ public class ParameterCollector {
     
     // 请求去重（避免重复处理同一请求）
     // Key: method|url|contentType
-    private final Set<String> processedRequests = Collections.newSetFromMap(
-        new ConcurrentHashMap<String, Boolean>()
-    );
+    // ✅ 修复：使用BoundedCache防止内存泄漏（限制10万条记录）
+    private final BoundedCache<String, Boolean> processedRequests = new BoundedCache<>(100_000);
     
     // 关键词存储（按主域名）
     private final Map<String, Set<String>> domainKeywords = new ConcurrentHashMap<>();
@@ -71,12 +72,19 @@ public class ParameterCollector {
     public boolean collectFromRequest(HttpRequest request) {
         try {
             String url = request.url();
+            
+            // ✅ 过滤静态资源（排除css、png等，保留js）
+            if (!com.xprobe.scanner.utils.StaticResourceFilter.shouldCollectParameters(url)) {
+                api.logging().raiseDebugEvent("跳过静态资源: " + url);
+                return false;
+            }
+            
             String method = request.method();
             String contentType = getContentType(request);
             
             // 去重检查（method + url + contentType）
             String dedupeKey = method + "|" + url + "|" + normalizeContentType(contentType);
-            if (processedRequests.contains(dedupeKey)) {
+            if (processedRequests.containsKey(dedupeKey)) {
                 return false;
             }
             
@@ -89,7 +97,7 @@ public class ParameterCollector {
             Set<String> parameters = extractParameters(request);
             
             if (parameters.isEmpty()) {
-                processedRequests.add(dedupeKey);
+                processedRequests.put(dedupeKey, Boolean.TRUE);
                 return false;
             }
             
@@ -126,12 +134,82 @@ public class ParameterCollector {
             }
             
             // 标记请求已处理
-            processedRequests.add(dedupeKey);
+            processedRequests.put(dedupeKey, Boolean.TRUE);
             
             if (hasNewParameters) {
                 api.logging().raiseDebugEvent(String.format(
                     "收集到新参数: 主域名=%s, host=%s, endpoint=%s, 参数数=%d",
                     mainDomain, host, endpoint, parameters.size()
+                ));
+            }
+            
+            return hasNewParameters;
+            
+        } catch (URISyntaxException e) {
+            api.logging().raiseErrorEvent("解析 URL 失败: " + e.getMessage());
+            return false;
+        }
+    }
+    
+    /**
+     * 从 HTTP 响应中收集参数
+     * ✅ 修复：恢复响应包参数收集功能
+     * 
+     * @param request 原始请求
+     * @param response HTTP 响应
+     * @return 是否收集到新参数
+     */
+    public boolean collectFromResponse(HttpRequest request, burp.api.montoya.http.message.responses.HttpResponse response) {
+        try {
+            String url = request.url();
+            
+            // ✅ 过滤静态资源（排除css、png等，保留js）
+            if (!com.xprobe.scanner.utils.StaticResourceFilter.shouldCollectParameters(url)) {
+                return false;
+            }
+            
+            String method = request.method();
+            String contentType = getContentType(request);
+            
+            // 去重检查
+            String dedupeKey = "RESPONSE|" + method + "|" + url + "|" + normalizeContentType(contentType);
+            if (processedRequests.containsKey(dedupeKey)) {
+                return false;
+            }
+            
+            URI uri = new URI(url);
+            String host = uri.getHost();
+            String mainDomain = extractMainDomain(host);
+            
+            // 从响应中提取参数（从JSON、HTML等）
+            Set<String> parameters = extractParametersFromResponse(response);
+            
+            if (parameters.isEmpty()) {
+                processedRequests.put(dedupeKey, Boolean.TRUE);
+                return false;
+            }
+            
+            // 获取或创建域数据
+            DomainData domainData = domainDataMap.computeIfAbsent(mainDomain, DomainData::new);
+            
+            // 检查是否有新参数
+            boolean hasNewParameters = false;
+            String endpoint = uri.getPath().isEmpty() ? "/" : uri.getPath();
+            
+            for (String param : parameters) {
+                if (!domainData.hasParameter(param)) {
+                    hasNewParameters = true;
+                }
+                domainData.addParameter(host, endpoint, param);
+            }
+            
+            // 标记响应已处理
+            processedRequests.put(dedupeKey, Boolean.TRUE);
+            
+            if (hasNewParameters) {
+                api.logging().raiseDebugEvent(String.format(
+                    "从响应收集到新参数: 主域名=%s, 参数数=%d",
+                    mainDomain, parameters.size()
                 ));
             }
             
@@ -240,6 +318,17 @@ public class ParameterCollector {
     }
     
     /**
+     * ✅ 获取域名的最后更新时间
+     */
+    public long getLastUpdateTimeForDomain(String mainDomain) {
+        DomainData domainData = domainDataMap.get(mainDomain);
+        if (domainData == null) {
+            return 0;
+        }
+        return domainData.getLastUpdateTime();
+    }
+    
+    /**
      * 清空所有数据
      */
     public void clear() {
@@ -262,6 +351,15 @@ public class ParameterCollector {
     // 参考 GAP.py: REGEX_WORDS = re.compile(r"(?<![\/])\b\w{3,}\b(?![\/])")
     private static final java.util.regex.Pattern PATTERN_WORDS = 
         java.util.regex.Pattern.compile("(?<![/])\\b\\w{3,}\\b(?![/])");
+    
+    // ✅ 性能优化：响应参数提取的正则（避免每次重新编译）
+    // JSON键名提取：匹配 "key": 格式
+    private static final Pattern PATTERN_JSON_KEY = 
+        Pattern.compile("\"([a-zA-Z_][a-zA-Z0-9_]*)\"\\s*:");
+    
+    // HTML name属性提取：匹配 name="xxx" 或 name='xxx'
+    private static final Pattern PATTERN_HTML_NAME = 
+        Pattern.compile("name\\s*=\\s*[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE);
     
     // 停用词列表（参考 GAP.py 的常见无意义词）
     private static final Set<String> STOP_WORDS = Set.of(
@@ -286,6 +384,64 @@ public class ParameterCollector {
                 PATTERN_VALID_PARAM.matcher(paramName).matches()) {
                 parameters.add(paramName);
             }
+        }
+        
+        return parameters;
+    }
+    
+    /**
+     * 从响应中提取参数（从JSON、HTML等）
+     * ✅ 修复：恢复响应包参数提取功能
+     */
+    private Set<String> extractParametersFromResponse(burp.api.montoya.http.message.responses.HttpResponse response) {
+        Set<String> parameters = new HashSet<>();
+        
+        try {
+            String body = response.bodyToString();
+            if (body == null || body.isEmpty()) {
+                return parameters;
+            }
+            
+            // 限制响应大小，避免处理超大响应（1MB）
+            if (body.length() > 1024 * 1024) {
+                api.logging().raiseDebugEvent("响应过大，跳过参数提取: " + body.length() + " bytes");
+                return parameters;
+            }
+            
+            // 从JSON响应中提取参数名
+            if (body.trim().startsWith("{") || body.trim().startsWith("[")) {
+                try {
+                    // ✅ 性能优化：使用静态编译的正则
+                    java.util.regex.Matcher matcher = PATTERN_JSON_KEY.matcher(body);
+                    while (matcher.find()) {
+                        String paramName = matcher.group(1);
+                        if (PATTERN_VALID_PARAM.matcher(paramName).matches()) {
+                            parameters.add(paramName);
+                        }
+                    }
+                } catch (Exception e) {
+                    api.logging().raiseDebugEvent("解析JSON响应失败: " + e.getMessage());
+                }
+            }
+            
+            // 从HTML响应中提取input、select等表单元素的name属性
+            if (body.contains("<") && body.contains(">")) {
+                try {
+                    // ✅ 性能优化：使用静态编译的正则
+                    java.util.regex.Matcher matcher = PATTERN_HTML_NAME.matcher(body);
+                    while (matcher.find()) {
+                        String paramName = cleanParameterName(matcher.group(1));
+                        if (paramName != null && PATTERN_VALID_PARAM.matcher(paramName).matches()) {
+                            parameters.add(paramName);
+                        }
+                    }
+                } catch (Exception e) {
+                    api.logging().raiseDebugEvent("解析HTML响应失败: " + e.getMessage());
+                }
+            }
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("从响应提取参数失败: " + e.getMessage());
         }
         
         return parameters;
@@ -507,15 +663,32 @@ public class ParameterCollector {
         // host 列表
         private final Set<String> hosts = ConcurrentHashMap.newKeySet();
         
+        // ✅ 最后更新时间（仅在数据实际变化时更新）
+        private volatile long lastUpdateTime = System.currentTimeMillis();
+        
         public DomainData(String mainDomain) {
             this.mainDomain = mainDomain;
+        }
+        
+        /**
+         * ✅ 获取最后更新时间
+         */
+        public long getLastUpdateTime() {
+            return lastUpdateTime;
+        }
+        
+        /**
+         * ✅ 更新最后更新时间（仅在数据变化时调用）
+         */
+        private void updateLastUpdateTime() {
+            this.lastUpdateTime = System.currentTimeMillis();
         }
         
         /**
          * 添加参数
          */
         public void addParameter(String host, String endpoint, String parameter) {
-            allParameters.add(parameter);
+            boolean isNew = allParameters.add(parameter);  // ✅ 检查是否是新参数
             hosts.add(host);
             
             // 添加到 host 参数集合
@@ -528,6 +701,11 @@ public class ParameterCollector {
             if (epInfo != null) {
                 epInfo.addParameter(parameter);
             }
+            
+            // ✅ 如果是新参数，更新时间
+            if (isNew) {
+                updateLastUpdateTime();
+            }
         }
         
         /**
@@ -536,11 +714,19 @@ public class ParameterCollector {
         public void addEndpoint(String host, String endpoint, String method, 
                                String contentType, HttpRequest request) {
             String normalizedContentType = normalizeContentType(contentType);
-            String endpointKey = method + "|" + host + "|" + normalizedContentType + "|" + endpoint;
+            // ✅ 修复：统一使用简单key（与addParameter保持一致）
+            String endpointKey = host + ":" + endpoint;
             hosts.add(host);
             
+            // ✅ 修复：先检查是否存在，正确判断是否为新接口
+            boolean isNewEndpoint = !endpointMap.containsKey(endpointKey);
             endpointMap.computeIfAbsent(endpointKey, 
                 k -> new EndpointInfo(host, endpoint, method, normalizedContentType, request));
+            
+            // ✅ 修复：只在新接口时更新时间
+            if (isNewEndpoint) {
+                updateLastUpdateTime();
+            }
         }
         
         /**

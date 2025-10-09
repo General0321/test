@@ -14,6 +14,7 @@ import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -96,6 +97,19 @@ public class ActiveProbeTab {
         collectedDataTable.setRowHeight(28);
         collectedDataTable.getTableHeader().setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
         collectedDataTable.getColumnModel().getColumn(0).setPreferredWidth(200);
+        
+        // ✅ 添加双击事件查看详情
+        collectedDataTable.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mouseClicked(java.awt.event.MouseEvent e) {
+                if (e.getClickCount() == 2) {  // 双击
+                    int row = collectedDataTable.getSelectedRow();
+                    if (row >= 0) {
+                        showDomainDetails(row);
+                    }
+                }
+            }
+        });
 
         // Arjun探测结果表格
         arjunResultTableModel = new DefaultTableModel(
@@ -241,7 +255,7 @@ public class ActiveProbeTab {
         ));
         masterSwitchPanel.add(masterEnableToggle);
         
-        JLabel masterHint = new JLabel("总开关控制整个主动探测功能");
+        JLabel masterHint = new JLabel("总开关控制主动探测功能（被动参数收集始终进行）");
         masterHint.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
         masterHint.setForeground(Color.GRAY);
         masterSwitchPanel.add(masterHint);
@@ -337,6 +351,23 @@ public class ActiveProbeTab {
         controlPanel.add(refreshDataButton);
         controlPanel.add(new JSeparator(SwingConstants.VERTICAL));
         controlPanel.add(addTargetButton);
+        
+        // ✅ 添加查看详情按钮
+        JButton viewDetailsButton = new JButton("📋 查看详情");
+        viewDetailsButton.setToolTipText("双击表格行或点击此按钮查看域名的详细信息");
+        viewDetailsButton.addActionListener(e -> {
+            int row = collectedDataTable.getSelectedRow();
+            if (row >= 0) {
+                showDomainDetails(row);
+            } else {
+                JOptionPane.showMessageDialog(panel, 
+                    "请先选择一个域名", 
+                    "提示", 
+                    JOptionPane.INFORMATION_MESSAGE);
+            }
+        });
+        controlPanel.add(viewDetailsButton);
+        
         controlPanel.add(clearResultsButton);
         
         JPanel modeConfigPanel = new JPanel(new BorderLayout(5, 5));
@@ -445,6 +476,20 @@ public class ActiveProbeTab {
     private void switchToRealtimeMode() {
         modeStatusLabel.setText("当前: 实时监听模式 (智能触发)");
         modeStatusLabel.setForeground(new Color(46, 204, 113));
+        
+        // ✅ 检查总开关状态
+        if (!masterEnableToggle.isSelected()) {
+            statusLabel.setText("⚫ 主动探测已禁用 - 被动收集持续进行");
+            statusLabel.setForeground(Color.GRAY);
+            api.logging().raiseInfoEvent("⚠️ 总开关已禁用，无法切换到实时监听模式");
+            // 切换回手动模式
+            manualModeRadio.setSelected(true);
+            return;
+        }
+        
+        // ✅ 设置后端为实时模式
+        activeScanner.getRealtimeScanner().setRealtimeMode(true);
+        
         statusLabel.setText("🔄 实时监听 - 阈值触发(15个参数) + 定时兜底(5分钟)...");
         statusLabel.setForeground(new Color(46, 204, 113));
         
@@ -478,6 +523,9 @@ public class ActiveProbeTab {
         modeStatusLabel.setForeground(Color.GRAY);
         statusLabel.setText("🟢 就绪 - 点击按钮从SiteMap触发探测...");
         statusLabel.setForeground(new Color(46, 204, 113));
+        
+        // ✅ 设置后端为手动模式
+        activeScanner.getRealtimeScanner().setRealtimeMode(false);
         
         // 停止实时监听定时器
         if (realtimeArjunTimer != null) {
@@ -828,9 +876,17 @@ public class ActiveProbeTab {
         if (result == JOptionPane.YES_OPTION) {
             arjunResultTableModel.setRowCount(0);
             progressBar.setValue(0);
-            statusLabel.setText("🟢 就绪 - 正在监听Burp流量...");
-            statusLabel.setForeground(new Color(46, 204, 113));
             arjunResultsLabel.setText("发现参数: 0");
+            
+            // ✅ 修复：根据当前开关状态设置正确的状态文本
+            boolean enabled = masterEnableToggle.isSelected();
+            if (enabled) {
+                statusLabel.setText("🟢 主动探测已启用 - 正在监听流量...");
+                statusLabel.setForeground(new Color(46, 204, 113));
+            } else {
+                statusLabel.setText("⚫ 主动探测已禁用");
+                statusLabel.setForeground(Color.GRAY);
+            }
         }
     }
 
@@ -873,22 +929,23 @@ public class ActiveProbeTab {
     
     /**
      * 应用总开关状态到UI和后端
+     * ✅ 修复：总开关只控制主动探测，被动参数收集始终进行
      */
     private void applyMasterSwitchState(boolean enabled) {
         if (enabled) {
-            // 启用主动探测
+            // ✅ 启用主动探测（被动参数收集始终进行，不受控制）
             activeScanner.getRealtimeScanner().startRealtimeScanning();
             statusLabel.setText("🟢 主动探测已启用 - 正在监听流量...");
             statusLabel.setForeground(new Color(46, 204, 113));
-            api.logging().logToOutput("主动探测已启用");
+            api.logging().logToOutput("✅ 主动探测已启用（被动参数收集持续进行）");
             
-            // 启用所有控制组件
+            // 启用控制组件
             arjunScanButton.setEnabled(true);
             addTargetButton.setEnabled(true);
             realtimeModeRadio.setEnabled(true);
             manualModeRadio.setEnabled(true);
         } else {
-            // 禁用主动探测
+            // ✅ 禁用主动探测（被动参数收集继续进行）
             activeScanner.getRealtimeScanner().stopRealtimeScanning();
             
             // 停止实时监听定时器
@@ -896,11 +953,11 @@ public class ActiveProbeTab {
                 realtimeArjunTimer.stop();
             }
             
-            statusLabel.setText("⚫ 主动探测已禁用");
+            statusLabel.setText("⚫ 主动探测已禁用 - 被动收集持续进行");
             statusLabel.setForeground(Color.GRAY);
-            api.logging().logToOutput("主动探测已禁用");
+            api.logging().logToOutput("⚫ 主动探测已禁用（被动参数收集持续进行）");
             
-            // 禁用所有控制组件
+            // 禁用控制组件
             arjunScanButton.setEnabled(false);
             addTargetButton.setEnabled(false);
             realtimeModeRadio.setEnabled(false);
@@ -944,5 +1001,127 @@ public class ActiveProbeTab {
     
     public ActiveScanner getActiveScanner() {
         return activeScanner;
+    }
+    
+    /**
+     * ✅ 显示域名的详细信息
+     */
+    private void showDomainDetails(int row) {
+        try {
+            String mainDomain = (String) collectedDataTableModel.getValueAt(row, 0);
+            
+            if (activeScanner.getRealtimeScanner() == null) {
+                return;
+            }
+            
+            var realtimeScanner = activeScanner.getRealtimeScanner();
+            ParameterCollector parameterCollector = realtimeScanner.getParameterCollector();
+            
+            // 获取详细信息
+            Set<String> hosts = parameterCollector.getHostsForMainDomain(mainDomain);
+            Set<String> endpoints = parameterCollector.getEndpointsForMainDomain(mainDomain);
+            Set<String> parameters = parameterCollector.getParametersForMainDomain(mainDomain);
+            Set<String> keywords = parameterCollector.getKeywordsForMainDomain(mainDomain);
+            
+            // 构建详情文本
+            StringBuilder details = new StringBuilder();
+            details.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+            details.append("🌐 主域名: ").append(mainDomain).append("\n");
+            details.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
+            
+            // 子域名列表
+            details.append("📍 子域名/主机 (").append(hosts.size()).append("个):\n");
+            if (hosts.isEmpty()) {
+                details.append("  - 无\n");
+            } else {
+                hosts.stream().limit(20).forEach(host -> 
+                    details.append("  • ").append(host).append("\n"));
+                if (hosts.size() > 20) {
+                    details.append("  ... 还有 ").append(hosts.size() - 20).append(" 个\n");
+                }
+            }
+            details.append("\n");
+            
+            // 接口列表
+            details.append("🔗 接口路径 (").append(endpoints.size()).append("个):\n");
+            if (endpoints.isEmpty()) {
+                details.append("  - 无\n");
+            } else {
+                endpoints.stream().limit(30).forEach(endpoint -> 
+                    details.append("  • ").append(endpoint).append("\n"));
+                if (endpoints.size() > 30) {
+                    details.append("  ... 还有 ").append(endpoints.size() - 30).append(" 个\n");
+                }
+            }
+            details.append("\n");
+            
+            // 参数列表
+            details.append("🔑 参数名称 (").append(parameters.size()).append("个):\n");
+            if (parameters.isEmpty()) {
+                details.append("  - 无\n");
+            } else {
+                parameters.stream().limit(50).forEach(param -> 
+                    details.append("  • ").append(param).append("\n"));
+                if (parameters.size() > 50) {
+                    details.append("  ... 还有 ").append(parameters.size() - 50).append(" 个\n");
+                }
+            }
+            details.append("\n");
+            
+            // 关键词列表
+            details.append("📝 关键词 (").append(keywords.size()).append("个):\n");
+            if (keywords.isEmpty()) {
+                details.append("  - 无\n");
+            } else {
+                keywords.stream().limit(50).forEach(keyword -> 
+                    details.append("  • ").append(keyword).append("\n"));
+                if (keywords.size() > 50) {
+                    details.append("  ... 还有 ").append(keywords.size() - 50).append(" 个\n");
+                }
+            }
+            
+            // 显示对话框
+            JTextArea textArea = new JTextArea(details.toString());
+            textArea.setEditable(false);
+            textArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+            textArea.setCaretPosition(0);
+            
+            JScrollPane scrollPane = new JScrollPane(textArea);
+            scrollPane.setPreferredSize(new Dimension(700, 500));
+            
+            JOptionPane.showMessageDialog(
+                panel,
+                scrollPane,
+                "域名详细信息 - " + mainDomain,
+                JOptionPane.INFORMATION_MESSAGE
+            );
+            
+        } catch (Exception ex) {
+            api.logging().raiseErrorEvent("显示域名详情失败: " + ex.getMessage());
+            JOptionPane.showMessageDialog(
+                panel,
+                "无法显示详情: " + ex.getMessage(),
+                "错误",
+                JOptionPane.ERROR_MESSAGE
+            );
+        }
+    }
+    
+    /**
+     * 清理资源（停止Timer）
+     * ✅ 修复：防止Timer泄漏
+     */
+    public void cleanup() {
+        if (refreshTimer != null) {
+            refreshTimer.stop();
+            refreshTimer = null;
+        }
+        
+        if (realtimeArjunTimer != null) {
+            realtimeArjunTimer.stop();
+            realtimeArjunTimer = null;
+        }
+        
+        api.logging().raiseDebugEvent("ActiveProbeTab资源已清理");
     }
 }

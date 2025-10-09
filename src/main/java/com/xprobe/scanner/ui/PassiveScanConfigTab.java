@@ -7,10 +7,10 @@ import com.xprobe.scanner.config.XProbeConfigManager;
 import com.xprobe.scanner.config.XProbeConfig;
 
 import javax.swing.*;
+import javax.swing.filechooser.FileNameExtensionFilter;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
+import java.io.File;
 import java.util.List;
 
 /**
@@ -33,6 +33,8 @@ public class PassiveScanConfigTab {
     private JButton deleteButton;
     private JButton saveButton;
     private JButton refreshButton;
+    private JButton exportButton;  // ✅ 导出规则按钮
+    private JButton importButton;  // ✅ 导入规则按钮
     
     // 总开关和全局设置
     private JToggleButton passiveScanToggleButton;  // ✅ 改为按钮形式
@@ -78,6 +80,8 @@ public class PassiveScanConfigTab {
         deleteButton = new JButton("删除规则");
         saveButton = new JButton("保存配置");
         refreshButton = new JButton("刷新");
+        exportButton = new JButton("📤 导出规则");  // ✅ 导出规则按钮
+        importButton = new JButton("📥 导入规则");  // ✅ 导入规则按钮
         
         // ✅ 被动扫描总开关（按钮形式）
         passiveScanToggleButton = new JToggleButton("🟢 被动扫描已启用", true);
@@ -221,6 +225,14 @@ public class PassiveScanConfigTab {
         tableButtonPanel.add(editButton);
         tableButtonPanel.add(deleteButton);
         tableButtonPanel.add(refreshButton);
+        
+        // ✅ 添加分隔符
+        tableButtonPanel.add(Box.createRigidArea(new Dimension(20, 0)));
+        
+        // ✅ 导入导出按钮
+        tableButtonPanel.add(importButton);
+        tableButtonPanel.add(exportButton);
+        
         tablePanel.add(tableButtonPanel, BorderLayout.SOUTH);
         
         // 详情面板
@@ -265,6 +277,8 @@ public class PassiveScanConfigTab {
         deleteButton.addActionListener(e -> deleteConfiguration());
         saveButton.addActionListener(e -> saveConfiguration());
         refreshButton.addActionListener(e -> loadConfigurations());
+        exportButton.addActionListener(e -> exportRules());  // ✅ 导出规则
+        importButton.addActionListener(e -> importRules());  // ✅ 导入规则
         
         // ✅ 被动扫描开关状态变化时自动保存并更新UI
         passiveScanToggleButton.addActionListener(e -> {
@@ -466,8 +480,18 @@ public class PassiveScanConfigTab {
         if (dialog.showDialog()) {
             Configuration newConfig = dialog.getConfiguration();
             configManager.addConfiguration(newConfig);
+            
+            // ✅ 修复：同步保存到XProbeConfig，确保导出时有数据
+            try {
+                xprobeConfigManager.updateConfig(config -> {
+                    config.setScanConfigurations(configManager.getConfigurations());
+                });
+                api.logging().raiseInfoEvent("新规则已添加并保存: " + newConfig.getCustomLabel());
+            } catch (Exception e) {
+                api.logging().raiseErrorEvent("保存规则失败: " + e.getMessage());
+            }
+            
             loadConfigurations();
-            api.logging().raiseInfoEvent("新规则已添加: " + newConfig.getCustomLabel());
         }
     }
     
@@ -483,8 +507,17 @@ public class PassiveScanConfigTab {
                 PairBasedRuleConfigDialog dialog = new PairBasedRuleConfigDialog(owner, api, configManager, config);
                 
                 if (dialog.showDialog()) {
+                    // ✅ 修复：同步保存到XProbeConfig
+                    try {
+                        xprobeConfigManager.updateConfig(cfg -> {
+                            cfg.setScanConfigurations(configManager.getConfigurations());
+                        });
+                        api.logging().raiseInfoEvent("规则已更新并保存: " + config.getCustomLabel());
+                    } catch (Exception e) {
+                        api.logging().raiseErrorEvent("保存规则失败: " + e.getMessage());
+                    }
+                    
                     loadConfigurations();
-                    api.logging().raiseInfoEvent("规则已更新: " + config.getCustomLabel());
                 }
             }
         } else {
@@ -502,9 +535,19 @@ public class PassiveScanConfigTab {
             
             if (result == JOptionPane.YES_OPTION) {
                 configManager.removeConfiguration(selectedRow);
+                
+                // ✅ 修复：同步保存到XProbeConfig
+                try {
+                    xprobeConfigManager.updateConfig(config -> {
+                        config.setScanConfigurations(configManager.getConfigurations());
+                    });
+                    api.logging().raiseInfoEvent("规则已删除并保存: " + (selectedRow + 1));
+                } catch (Exception e) {
+                    api.logging().raiseErrorEvent("保存规则失败: " + e.getMessage());
+                }
+                
                 loadConfigurations();
                 detailTextArea.setText("");
-                api.logging().raiseInfoEvent("规则已删除: " + (selectedRow + 1));
             }
         } else {
             JOptionPane.showMessageDialog(panel, "请先选择要删除的规则", "提示", JOptionPane.INFORMATION_MESSAGE);
@@ -538,7 +581,7 @@ public class PassiveScanConfigTab {
     private void savePassiveScanEnabled() {
         try {
             // ✅ 获取配置副本（防止并发修改）
-            XProbeConfig config = xprobeConfigManager.getConfigCopy();
+            XProbeConfig config = xprobeConfigManager.getConfig();
             config.setEnablePassiveScan(passiveScanToggleButton.isSelected());
             xprobeConfigManager.saveConfig(config);
             
@@ -573,7 +616,7 @@ public class PassiveScanConfigTab {
         Configuration.InjectionMode selectedMode = (Configuration.InjectionMode) globalInjectionModeCombo.getSelectedItem();
         try {
             // ✅ 获取配置副本（防止并发修改）
-            XProbeConfig config = xprobeConfigManager.getConfigCopy();
+            XProbeConfig config = xprobeConfigManager.getConfig();
             config.setGlobalInjectionMode(selectedMode);
             xprobeConfigManager.saveConfig(config);
             
@@ -598,7 +641,7 @@ public class PassiveScanConfigTab {
         XProbeConfig.ScanResultLogMode selectedMode = (XProbeConfig.ScanResultLogMode) logModeCombo.getSelectedItem();
         try {
             // ✅ 获取配置副本（防止并发修改）
-            XProbeConfig config = xprobeConfigManager.getConfigCopy();
+            XProbeConfig config = xprobeConfigManager.getConfig();
             config.setScanResultLogMode(selectedMode);
             xprobeConfigManager.saveConfig(config);
             
@@ -641,6 +684,136 @@ public class PassiveScanConfigTab {
             }
         } catch (Exception e) {
             api.logging().raiseErrorEvent("加载设置失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * ✅ 导出规则到JSON文件
+     */
+    private void exportRules() {
+        try {
+            // 创建文件选择器
+            JFileChooser fileChooser = new JFileChooser();
+            fileChooser.setDialogTitle("导出扫描规则");
+            fileChooser.setFileFilter(new FileNameExtensionFilter("JSON文件 (*.json)", "json"));
+            
+            // 设置默认文件名
+            String defaultFileName = "xprobe_rules_" + 
+                new java.text.SimpleDateFormat("yyyyMMdd_HHmmss").format(new java.util.Date()) + ".json";
+            fileChooser.setSelectedFile(new File(defaultFileName));
+            
+            int result = fileChooser.showSaveDialog(panel);
+            if (result == JFileChooser.APPROVE_OPTION) {
+                File file = fileChooser.getSelectedFile();
+                
+                // 确保文件扩展名为.json
+                if (!file.getName().toLowerCase().endsWith(".json")) {
+                    file = new File(file.getAbsolutePath() + ".json");
+                }
+                
+                // 导出规则
+                xprobeConfigManager.exportRules(file);
+                
+                // 显示成功消息
+                JOptionPane.showMessageDialog(
+                    panel,
+                    "规则导出成功！\n文件路径: " + file.getAbsolutePath(),
+                    "导出成功",
+                    JOptionPane.INFORMATION_MESSAGE
+                );
+                
+                api.logging().raiseInfoEvent("✅ 规则已导出到: " + file.getAbsolutePath());
+            }
+        } catch (Exception e) {
+            // 显示错误消息
+            JOptionPane.showMessageDialog(
+                panel,
+                "规则导出失败：" + e.getMessage(),
+                "导出失败",
+                JOptionPane.ERROR_MESSAGE
+            );
+            
+            api.logging().raiseErrorEvent("❌ 规则导出失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * ✅ 从JSON文件导入规则
+     */
+    private void importRules() {
+        try {
+            // 创建文件选择器
+            JFileChooser fileChooser = new JFileChooser();
+            fileChooser.setDialogTitle("导入扫描规则");
+            fileChooser.setFileFilter(new FileNameExtensionFilter("JSON文件 (*.json)", "json"));
+            
+            int result = fileChooser.showOpenDialog(panel);
+            if (result == JFileChooser.APPROVE_OPTION) {
+                File file = fileChooser.getSelectedFile();
+                
+                // 询问导入模式
+                String[] options = {"追加到现有规则", "替换现有规则", "取消"};
+                int choice = JOptionPane.showOptionDialog(
+                    panel,
+                    "请选择导入模式：\n\n" +
+                        "• 追加模式：保留现有规则，新增导入的规则\n" +
+                        "• 替换模式：清空现有规则，仅保留导入的规则",
+                    "选择导入模式",
+                    JOptionPane.YES_NO_CANCEL_OPTION,
+                    JOptionPane.QUESTION_MESSAGE,
+                    null,
+                    options,
+                    options[0]
+                );
+                
+                if (choice == JOptionPane.CANCEL_OPTION || choice == JOptionPane.CLOSED_OPTION) {
+                    return;
+                }
+                
+                boolean append = (choice == 0); // 0=追加, 1=替换
+                
+                // 导入规则
+                xprobeConfigManager.importRules(file, append);
+                
+                // ✅ 修复：同步规则到ConfigurationManager
+                XProbeConfig config = xprobeConfigManager.getConfig();
+                List<Configuration> importedConfigs = config.getScanConfigurations();
+                
+                // 清空ConfigurationManager并重新加载
+                while (configManager.getAllConfigurations().size() > 0) {
+                    configManager.removeConfiguration(0);
+                }
+                for (Configuration cfg : importedConfigs) {
+                    configManager.addConfiguration(cfg);
+                }
+                
+                // 刷新规则列表
+                loadConfigurations();
+                
+                // 显示成功消息
+                String mode = append ? "追加" : "替换";
+                JOptionPane.showMessageDialog(
+                    panel,
+                    "规则导入成功！（" + mode + "模式）\n文件: " + file.getName(),
+                    "导入成功",
+                    JOptionPane.INFORMATION_MESSAGE
+                );
+                
+                api.logging().raiseInfoEvent("✅ 规则已从文件导入: " + file.getAbsolutePath() + " (模式: " + mode + ")");
+            }
+        } catch (Exception e) {
+            // 显示错误消息
+            JOptionPane.showMessageDialog(
+                panel,
+                "规则导入失败：" + e.getMessage() + "\n\n可能原因：\n" +
+                    "• 文件格式不正确\n" +
+                    "• 文件已损坏\n" +
+                    "• 规则版本不兼容",
+                "导入失败",
+                JOptionPane.ERROR_MESSAGE
+            );
+            
+            api.logging().raiseErrorEvent("❌ 规则导入失败: " + e.getMessage());
         }
     }
     

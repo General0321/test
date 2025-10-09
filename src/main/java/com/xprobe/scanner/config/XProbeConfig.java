@@ -28,6 +28,12 @@ public class XProbeConfig implements Serializable {
     private int arjunTimeout = 15;
     private Set<String> arjunCustomDictionary = new HashSet<>();  // 用户自定义字典
     
+    // ✅ Arjun高级配置（性能优化）
+    private boolean arjunStableMode = false;      // 稳定模式（随机延迟3-10秒）
+    private int arjunThreads = 5;                 // 并发线程数（1-20）
+    private int arjunMaxRetries = 5;              // 最大重试次数（1-10）
+    private int arjunRateLimit = 9999;            // 速率限制（req/s）
+    
     // Arjun实时模式配置
     private int arjunRealtimeInterval = 300;  // 定时检查间隔（秒），默认5分钟
     private int arjunRealtimeThreshold = 15;  // 参数阈值，默认15个
@@ -40,6 +46,10 @@ public class XProbeConfig implements Serializable {
     
     // 被动扫描规则
     private List<Configuration> scanConfigurations = new ArrayList<>();
+    
+    // ✅ 规则文件配置（新增）
+    private boolean useExternalRuleFile = false;  // 是否使用外部规则文件
+    private String ruleFilePath = "";             // 外部规则文件路径（空则使用默认路径）
     
     // 被动扫描配置
     private boolean enablePassiveScan = true;  // 被动扫描总开关（默认启用）
@@ -75,6 +85,12 @@ public class XProbeConfig implements Serializable {
     private int maxConcurrentHosts = 3;
     private boolean autoStart = false;
     private boolean verboseLogging = false;
+    
+    // ✅ 线程池配置（性能优化）
+    private int scannerCoreThreads = -1;      // 核心线程数（-1=自动，CPU×2）
+    private int scannerMaxThreads = -1;       // 最大线程数（-1=自动，CPU×4）
+    private int scannerQueueSize = 2000;      // 任务队列大小（默认2000）
+    private int scannerKeepAliveSeconds = 120; // 空闲线程存活时间（默认120秒）
     
     // 代理池配置
     private boolean enableProxyPool = false;
@@ -216,6 +232,39 @@ public class XProbeConfig implements Serializable {
         this.verboseLogging = verboseLogging;
     }
     
+    // ✅ 线程池配置 Getters/Setters
+    public int getScannerCoreThreads() {
+        return scannerCoreThreads;
+    }
+    
+    public void setScannerCoreThreads(int scannerCoreThreads) {
+        this.scannerCoreThreads = scannerCoreThreads;
+    }
+    
+    public int getScannerMaxThreads() {
+        return scannerMaxThreads;
+    }
+    
+    public void setScannerMaxThreads(int scannerMaxThreads) {
+        this.scannerMaxThreads = scannerMaxThreads;
+    }
+    
+    public int getScannerQueueSize() {
+        return scannerQueueSize;
+    }
+    
+    public void setScannerQueueSize(int scannerQueueSize) {
+        this.scannerQueueSize = Math.max(100, scannerQueueSize);  // 至少100
+    }
+    
+    public int getScannerKeepAliveSeconds() {
+        return scannerKeepAliveSeconds;
+    }
+    
+    public void setScannerKeepAliveSeconds(int scannerKeepAliveSeconds) {
+        this.scannerKeepAliveSeconds = Math.max(10, scannerKeepAliveSeconds);  // 至少10秒
+    }
+    
     public boolean isEnableProxyPool() {
         return enableProxyPool;
     }
@@ -298,6 +347,69 @@ public class XProbeConfig implements Serializable {
         this.arjunRealtimeThreshold = Math.max(1, Math.min(arjunRealtimeThreshold, 100));  // 1-100个参数
     }
     
+    // ✅ Arjun高级配置的Getters和Setters
+    public boolean isArjunStableMode() {
+        return arjunStableMode;
+    }
+    
+    public void setArjunStableMode(boolean arjunStableMode) {
+        this.arjunStableMode = arjunStableMode;
+    }
+    
+    public int getArjunThreads() {
+        return arjunThreads;
+    }
+    
+    public void setArjunThreads(int arjunThreads) {
+        this.arjunThreads = Math.max(1, Math.min(arjunThreads, 20));  // 1-20线程
+    }
+    
+    public int getArjunMaxRetries() {
+        return arjunMaxRetries;
+    }
+    
+    public void setArjunMaxRetries(int arjunMaxRetries) {
+        this.arjunMaxRetries = Math.max(1, Math.min(arjunMaxRetries, 10));  // 1-10次重试
+    }
+    
+    public int getArjunRateLimit() {
+        return arjunRateLimit;
+    }
+    
+    public void setArjunRateLimit(int arjunRateLimit) {
+        this.arjunRateLimit = Math.max(1, Math.min(arjunRateLimit, 10000));  // 1-10000 req/s
+    }
+    
+    // ✅ 规则文件配置的Getters和Setters
+    public boolean isUseExternalRuleFile() {
+        return useExternalRuleFile;
+    }
+    
+    public void setUseExternalRuleFile(boolean useExternalRuleFile) {
+        this.useExternalRuleFile = useExternalRuleFile;
+    }
+    
+    public String getRuleFilePath() {
+        return ruleFilePath;
+    }
+    
+    public void setRuleFilePath(String ruleFilePath) {
+        this.ruleFilePath = ruleFilePath;
+    }
+    
+    /**
+     * ✅ 获取规则文件的完整路径
+     * 
+     * @return 规则文件路径，如果未设置则返回默认路径
+     */
+    public String getEffectiveRuleFilePath() {
+        if (ruleFilePath != null && !ruleFilePath.trim().isEmpty()) {
+            return ruleFilePath;
+        }
+        // 默认规则文件路径
+        return System.getProperty("user.home") + "/.xprobe/rules.json";
+    }
+    
     /**
      * ✅ 创建配置对象的深拷贝
      * 
@@ -336,6 +448,12 @@ public class XProbeConfig implements Serializable {
         copy.setAutoStart(this.autoStart);
         copy.setVerboseLogging(this.verboseLogging);
         
+        // ✅ 线程池配置
+        copy.setScannerCoreThreads(this.scannerCoreThreads);
+        copy.setScannerMaxThreads(this.scannerMaxThreads);
+        copy.setScannerQueueSize(this.scannerQueueSize);
+        copy.setScannerKeepAliveSeconds(this.scannerKeepAliveSeconds);
+        
         // 代理池配置
         copy.setEnableProxyPool(this.enableProxyPool);
         copy.setProxyTimeout(this.proxyTimeout);
@@ -348,9 +466,19 @@ public class XProbeConfig implements Serializable {
         copy.setArjunTimeout(this.arjunTimeout);
         copy.setArjunCustomDictionary(new HashSet<>(this.arjunCustomDictionary));
         
+        // ✅ 修复：Arjun高级配置（性能优化）
+        copy.setArjunStableMode(this.arjunStableMode);
+        copy.setArjunThreads(this.arjunThreads);
+        copy.setArjunMaxRetries(this.arjunMaxRetries);
+        copy.setArjunRateLimit(this.arjunRateLimit);
+        
         // Arjun实时模式配置
         copy.setArjunRealtimeInterval(this.arjunRealtimeInterval);
         copy.setArjunRealtimeThreshold(this.arjunRealtimeThreshold);
+        
+        // ✅ 规则文件配置
+        copy.setUseExternalRuleFile(this.useExternalRuleFile);
+        copy.setRuleFilePath(this.ruleFilePath);
         
         return copy;
     }

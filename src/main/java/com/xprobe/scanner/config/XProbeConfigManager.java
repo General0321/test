@@ -1,5 +1,6 @@
 package com.xprobe.scanner.config;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -23,6 +24,7 @@ import java.util.function.Consumer;
 public class XProbeConfigManager {
     
     private final ConfigPersistence persistence;
+    private final RulePersistence rulePersistence;
     
     // ✅ 单例配置对象（内存中唯一副本）
     private volatile XProbeConfig currentConfig;
@@ -34,6 +36,7 @@ public class XProbeConfigManager {
     
     public XProbeConfigManager(ConfigPersistence persistence) {
         this.persistence = persistence;
+        this.rulePersistence = new RulePersistence();
     }
     
     /**
@@ -57,29 +60,42 @@ public class XProbeConfigManager {
     }
     
     /**
-     * ✅ 获取当前配置（快速，无IO）
+     * ✅ P0修复: 获取当前配置（防御性复制，线程安全）
      * 
-     * ⚠️ 警告：返回的是内部配置对象的引用，请勿直接修改！
-     * 如果需要修改配置，请使用 getConfigCopy() 或 updateConfig()
+     * 返回配置对象的深拷贝，避免并发修改问题
      * 
-     * @return 当前配置对象（只读）
+     * @return 当前配置对象的副本
      */
     public XProbeConfig getConfig() {
         if (!initialized) {
             throw new IllegalStateException("ConfigManager未初始化，请先调用initialize()");
         }
-        return currentConfig;
+        // ✅ P0修复: 返回深拷贝而非引用，完全避免并发修改问题
+        return currentConfig.copy();
     }
     
     /**
-     * ✅ 获取配置的副本（防御性复制）
+     * ✅ 获取配置的副本（与getConfig()相同，保留以兼容旧代码）
      * 
-     * 用于需要修改配置的场景，修改副本后调用 saveConfig() 保存
-     * 
-     * @return 配置对象的深拷贝
+     * @deprecated 使用 getConfig() 即可，已经返回副本
      */
+    @Deprecated
     public XProbeConfig getConfigCopy() {
-        return getConfig().copy();
+        return getConfig();
+    }
+    
+    /**
+     * ✅ 获取配置引用（仅供内部只读使用，性能优化）
+     * 
+     * 警告：仅供内部便捷方法使用，外部代码不应调用此方法
+     * 
+     * @return 当前配置对象的引用（只读）
+     */
+    private XProbeConfig getConfigReference() {
+        if (!initialized) {
+            throw new IllegalStateException("ConfigManager未初始化，请先调用initialize()");
+        }
+        return currentConfig;
     }
     
     /**
@@ -158,13 +174,14 @@ public class XProbeConfigManager {
     }
     
     /**
-     * ✅ 便捷方法：检查被动扫描是否启用（线程安全）
+     * ✅ 便捷方法：检查被动扫描是否启用（线程安全，高性能）
      * 
      * @return 如果被动扫描启用返回true，未初始化时返回false（默认）
      */
     public boolean isPassiveScanEnabled() {
         try {
-            return getConfig().isEnablePassiveScan();
+            // ✅ 性能优化: 只读操作使用引用而非副本
+            return getConfigReference().isEnablePassiveScan();
         } catch (IllegalStateException e) {
             // 未初始化，返回默认值（禁用）
             return false;
@@ -172,13 +189,14 @@ public class XProbeConfigManager {
     }
     
     /**
-     * ✅ 便捷方法：获取全局注入模式（线程安全）
+     * ✅ 便捷方法：获取全局注入模式（线程安全，高性能）
      * 
      * @return 全局注入模式，未初始化时返回BATCH（默认）
      */
     public Configuration.InjectionMode getGlobalInjectionMode() {
         try {
-            return getConfig().getGlobalInjectionMode();
+            // ✅ 性能优化: 只读操作使用引用而非副本
+            return getConfigReference().getGlobalInjectionMode();
         } catch (IllegalStateException e) {
             // 未初始化，返回默认值（批量模式）
             return Configuration.InjectionMode.BATCH;
@@ -186,13 +204,14 @@ public class XProbeConfigManager {
     }
     
     /**
-     * ✅ 便捷方法：获取扫描结果记录模式（线程安全）
+     * ✅ 便捷方法：获取扫描结果记录模式（线程安全，高性能）
      * 
      * @return 扫描结果记录模式，未初始化时返回MATCHED_ONLY（默认）
      */
     public XProbeConfig.ScanResultLogMode getScanResultLogMode() {
         try {
-            return getConfig().getScanResultLogMode();
+            // ✅ 性能优化: 只读操作使用引用而非副本
+            return getConfigReference().getScanResultLogMode();
         } catch (IllegalStateException e) {
             // 未初始化，返回默认值（仅记录命中）
             return XProbeConfig.ScanResultLogMode.MATCHED_ONLY;
@@ -212,5 +231,193 @@ public class XProbeConfigManager {
     public boolean isInitialized() {
         return initialized;
     }
+    
+    // ========== 规则导入导出功能（新增）==========
+    
+    /**
+     * ✅ 导出规则到JSON文件
+     * 
+     * @param file 目标文件
+     * @throws IOException 如果导出失败
+     */
+    public void exportRules(File file) throws IOException {
+        // ✅ 使用getConfig()获取深拷贝，避免并发问题
+        XProbeConfig config = getConfig();
+        List<Configuration> rules = config.getScanConfigurations();
+        
+        // ✅ 再次创建副本，确保完全独立
+        List<Configuration> rulesCopy = new java.util.ArrayList<>(rules);
+        rulePersistence.exportRules(rulesCopy, file);
+    }
+    
+    /**
+     * ✅ 从JSON文件导入规则（追加或替换模式）
+     * 
+     * @param file 源文件
+     * @param append true=追加到现有规则，false=替换现有规则
+     * @throws IOException 如果导入失败
+     */
+    public void importRules(File file, boolean append) throws IOException {
+        List<Configuration> importedRules = rulePersistence.importRules(file);
+        
+        // ✅ 验证导入的规则
+        validateImportedRules(importedRules);
+        
+        updateConfig(config -> {
+            if (append) {
+                // ✅ 追加模式：创建新列表并处理ID冲突
+                List<Configuration> existingRules = config.getScanConfigurations();
+                List<Configuration> mergedRules = new java.util.ArrayList<>(existingRules);
+                
+                // ✅ 处理ID冲突：检查并重新生成重复的规则ID
+                for (Configuration rule : importedRules) {
+                    if (hasConflictingId(mergedRules, rule.getRuleId())) {
+                        rule.generateNewRuleId();  // 生成新的唯一ID
+                    }
+                    mergedRules.add(rule);
+                }
+                
+                config.setScanConfigurations(mergedRules);
+            } else {
+                // ✅ 替换模式：使用导入的规则
+                config.setScanConfigurations(new java.util.ArrayList<>(importedRules));
+            }
+        });
+    }
+    
+    /**
+     * ✅ 验证导入的规则
+     * 
+     * @param rules 待验证的规则列表
+     * @throws IOException 如果验证失败
+     */
+    private void validateImportedRules(List<Configuration> rules) throws IOException {
+        if (rules == null) {
+            throw new IOException("导入的规则列表为null");
+        }
+        
+        // ✅ 限制规则数量（防止DoS）
+        if (rules.size() > 1000) {
+            throw new IOException("导入的规则数量过多（最多1000条），实际: " + rules.size());
+        }
+        
+        // ✅ 验证每个规则的基本字段
+        for (int i = 0; i < rules.size(); i++) {
+            Configuration rule = rules.get(i);
+            if (rule == null) {
+                throw new IOException("规则 #" + (i + 1) + " 为null");
+            }
+            
+            // 确保有规则ID
+            if (rule.getRuleId() == null || rule.getRuleId().trim().isEmpty()) {
+                // 自动生成ID而不是抛出异常
+                rule.generateNewRuleId();
+            }
+            
+            // 验证规则名称
+            if (rule.getCustomLabel() == null || rule.getCustomLabel().trim().isEmpty()) {
+                rule.setCustomLabel("导入的规则 #" + (i + 1));
+            }
+        }
+    }
+    
+    /**
+     * ✅ 检查规则ID是否冲突
+     * 
+     * @param existingRules 现有规则列表
+     * @param ruleId 要检查的规则ID
+     * @return true 如果ID已存在
+     */
+    private boolean hasConflictingId(List<Configuration> existingRules, String ruleId) {
+        if (ruleId == null || ruleId.trim().isEmpty()) {
+            return false;
+        }
+        
+        for (Configuration rule : existingRules) {
+            if (ruleId.equals(rule.getRuleId())) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    /**
+     * ✅ 保存规则到外部文件（如果启用了外部规则文件）
+     * 
+     * 根据配置决定是否将规则保存到单独的文件中
+     * 
+     * @throws IOException 如果保存失败
+     */
+    public void saveRulesToExternalFile() throws IOException {
+        XProbeConfig config = getConfigReference();
+        
+        if (config.isUseExternalRuleFile()) {
+            String ruleFilePath = config.getEffectiveRuleFilePath();
+            List<Configuration> rules = config.getScanConfigurations();
+            rulePersistence.saveRules(rules, ruleFilePath);
+        }
+    }
+    
+    /**
+     * ✅ 从外部文件加载规则（如果启用了外部规则文件）
+     * 
+     * @throws IOException 如果加载失败
+     */
+    public void loadRulesFromExternalFile() throws IOException {
+        XProbeConfig config = getConfigReference();
+        
+        if (config.isUseExternalRuleFile()) {
+            String ruleFilePath = config.getEffectiveRuleFilePath();
+            List<Configuration> rules = rulePersistence.loadRules(ruleFilePath);
+            
+            updateConfig(cfg -> {
+                cfg.setScanConfigurations(rules);
+            });
+        }
+    }
+    
+    /**
+     * ✅ 同步规则（根据配置决定保存位置）
+     * 
+     * 如果启用了外部规则文件，则保存到外部文件，否则保存到主配置文件
+     * 
+     * @throws IOException 如果保存失败
+     */
+    public void syncRules() throws IOException {
+        XProbeConfig config = getConfigReference();
+        
+        if (config.isUseExternalRuleFile()) {
+            // 保存到外部规则文件
+            saveRulesToExternalFile();
+            
+            // 主配置文件中清空规则（避免冗余）
+            XProbeConfig configCopy = config.copy();
+            configCopy.setScanConfigurations(new java.util.ArrayList<>());
+            persistence.save(configCopy);
+        } else {
+            // 保存到主配置文件
+            persistence.save(config);
+        }
+    }
+    
+    /**
+     * ✅ 获取规则文件路径
+     * 
+     * @return 规则文件的完整路径
+     */
+    public String getRuleFilePath() {
+        return getConfigReference().getEffectiveRuleFilePath();
+    }
+    
+    /**
+     * ✅ 验证规则文件格式
+     * 
+     * @param filePath 文件路径
+     * @return true 如果格式正确
+     */
+    public boolean validateRuleFile(String filePath) {
+        return rulePersistence.validateRuleFile(filePath);
+    }
 }
+
 
