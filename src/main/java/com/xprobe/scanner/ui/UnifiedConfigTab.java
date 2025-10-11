@@ -1489,5 +1489,15 @@ public class UnifiedConfigTab {
     public void setArjunService(com.xprobe.scanner.active.arjun.ArjunService arjunService) {
         this.arjunService = arjunService;
     }
+    
+    /**
+     * ✅ 清理资源
+     */
+    public void cleanup() {
+        if (statusTimer != null) {
+            statusTimer.stop();
+            api.logging().raiseDebugEvent("✅ UnifiedConfigTab Timer已停止");
+        }
+    }
 }
 

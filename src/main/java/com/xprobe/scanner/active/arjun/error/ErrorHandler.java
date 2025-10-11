@@ -155,8 +155,9 @@ public class ErrorHandler {
         
         // 400/413: 错误请求
         if (statusCode == 400 || statusCode == 413) {
-            // ✅ 只有当基线状态码不是400时才计数（Python: line 41）
-            if (factors.getSameCode() != null && factors.getSameCode() != statusCode) {
+            // ✅ 修复：添加factors的null检查
+            // 只有当基线状态码不是400时才计数（Python: line 41）
+            if (factors != null && factors.getSameCode() != null && factors.getSameCode() != statusCode) {
                 int count = badRequestCount.incrementAndGet();
                 
                 if (count > 20) {  // ✅ 同Python：超过20次终止

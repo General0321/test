@@ -53,6 +53,9 @@ public class RealtimeScannerRefactored {
     private final Map<String, Long> lastArjunTriggerTime = new ConcurrentHashMap<>();
     private final Map<String, Integer> lastParameterCount = new ConcurrentHashMap<>();
     private volatile int minParameterThreshold = 15;  // ✅ P1修复：volatile确保多线程可见性
+    
+    // ✅ Arjun结果监听器（用于通知UI显示结果）
+    private final List<ArjunResultListener> arjunResultListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
     private volatile int cooldownSeconds = 300;  // ✅ P1修复：volatile确保多线程可见性
     
     // ✅ 修复：主动探测总开关（控制Arjun触发）
@@ -355,6 +358,10 @@ public class RealtimeScannerRefactored {
                 arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
                     if (result.isSuccess()) {
                         if (!result.getFoundParameters().isEmpty()) {
+                            // ✅ 通知UI显示结果
+                            String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
+                            notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
+                            
                             triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
                         }
                         parameterManager.markParametersAsScanned(
@@ -655,6 +662,10 @@ public class RealtimeScannerRefactored {
                                 
                                 // ✅ 将发现的参数传递给漏洞扫描器
                                 if (!result.getFoundParameters().isEmpty()) {
+                                    // ✅ 通知UI显示结果
+                                    String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
+                                    notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
+                                    
                                     triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
                                 }
                                 
@@ -765,6 +776,10 @@ public class RealtimeScannerRefactored {
                         if (result.isSuccess()) {
                             // ✅ 将发现的参数传递给漏洞扫描器
                             if (!result.getFoundParameters().isEmpty()) {
+                                // ✅ 通知UI显示结果
+                                String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
+                                notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
+                                
                                 triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
                             }
                             
@@ -884,6 +899,10 @@ public class RealtimeScannerRefactored {
                             
                             // ✅ 将发现的参数传递给漏洞扫描器
                             if (!result.getFoundParameters().isEmpty()) {
+                                // ✅ 通知UI显示结果
+                                String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                notifyArjunResult(mainDomain, endpoint, result.getFoundParameters(), paramType);
+                                
                                 triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
                             }
                             
@@ -1474,6 +1493,56 @@ public class RealtimeScannerRefactored {
         public String getLastUpdateTimeFormatted() {
             java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("HH:mm:ss");
             return sdf.format(new java.util.Date(lastUpdateTime));
+        }
+    }
+    
+    // ========== Arjun结果监听器机制 ==========
+    
+    /**
+     * Arjun结果监听器接口
+     */
+    public interface ArjunResultListener {
+        /**
+         * 当Arjun发现参数时被调用
+         * 
+         * @param mainDomain 主域名
+         * @param endpoint 接口路径
+         * @param foundParameters 发现的参数集合
+         * @param parameterType 参数类型（GET/POST/JSON等）
+         * @param timestamp 探测时间戳
+         */
+        void onArjunResultFound(String mainDomain, String endpoint, Set<String> foundParameters, 
+                               String parameterType, long timestamp);
+    }
+    
+    /**
+     * 注册Arjun结果监听器
+     */
+    public void addArjunResultListener(ArjunResultListener listener) {
+        if (listener != null) {
+            arjunResultListeners.add(listener);
+        }
+    }
+    
+    /**
+     * 移除Arjun结果监听器
+     */
+    public void removeArjunResultListener(ArjunResultListener listener) {
+        arjunResultListeners.remove(listener);
+    }
+    
+    /**
+     * 通知所有监听器Arjun发现了参数
+     */
+    private void notifyArjunResult(String mainDomain, String endpoint, Set<String> foundParameters, 
+                                   String parameterType) {
+        long timestamp = System.currentTimeMillis();
+        for (ArjunResultListener listener : arjunResultListeners) {
+            try {
+                listener.onArjunResultFound(mainDomain, endpoint, foundParameters, parameterType, timestamp);
+            } catch (Exception e) {
+                api.logging().raiseErrorEvent("Arjun结果监听器执行失败: " + e.getMessage());
+            }
         }
     }
     

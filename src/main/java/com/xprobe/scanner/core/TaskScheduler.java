@@ -23,14 +23,17 @@ public class TaskScheduler {
     private final ScannerFactory scannerFactory;
     private final LogModel logModel;
     private final XProbeConfigManager xprobeConfigManager;  // ✅ 改为配置管理器
+    private final OriginalResponseCache responseCache;  // ✅ 原始响应缓存
     private final ExecutorService executorService;
     private static final AtomicInteger logId = new AtomicInteger(0);
     
-    public TaskScheduler(MontoyaApi api, ScannerFactory scannerFactory, LogModel logModel, XProbeConfigManager xprobeConfigManager) {
+    public TaskScheduler(MontoyaApi api, ScannerFactory scannerFactory, LogModel logModel, 
+                        XProbeConfigManager xprobeConfigManager, OriginalResponseCache responseCache) {
         this.api = api;
         this.scannerFactory = scannerFactory;
         this.logModel = logModel;
         this.xprobeConfigManager = xprobeConfigManager;  // ✅ 改为配置管理器
+        this.responseCache = responseCache;  // ✅ 保存响应缓存引用
         
         // ✅ 修复：创建可伸缩线程池（从配置读取参数）
         XProbeConfig config = xprobeConfigManager.getConfig();
@@ -153,6 +156,37 @@ public class TaskScheduler {
     }
     
     /**
+     * 从缓存中查找原始响应（O(1)查找）
+     * @param originalRequest 原始请求
+     * @return 找到的原始响应，如果未找到则返回null
+     */
+    private HttpResponse findOriginalResponse(HttpRequest originalRequest) {
+        try {
+            String method = originalRequest.method();
+            String url = originalRequest.url();
+            
+            // 从缓存中查找（O(1)操作）
+            HttpResponse cachedResponse = responseCache.get(method, url);
+            
+            if (cachedResponse != null) {
+                api.logging().raiseDebugEvent(
+                    "✅ 从缓存找到原始响应: " + method + " " + url
+                );
+                return cachedResponse;
+            } else {
+                api.logging().raiseDebugEvent(
+                    "⚠️ 缓存中未找到原始响应: " + method + " " + url
+                );
+            }
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("❌ 查找原始响应失败: " + e.getMessage());
+        }
+        
+        return null;
+    }
+    
+    /**
      * 记录扫描结果到日志
      */
     private void logResult(ScanTask task, ScanResult result) {
@@ -185,14 +219,24 @@ public class TaskScheduler {
             
             int id = logId.incrementAndGet();
             
-            // ✅ 安全获取响应字段
-            int responseLength = 0;
-            int statusCode = 0;
+            // ✅ 从缓存中查找原始响应（O(1)操作）
+            HttpRequest originalRequest = result.getOriginalRequest();
+            HttpResponse originalResponse = findOriginalResponse(originalRequest);
+            
+            // 如果找不到原始响应，使用修改后的响应作为fallback
+            if (originalResponse == null) {
+                api.logging().raiseDebugEvent("⚠️ 未找到原始响应，使用修改后响应作为原始响应");
+                originalResponse = response;
+            }
+            
+            // ✅ 安全获取原始响应字段
+            int originalResponseLength = 0;
+            int originalStatusCode = 0;
             try {
-                responseLength = response.body() != null ? response.body().length() : 0;
-                statusCode = response.statusCode();
+                originalResponseLength = originalResponse.body() != null ? originalResponse.body().length() : 0;
+                originalStatusCode = originalResponse.statusCode();
             } catch (Exception e) {
-                api.logging().raiseErrorEvent("⚠️ 读取响应字段失败: " + e.getMessage());
+                api.logging().raiseErrorEvent("⚠️ 读取原始响应字段失败: " + e.getMessage());
             }
             
             // ✅ 同步添加到日志模型（包含规则名称）
@@ -210,13 +254,13 @@ public class TaskScheduler {
                     task.getContext().getToolSource(),
                     displayMethod,      // ✅ 修改后的method
                     displayUrl,         // ✅ 修改后的url
-                    result.getOriginalRequest(),
-                    response,
-                    responseLength,
-                    statusCode,
+                    originalRequest,    // ✅ 原始请求
+                    originalResponse,   // ✅ 从Proxy History获取的原始响应
+                    originalResponseLength,  // originalResponseLen
+                    originalStatusCode,      // originalResponseCode
                     result.getResponseTime(),
-                    result.getModifiedRequest(),
-                    response,
+                    modifiedRequest,    // ✅ 修改后的请求
+                    response,           // ✅ 修改后的响应（扫描器收到的响应）
                     ruleName  // ✅ 传递规则名称
                 );
             }

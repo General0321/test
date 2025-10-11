@@ -74,6 +74,7 @@ public class ActiveProbeTab {
         loadMasterSwitchState();  // 从配置加载总开关状态
         setupLayout();
         setupEventListeners();
+        registerArjunResultListener(realtimeScanner);  // ✅ 注册Arjun结果监听器
         startAutoRefresh();
     }
 
@@ -1105,6 +1106,64 @@ public class ActiveProbeTab {
                 JOptionPane.ERROR_MESSAGE
             );
         }
+    }
+    
+    // ========== Arjun结果显示 ==========
+    
+    /**
+     * 注册Arjun结果监听器
+     */
+    private void registerArjunResultListener(com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner) {
+        realtimeScanner.addArjunResultListener(new com.xprobe.scanner.active.RealtimeScannerRefactored.ArjunResultListener() {
+            @Override
+            public void onArjunResultFound(String mainDomain, String endpoint, Set<String> foundParameters, 
+                                          String parameterType, long timestamp) {
+                // 在UI线程中更新表格
+                SwingUtilities.invokeLater(() -> {
+                    addArjunResultToTable(mainDomain, endpoint, foundParameters, parameterType, timestamp);
+                });
+            }
+        });
+    }
+    
+    /**
+     * 将Arjun结果添加到表格
+     */
+    private void addArjunResultToTable(String mainDomain, String endpoint, Set<String> foundParameters, 
+                                       String parameterType, long timestamp) {
+        // 格式化时间
+        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("HH:mm:ss");
+        String timeStr = sdf.format(new java.util.Date(timestamp));
+        
+        // 参数列表（逗号分隔）
+        String paramsStr = String.join(", ", foundParameters);
+        
+        // 参数数量
+        int paramCount = foundParameters.size();
+        String displayParams = paramCount <= 5 ? paramsStr : 
+                              paramsStr.substring(0, Math.min(50, paramsStr.length())) + "... (共" + paramCount + "个)";
+        
+        // 验证状态
+        String verifyStatus = "✅ 已验证";
+        
+        // 添加到表格：目标域名, 接口, 发现参数, 参数类型, 验证状态, 探测时间
+        arjunResultTableModel.addRow(new Object[]{
+            mainDomain,
+            endpoint,
+            displayParams,
+            parameterType,
+            verifyStatus,
+            timeStr
+        });
+        
+        // 更新统计
+        arjunResultsLabel.setText("发现参数: " + arjunResultTableModel.getRowCount());
+        
+        // 日志
+        api.logging().raiseInfoEvent(String.format(
+            "✨ Arjun发现参数: %s%s - 参数: %s (类型: %s)",
+            mainDomain, endpoint, paramsStr, parameterType
+        ));
     }
     
     /**

@@ -651,12 +651,37 @@ public class UniversalScanner extends AbstractScanner {
             element.getNameMatchConfig().getValues() != null &&
             !element.getNameMatchConfig().getValues().isEmpty()) {
             boolean caseSensitive = element.getNameMatchConfig().isCaseSensitive();
-            for (String matchValue : element.getNameMatchConfig().getValues()) {
-                if (matchValue != null && !matchValue.isEmpty() &&
-                    matchesValue(targetName, matchValue, 
-                                element.getNameMatchConfig().getMatchType(), 
-                                caseSensitive)) {
-                    return true;
+            UnifiedHttpConfig.MatchType matchType = element.getNameMatchConfig().getMatchType();
+            
+            // ✅ 修复：区分正向匹配（OR）和反向匹配（AND）
+            boolean isNegativeMatch = (matchType == UnifiedHttpConfig.MatchType.NOT_EQUALS || 
+                                      matchType == UnifiedHttpConfig.MatchType.NOT_CONTAINS);
+            
+            if (isNegativeMatch) {
+                // ✅ 反向匹配：所有值都不匹配才返回true（AND逻辑）
+                for (String matchValue : element.getNameMatchConfig().getValues()) {
+                    if (matchValue == null || matchValue.isEmpty()) {
+                        continue;
+                    }
+                    
+                    // 检查是否匹配（使用正向匹配逻辑）
+                    UnifiedHttpConfig.MatchType positiveType = matchType == UnifiedHttpConfig.MatchType.NOT_EQUALS 
+                        ? UnifiedHttpConfig.MatchType.EQUALS 
+                        : UnifiedHttpConfig.MatchType.CONTAINS;
+                    
+                    if (matchesValue(targetName, matchValue, positiveType, caseSensitive)) {
+                        return false;  // 找到一个匹配的，不满足"都不匹配"
+                    }
+                }
+                return true;  // 所有值都不匹配
+                
+            } else {
+                // ✅ 正向匹配：任意一个匹配就返回true（OR逻辑）
+                for (String matchValue : element.getNameMatchConfig().getValues()) {
+                    if (matchValue != null && !matchValue.isEmpty() &&
+                        matchesValue(targetName, matchValue, matchType, caseSensitive)) {
+                        return true;
+                    }
                 }
             }
         }
@@ -840,47 +865,33 @@ public class UniversalScanner extends AbstractScanner {
                                  element.getNameMatchConfig().getValues() != null &&
                                  !element.getNameMatchConfig().getValues().isEmpty()) {
                             // 检查参数名是否匹配配置的任何一个值
-                            for (String matchValue : element.getNameMatchConfig().getValues()) {
-                                if (matchValue != null && !matchValue.isEmpty()) {
-                                    // 根据匹配类型进行匹配
-                                    boolean matches = false;
-                                    UnifiedHttpConfig.MatchType matchType = element.getNameMatchConfig().getMatchType();
-                                    switch (matchType) {
-                                        case ANY:
-                                            matches = true;  // 匹配任何值
+                            boolean caseSensitive = element.getNameMatchConfig().isCaseSensitive();
+                            UnifiedHttpConfig.MatchType matchType = element.getNameMatchConfig().getMatchType();
+                            
+                            // ✅ 修复：区分正向匹配（OR）和反向匹配（AND）
+                            boolean isNegativeMatch = (matchType == UnifiedHttpConfig.MatchType.NOT_EQUALS || 
+                                                      matchType == UnifiedHttpConfig.MatchType.NOT_CONTAINS);
+                            
+                            if (isNegativeMatch) {
+                                // 反向匹配：所有值都不匹配才注入
+                                shouldInject = true;
+                                for (String matchValue : element.getNameMatchConfig().getValues()) {
+                                    if (matchValue != null && !matchValue.isEmpty()) {
+                                        UnifiedHttpConfig.MatchType positiveType = matchType == UnifiedHttpConfig.MatchType.NOT_EQUALS 
+                                            ? UnifiedHttpConfig.MatchType.EQUALS 
+                                            : UnifiedHttpConfig.MatchType.CONTAINS;
+                                        
+                                        if (matchesValue(param.name(), matchValue, positiveType, caseSensitive)) {
+                                            shouldInject = false;  // 找到一个匹配的，不注入
                                             break;
-                                        case EQUALS:
-                                            matches = param.name().equals(matchValue);
-                                            break;
-                                        case STARTS_WITH:
-                                            matches = param.name().startsWith(matchValue);
-                                            break;
-                                        case ENDS_WITH:
-                                            matches = param.name().endsWith(matchValue);
-                                            break;
-                                        case NOT_EQUALS:
-                                            matches = !param.name().equals(matchValue);
-                                            break;
-                                        case CONTAINS:
-                                            matches = param.name().contains(matchValue);
-                                            break;
-                                        case REGEX:
-                                            try {
-                                                java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(matchValue);
-                                                matches = pattern.matcher(param.name()).find();
-                                            } catch (Exception e) {
-                                                matches = false;
-                                            }
-                                            break;
-                                        case NOT_CONTAINS:
-                                            matches = !param.name().contains(matchValue);
-                                            break;
-                                        default:
-                                            matches = param.name().contains(matchValue);  // 默认部分匹配
-                                            break;
+                                        }
                                     }
-                                    
-                                    if (matches) {
+                                }
+                            } else {
+                                // 正向匹配：任意一个匹配就注入
+                                for (String matchValue : element.getNameMatchConfig().getValues()) {
+                                    if (matchValue != null && !matchValue.isEmpty() && 
+                                        matchesValue(param.name(), matchValue, matchType, caseSensitive)) {
                                         shouldInject = true;
                                         break;
                                     }
@@ -927,11 +938,35 @@ public class UniversalScanner extends AbstractScanner {
                                  !element.getNameMatchConfig().getValues().isEmpty()) {
                             // 检查Header名是否匹配配置的任何一个值
                             boolean caseSensitive = element.getNameMatchConfig().isCaseSensitive();
-                            for (String matchValue : element.getNameMatchConfig().getValues()) {
-                                if (matchValue != null && !matchValue.isEmpty() && 
-                                    matchesValue(header.name(), matchValue, element.getNameMatchConfig().getMatchType(), caseSensitive)) {
-                                    shouldInject = true;
-                                    break;
+                            UnifiedHttpConfig.MatchType matchType = element.getNameMatchConfig().getMatchType();
+                            
+                            // ✅ 修复：区分正向匹配（OR）和反向匹配（AND）
+                            boolean isNegativeMatch = (matchType == UnifiedHttpConfig.MatchType.NOT_EQUALS || 
+                                                      matchType == UnifiedHttpConfig.MatchType.NOT_CONTAINS);
+                            
+                            if (isNegativeMatch) {
+                                // 反向匹配：所有值都不匹配才注入
+                                shouldInject = true;
+                                for (String matchValue : element.getNameMatchConfig().getValues()) {
+                                    if (matchValue != null && !matchValue.isEmpty()) {
+                                        UnifiedHttpConfig.MatchType positiveType = matchType == UnifiedHttpConfig.MatchType.NOT_EQUALS 
+                                            ? UnifiedHttpConfig.MatchType.EQUALS 
+                                            : UnifiedHttpConfig.MatchType.CONTAINS;
+                                        
+                                        if (matchesValue(header.name(), matchValue, positiveType, caseSensitive)) {
+                                            shouldInject = false;  // 找到一个匹配的，不注入
+                                            break;
+                                        }
+                                    }
+                                }
+                            } else {
+                                // 正向匹配：任意一个匹配就注入
+                                for (String matchValue : element.getNameMatchConfig().getValues()) {
+                                    if (matchValue != null && !matchValue.isEmpty() && 
+                                        matchesValue(header.name(), matchValue, matchType, caseSensitive)) {
+                                        shouldInject = true;
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -977,11 +1012,35 @@ public class UniversalScanner extends AbstractScanner {
                                  !element.getNameMatchConfig().getValues().isEmpty()) {
                             // 检查Cookie名是否匹配配置的任何一个值
                             boolean caseSensitive = element.getNameMatchConfig().isCaseSensitive();
-                            for (String matchValue : element.getNameMatchConfig().getValues()) {
-                                if (matchValue != null && !matchValue.isEmpty() && 
-                                    matchesValue(param.name(), matchValue, element.getNameMatchConfig().getMatchType(), caseSensitive)) {
-                                    shouldInject = true;
-                                    break;
+                            UnifiedHttpConfig.MatchType matchType = element.getNameMatchConfig().getMatchType();
+                            
+                            // ✅ 修复：区分正向匹配（OR）和反向匹配（AND）
+                            boolean isNegativeMatch = (matchType == UnifiedHttpConfig.MatchType.NOT_EQUALS || 
+                                                      matchType == UnifiedHttpConfig.MatchType.NOT_CONTAINS);
+                            
+                            if (isNegativeMatch) {
+                                // 反向匹配：所有值都不匹配才注入
+                                shouldInject = true;
+                                for (String matchValue : element.getNameMatchConfig().getValues()) {
+                                    if (matchValue != null && !matchValue.isEmpty()) {
+                                        UnifiedHttpConfig.MatchType positiveType = matchType == UnifiedHttpConfig.MatchType.NOT_EQUALS 
+                                            ? UnifiedHttpConfig.MatchType.EQUALS 
+                                            : UnifiedHttpConfig.MatchType.CONTAINS;
+                                        
+                                        if (matchesValue(param.name(), matchValue, positiveType, caseSensitive)) {
+                                            shouldInject = false;  // 找到一个匹配的，不注入
+                                            break;
+                                        }
+                                    }
+                                }
+                            } else {
+                                // 正向匹配：任意一个匹配就注入
+                                for (String matchValue : element.getNameMatchConfig().getValues()) {
+                                    if (matchValue != null && !matchValue.isEmpty() && 
+                                        matchesValue(param.name(), matchValue, matchType, caseSensitive)) {
+                                        shouldInject = true;
+                                        break;
+                                    }
                                 }
                             }
                         }

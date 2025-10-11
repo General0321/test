@@ -10,6 +10,7 @@ import com.xprobe.scanner.config.ConfigPersistence;
 import com.xprobe.scanner.config.XProbeConfig;
 import com.xprobe.scanner.config.XProbeConfigManager;
 import com.xprobe.scanner.core.GlobalFilter;
+import com.xprobe.scanner.core.OriginalResponseCache;
 import com.xprobe.scanner.core.RequestFilter;
 import com.xprobe.scanner.core.RequestHandler;
 import com.xprobe.scanner.core.TaskScheduler;
@@ -32,6 +33,7 @@ public class XProbe implements BurpExtension {
     private DashboardTab dashboardTab;
     private ScanResultTab scanResultTab;
     private ActiveProbeTab activeProbeTab;
+    private UnifiedConfigTab unifiedConfigTab;
     
     @Override
     public void initialize(MontoyaApi api) {
@@ -123,14 +125,18 @@ public class XProbe implements BurpExtension {
         // ✅ 创建ScannerFactory (需要RealtimeScanner和XProbeConfigManager以支持全局注入模式)
         ScannerFactory scannerFactory = new ScannerFactory(api, realtimeScanner, xprobeConfigManager);
         
-        // ✅ 创建任务调度器
-        taskScheduler = new TaskScheduler(api, scannerFactory, logModel, xprobeConfigManager);
+        // ✅ 创建原始响应缓存（LRU，最多缓存2000条记录）
+        OriginalResponseCache responseCache = new OriginalResponseCache(2000);
+        api.logging().raiseInfoEvent("✅ 原始响应缓存已创建（容量: 2000）");
+        
+        // ✅ 创建任务调度器（传入响应缓存）
+        taskScheduler = new TaskScheduler(api, scannerFactory, logModel, xprobeConfigManager, responseCache);
         
         // ✅ 建立RealtimeScanner和TaskScheduler的双向引用（用于Arjun→漏洞扫描）
         realtimeScanner.setTaskScheduler(taskScheduler);
         
-        // ✅ 创建请求处理器 (需要RealtimeScanner)
-        RequestHandler requestHandler = new RequestHandler(api, configManager, requestFilter, taskScheduler, realtimeScanner, xprobeConfigManager);
+        // ✅ 创建请求处理器 (需要RealtimeScanner和响应缓存)
+        RequestHandler requestHandler = new RequestHandler(api, configManager, requestFilter, taskScheduler, realtimeScanner, xprobeConfigManager, responseCache);
         
         // 注册HTTP处理器
         api.http().registerHttpHandler(requestHandler);
@@ -153,6 +159,10 @@ public class XProbe implements BurpExtension {
             
             if (activeProbeTab != null) {
                 activeProbeTab.cleanup();
+            }
+            
+            if (unifiedConfigTab != null) {
+                unifiedConfigTab.cleanup();
             }
             
             if (taskScheduler != null) {
@@ -194,9 +204,9 @@ public class XProbe implements BurpExtension {
         tabbedPane.addTab("✨ 主动探测", this.activeProbeTab.getComponent());
 
         // 5. 配置中心 - 全局配置（黑白名单、工具配置等）
-        UnifiedConfigTab unifiedConfigTab = new UnifiedConfigTab(api, configManager, globalFilter, realtimeScanner, xprobeConfigManager);
-        unifiedConfigTab.setArjunService(realtimeScanner.getArjunService());  // ✅ 设置Arjun服务
-        tabbedPane.addTab("⚙️ 配置中心", unifiedConfigTab.getComponent());
+        this.unifiedConfigTab = new UnifiedConfigTab(api, configManager, globalFilter, realtimeScanner, xprobeConfigManager);
+        this.unifiedConfigTab.setArjunService(realtimeScanner.getArjunService());  // ✅ 设置Arjun服务
+        tabbedPane.addTab("⚙️ 配置中心", this.unifiedConfigTab.getComponent());
 
         return tabbedPane;
     }

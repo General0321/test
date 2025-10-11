@@ -290,6 +290,7 @@ public class UnifiedHttpEvaluator {
     
     /**
      * 匹配值
+     * ✅ 修复：NOT_CONTAINS和NOT_EQUALS使用AND逻辑
      * 
      * @param actualValue 实际值
      * @param matchConfig 匹配配置
@@ -317,61 +318,89 @@ public class UnifiedHttpEvaluator {
         // 准备实际值
         String compareActual = caseSensitive ? actualValue : actualValue.toLowerCase();
         
-        // 遍历期望值，任意一个匹配即可（OR关系）
-        for (String expectedValue : expectedValues) {
-            if (expectedValue == null || expectedValue.isEmpty()) {
-                continue;
-            }
-            
-            String compareExpected = caseSensitive ? expectedValue : expectedValue.toLowerCase();
-            
-            boolean matches = false;
-            switch (matchType) {
-                case EQUALS:
-                    matches = compareActual.equals(compareExpected);
-                    break;
-                    
-                case CONTAINS:
-                    matches = compareActual.contains(compareExpected);
-                    break;
-                    
-                case REGEX:
-                    try {
-                        Pattern pattern = caseSensitive 
-                            ? Pattern.compile(expectedValue)
-                            : Pattern.compile(expectedValue, Pattern.CASE_INSENSITIVE);
-                        matches = pattern.matcher(actualValue).find();
-                    } catch (Exception e) {
-                        matches = false;
-                    }
-                    break;
-                    
-                case STARTS_WITH:
-                    matches = compareActual.startsWith(compareExpected);
-                    break;
-                    
-                case ENDS_WITH:
-                    matches = compareActual.endsWith(compareExpected);
-                    break;
-                    
-                case NOT_EQUALS:
-                    matches = !compareActual.equals(compareExpected);
-                    break;
-                    
-                case NOT_CONTAINS:
-                    matches = !compareActual.contains(compareExpected);
-                    break;
-                    
-                default:
-                    matches = false;
-            }
-            
-            if (matches) {
-                return true;
-            }
-        }
+        // ✅ 修复：区分正向匹配（OR）和反向匹配（AND）
+        boolean isNegativeMatch = (matchType == MatchType.NOT_EQUALS || matchType == MatchType.NOT_CONTAINS);
         
-        return false;
+        if (isNegativeMatch) {
+            // ✅ 反向匹配：所有值都不匹配才返回true（AND逻辑）
+            for (String expectedValue : expectedValues) {
+                if (expectedValue == null || expectedValue.isEmpty()) {
+                    continue;
+                }
+                
+                String compareExpected = caseSensitive ? expectedValue : expectedValue.toLowerCase();
+                
+                boolean matched = false;
+                switch (matchType) {
+                    case NOT_EQUALS:
+                        matched = compareActual.equals(compareExpected);
+                        break;
+                        
+                    case NOT_CONTAINS:
+                        matched = compareActual.contains(compareExpected);
+                        break;
+                        
+                    default:
+                        matched = false;
+                }
+                
+                // 如果找到一个匹配的，说明不满足"都不匹配"的条件
+                if (matched) {
+                    return false;
+                }
+            }
+            // 所有值都不匹配，返回true
+            return true;
+            
+        } else {
+            // ✅ 正向匹配：任意一个匹配就返回true（OR逻辑）
+            for (String expectedValue : expectedValues) {
+                if (expectedValue == null || expectedValue.isEmpty()) {
+                    continue;
+                }
+                
+                String compareExpected = caseSensitive ? expectedValue : expectedValue.toLowerCase();
+                
+                boolean matches = false;
+                switch (matchType) {
+                    case EQUALS:
+                        matches = compareActual.equals(compareExpected);
+                        break;
+                        
+                    case CONTAINS:
+                        matches = compareActual.contains(compareExpected);
+                        break;
+                        
+                    case REGEX:
+                        try {
+                            Pattern pattern = caseSensitive 
+                                ? Pattern.compile(expectedValue)
+                                : Pattern.compile(expectedValue, Pattern.CASE_INSENSITIVE);
+                            matches = pattern.matcher(actualValue).find();
+                        } catch (Exception e) {
+                            matches = false;
+                        }
+                        break;
+                        
+                    case STARTS_WITH:
+                        matches = compareActual.startsWith(compareExpected);
+                        break;
+                        
+                    case ENDS_WITH:
+                        matches = compareActual.endsWith(compareExpected);
+                        break;
+                        
+                    default:
+                        matches = false;
+                }
+                
+                if (matches) {
+                    return true;
+                }
+            }
+            
+            return false;
+        }
     }
     
     /**

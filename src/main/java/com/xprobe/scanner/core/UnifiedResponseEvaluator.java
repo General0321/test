@@ -34,22 +34,34 @@ public class UnifiedResponseEvaluator {
             return false;
         }
         
+        System.out.println("🔍 [响应评估] 开始评估响应配置，共 " + config.getElements().size() + " 个条件");
+        
         // 评估每个元素
         Map<Integer, Boolean> elementResults = new HashMap<>();
         for (ResponseElementConfig element : config.getElements()) {
+            System.out.println("🔍 [响应评估] 评估元素 ID=" + element.getId() + ", 类型=" + element.getType());
             boolean result = evaluateElement(response, element, payloadContext, responseTime);
             elementResults.put(element.getId(), result);
+            System.out.println("🔍 [响应评估] 元素 ID=" + element.getId() + " 评估结果: " + (result ? "✅ true" : "❌ false"));
         }
         
         // 根据表达式评估最终结果
         String expression = config.getConditionExpression();
+        System.out.println("🔍 [响应评估] 条件表达式: \"" + (expression == null ? "null" : expression) + "\"");
+        System.out.println("🔍 [响应评估] 所有元素结果: " + elementResults);
+        
+        boolean finalResult;
         if (expression == null || expression.trim().isEmpty()) {
             // 默认：所有元素都需满足（AND关系）
-            return elementResults.values().stream().allMatch(b -> b);
+            finalResult = elementResults.values().stream().allMatch(b -> b);
+            System.out.println("🔍 [响应评估] 使用默认AND逻辑，最终结果: " + (finalResult ? "✅ 匹配（告警）" : "❌ 不匹配（不告警）"));
+        } else {
+            // 使用表达式评估
+            finalResult = evaluateExpression(expression, elementResults);
+            System.out.println("🔍 [响应评估] 使用表达式评估，最终结果: " + (finalResult ? "✅ 匹配（告警）" : "❌ 不匹配（不告警）"));
         }
         
-        // 使用表达式评估
-        return evaluateExpression(expression, elementResults);
+        return finalResult;
     }
     
     /**
@@ -124,7 +136,16 @@ public class UnifiedResponseEvaluator {
             return false;
         }
         
-        String body = response.bodyToString();
+        // ✅ 修复：使用UTF-8编码获取响应体，避免中文乱码
+        String body;
+        try {
+            byte[] bodyBytes = response.body().getBytes();
+            body = new String(bodyBytes, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            // 降级处理：使用默认方法
+            body = response.bodyToString();
+        }
+        
         if (body == null) {
             body = "";
         }
@@ -208,6 +229,7 @@ public class UnifiedResponseEvaluator {
     
     /**
      * 文本匹配
+     * ✅ 修复：区分正向匹配（OR）和反向匹配（AND）
      */
     private static boolean matchTextValues(String actual, MatchConfig config) {
         if (actual == null) {
@@ -222,19 +244,43 @@ public class UnifiedResponseEvaluator {
         MatchType matchType = config.getMatchType();
         boolean caseSensitive = config.isCaseSensitive();
         
-        // 多个值之间是OR关系
-        for (String value : values) {
-            if (value == null || value.isEmpty()) {
-                continue;
+        // ✅ 修复：区分正向匹配（OR）和反向匹配（AND）
+        boolean isNegativeMatch = (matchType == MatchType.NOT_EQUALS || matchType == MatchType.NOT_CONTAINS);
+        
+        if (isNegativeMatch) {
+            // ✅ 反向匹配：所有值都不匹配才返回true（AND逻辑）
+            for (String value : values) {
+                if (value == null || value.isEmpty()) {
+                    continue;
+                }
+                
+                boolean matched = matchSingleValue(actual, value, 
+                    matchType == MatchType.NOT_EQUALS ? MatchType.EQUALS : MatchType.CONTAINS,
+                    caseSensitive);
+                
+                // 如果找到一个匹配的，说明不满足"都不匹配"的条件
+                if (matched) {
+                    return false;
+                }
+            }
+            // 所有值都不匹配，返回true
+            return true;
+            
+        } else {
+            // ✅ 正向匹配：任意一个匹配就返回true（OR逻辑）
+            for (String value : values) {
+                if (value == null || value.isEmpty()) {
+                    continue;
+                }
+                
+                boolean result = matchSingleValue(actual, value, matchType, caseSensitive);
+                if (result) {
+                    return true;  // 任意一个值匹配即返回true
+                }
             }
             
-            boolean result = matchSingleValue(actual, value, matchType, caseSensitive);
-            if (result) {
-                return true;  // 任意一个值匹配即返回true
-            }
+            return false;
         }
-        
-        return false;
     }
     
     /**

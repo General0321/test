@@ -686,6 +686,7 @@ public class ParameterCollector {
         
         /**
          * 添加参数
+         * ✅ 修复：遍历查找匹配的EndpointInfo（因为完整key包含method和contentType）
          */
         public void addParameter(String host, String endpoint, String parameter) {
             boolean isNew = allParameters.add(parameter);  // ✅ 检查是否是新参数
@@ -695,11 +696,13 @@ public class ParameterCollector {
             hostParameters.computeIfAbsent(host, k -> ConcurrentHashMap.newKeySet())
                          .add(parameter);
             
-            // 添加到接口参数集合
-            String endpointKey = host + ":" + endpoint;
-            EndpointInfo epInfo = endpointMap.get(endpointKey);
-            if (epInfo != null) {
-                epInfo.addParameter(parameter);
+            // ✅ 修复：遍历endpointMap，找到匹配host和endpoint的EndpointInfo
+            for (Map.Entry<String, EndpointInfo> entry : endpointMap.entrySet()) {
+                EndpointInfo epInfo = entry.getValue();
+                if (epInfo.host.equals(host) && epInfo.endpoint.equals(endpoint)) {
+                    epInfo.addParameter(parameter);
+                    break;  // 找到第一个匹配的即可（同一host+endpoint可能有多个method/contentType组合）
+                }
             }
             
             // ✅ 如果是新参数，更新时间
@@ -714,8 +717,8 @@ public class ParameterCollector {
         public void addEndpoint(String host, String endpoint, String method, 
                                String contentType, HttpRequest request) {
             String normalizedContentType = normalizeContentType(contentType);
-            // ✅ 修复：统一使用简单key（与addParameter保持一致）
-            String endpointKey = host + ":" + endpoint;
+            // ✅ 修复：统一使用完整key（method|host|contentType|endpoint），与getEndpointTemplate保持一致
+            String endpointKey = method + "|" + host + "|" + normalizedContentType + "|" + endpoint;
             hosts.add(host);
             
             // ✅ 修复：先检查是否存在，正确判断是否为新接口
