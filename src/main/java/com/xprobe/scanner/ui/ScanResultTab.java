@@ -47,7 +47,7 @@ public class ScanResultTab {
                         com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner) {
         this.api = api;
         this.logModel = logModel;
-        this.realtimeScanner = realtimeScanner;  // ✅ 保存实时扫描器引用（用于清空缓存）
+        this.realtimeScanner = realtimeScanner;  // ✅ 保存实时扫描器引用（用于清空扫描缓存）
         
         initializeComponents();
         setupLayout();
@@ -483,9 +483,10 @@ public class ScanResultTab {
         );
         
         if (result == JOptionPane.YES_OPTION) {
-            // ✅ 清空扫描去重缓存（RealtimeScanner）
+            // ✅ 清空扫描去重缓存
             // 说明：去重逻辑完全由规则的"去重颗粒度"配置决定
-            // 编辑规则时，ruleId不变，缓存中的旧key还在，必须清空才能重新扫描
+            // - 每个规则有独立的去重key（ruleId + 其他信息）
+            // - 编辑规则时，ruleId不变，缓存中的旧key还在，必须清空才能重新扫描
             if (realtimeScanner != null) {
                 realtimeScanner.clearPassiveScanCache();
             }
@@ -493,7 +494,10 @@ public class ScanResultTab {
             JOptionPane.showMessageDialog(
                 mainSplitPane,
                 "✅ 被动扫描缓存已清空！\n\n" +
-                "之前扫描过的流量现在可以重新扫描了。",
+                "说明：\n" +
+                "• 每个规则都有独立的去重缓存\n" +
+                "• 去重颗粒度由规则配置决定\n" +
+                "• 之前扫描过的流量现在可以重新扫描了",
                 "清空成功",
                 JOptionPane.INFORMATION_MESSAGE
             );

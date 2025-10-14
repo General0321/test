@@ -918,7 +918,11 @@ public class ActiveProbeTab {
                 
                 JOptionPane.showMessageDialog(
                     panel,
-                    "✅ Arjun扫描缓存已清空！\n之前扫描过的端点现在可以重新扫描了。",
+                    "✅ Arjun扫描缓存已清空！\n\n" +
+                    "说明：\n" +
+                    "• Arjun已扫描端点记录已清空\n" +
+                    "• 之前扫描过的端点现在可以重新扫描\n" +
+                    "• 详细信息请查看Burp日志",
                     "清空成功",
                     JOptionPane.INFORMATION_MESSAGE
                 );

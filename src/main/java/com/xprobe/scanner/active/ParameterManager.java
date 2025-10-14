@@ -163,8 +163,10 @@ public class ParameterManager {
      * 清空已扫描记录
      */
     public void clearScannedParameters() {
+        int beforeSize = arjunScannedParameters.size();
         arjunScannedParameters.clear();
-        api.logging().raiseInfoEvent("清空 Arjun 扫描记录");
+        int afterSize = arjunScannedParameters.size();
+        api.logging().raiseInfoEvent(String.format("✅ 清空Arjun扫描缓存: %d → %d 条", beforeSize, afterSize));
     }
     
     // ========== 参数导入导出 ==========

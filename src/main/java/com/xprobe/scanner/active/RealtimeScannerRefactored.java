@@ -1110,8 +1110,10 @@ public class RealtimeScannerRefactored {
      * 功能：清空参数扫描去重缓存，使被动扫描可以重新扫描之前扫描过的参数
      */
     public void clearPassiveScanCache() {
+        int beforeSize = passiveScanProcessedKeys.size();
         passiveScanProcessedKeys.clear();
-        api.logging().raiseInfoEvent("✅ 清空被动扫描参数去重缓存");
+        int afterSize = passiveScanProcessedKeys.size();
+        api.logging().raiseInfoEvent(String.format("✅ 清空被动扫描去重缓存: %d → %d 条", beforeSize, afterSize));
     }
     
     // ========== 参数导入导出 ==========
