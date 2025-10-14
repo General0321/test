@@ -34,34 +34,22 @@ public class UnifiedResponseEvaluator {
             return false;
         }
         
-        System.out.println("🔍 [响应评估] 开始评估响应配置，共 " + config.getElements().size() + " 个条件");
-        
         // 评估每个元素
         Map<Integer, Boolean> elementResults = new HashMap<>();
         for (ResponseElementConfig element : config.getElements()) {
-            System.out.println("🔍 [响应评估] 评估元素 ID=" + element.getId() + ", 类型=" + element.getType());
             boolean result = evaluateElement(response, element, payloadContext, responseTime);
             elementResults.put(element.getId(), result);
-            System.out.println("🔍 [响应评估] 元素 ID=" + element.getId() + " 评估结果: " + (result ? "✅ true" : "❌ false"));
         }
         
         // 根据表达式评估最终结果
         String expression = config.getConditionExpression();
-        System.out.println("🔍 [响应评估] 条件表达式: \"" + (expression == null ? "null" : expression) + "\"");
-        System.out.println("🔍 [响应评估] 所有元素结果: " + elementResults);
-        
-        boolean finalResult;
         if (expression == null || expression.trim().isEmpty()) {
             // 默认：所有元素都需满足（AND关系）
-            finalResult = elementResults.values().stream().allMatch(b -> b);
-            System.out.println("🔍 [响应评估] 使用默认AND逻辑，最终结果: " + (finalResult ? "✅ 匹配（告警）" : "❌ 不匹配（不告警）"));
-        } else {
-            // 使用表达式评估
-            finalResult = evaluateExpression(expression, elementResults);
-            System.out.println("🔍 [响应评估] 使用表达式评估，最终结果: " + (finalResult ? "✅ 匹配（告警）" : "❌ 不匹配（不告警）"));
+            return elementResults.values().stream().allMatch(b -> b);
         }
         
-        return finalResult;
+        // 使用表达式评估
+        return evaluateExpression(expression, elementResults);
     }
     
     /**
@@ -132,7 +120,6 @@ public class UnifiedResponseEvaluator {
      */
     private static boolean evaluateBody(HttpResponse response, MatchConfig config) {
         if (response == null) {
-            System.out.println("🔍 [响应体匹配] 响应为null，返回false");
             return false;
         }
         
@@ -150,15 +137,7 @@ public class UnifiedResponseEvaluator {
             body = "";
         }
         
-        // ✅ 调试日志
-        String bodyPreview = body.length() > 200 ? body.substring(0, 200) + "..." : body;
-        System.out.println("🔍 [响应体匹配] 响应体长度: " + body.length() + ", 预览: " + bodyPreview);
-        System.out.println("🔍 [响应体匹配] 匹配配置: 类型=" + config.getMatchType() + ", 值=" + config.getValues());
-        
-        boolean result = matchTextValues(body, config);
-        System.out.println("🔍 [响应体匹配] 匹配结果: " + (result ? "✅ 成功" : "❌ 失败"));
-        
-        return result;
+        return matchTextValues(body, config);
     }
     
     /**

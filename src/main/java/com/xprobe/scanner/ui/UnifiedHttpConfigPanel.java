@@ -66,6 +66,9 @@ public class UnifiedHttpConfigPanel extends JPanel {
         JButton addMethodBtn = new JButton("+ Method");
         addMethodBtn.addActionListener(e -> addElement(ElementType.METHOD));
         
+        JButton addHostBtn = new JButton("+ Host");
+        addHostBtn.addActionListener(e -> addElement(ElementType.HOST));
+        
         JButton addPathBtn = new JButton("+ Path");
         addPathBtn.addActionListener(e -> addElement(ElementType.PATH));
         
@@ -87,6 +90,7 @@ public class UnifiedHttpConfigPanel extends JPanel {
         toolbar.add(importBtn);
         toolbar.add(new JSeparator(SwingConstants.VERTICAL));
         toolbar.add(addMethodBtn);
+        toolbar.add(addHostBtn);
         toolbar.add(addPathBtn);
         toolbar.add(addParamBtn);
         toolbar.add(addHeaderBtn);

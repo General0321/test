@@ -16,8 +16,10 @@ import javax.swing.border.TitledBorder;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 统一配置面板 - 集成所有配置项
@@ -67,6 +69,7 @@ public class UnifiedConfigTab {
     private JSpinner arjunThreadsSpinner;           // 并发线程数
     private JSpinner arjunMaxRetriesSpinner;        // 最大重试次数
     private JSpinner arjunRateLimitSpinner;         // 速率限制（req/s）
+    private JTextArea arjunCustomHeadersArea;       // 自定义HTTP头（覆盖/添加）
     
     // Arjun实时模式配置组件
     private JSpinner arjunRealtimeIntervalSpinner;
@@ -147,6 +150,9 @@ public class UnifiedConfigTab {
         arjunThreadsSpinner = new JSpinner(new SpinnerNumberModel(5, 1, 20, 1));  // 1-20线程
         arjunMaxRetriesSpinner = new JSpinner(new SpinnerNumberModel(5, 1, 10, 1));  // 1-10次重试
         arjunRateLimitSpinner = new JSpinner(new SpinnerNumberModel(9999, 1, 10000, 100));  // 1-10000 req/s
+        arjunCustomHeadersArea = new JTextArea(5, 40);  // 自定义HTTP头文本域
+        arjunCustomHeadersArea.setLineWrap(false);
+        arjunCustomHeadersArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         
         // ✅ 线程池配置组件（新增）
         scannerCoreThreadsSpinner = new JSpinner(new SpinnerNumberModel(-1, -1, 128, 1));  // -1=自动
@@ -648,6 +654,29 @@ public class UnifiedConfigTab {
         rateLimitUnit.setForeground(Color.GRAY);
         javaArjunContent.add(rateLimitUnit, gbc2);
         
+        // ✅ 自定义HTTP头
+        gbc2.gridx = 0; gbc2.gridy = 20; gbc2.gridwidth = 3; gbc2.weightx = 1.0; gbc2.fill = GridBagConstraints.BOTH;
+        JPanel customHeadersPanel = new JPanel(new BorderLayout(5, 5));
+        customHeadersPanel.setBorder(BorderFactory.createEmptyBorder(10, 0, 0, 0));
+        
+        JLabel customHeadersLabel = new JLabel("📝 自定义HTTP头（Arjun扫描时添加/覆盖）:");
+        customHeadersLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        customHeadersPanel.add(customHeadersLabel, BorderLayout.NORTH);
+        
+        JScrollPane customHeadersScroll = new JScrollPane(arjunCustomHeadersArea);
+        customHeadersScroll.setPreferredSize(new Dimension(400, 100));
+        customHeadersPanel.add(customHeadersScroll, BorderLayout.CENTER);
+        
+        JLabel customHeadersHint = new JLabel("<html><i>格式: Header-Name: Header-Value （每行一个，存在则覆盖，不存在则添加）<br>" +
+            "示例: Authorization: Bearer token123<br>" +
+            "示例: User-Agent: CustomAgent/1.0</i></html>");
+        customHeadersHint.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+        customHeadersHint.setForeground(Color.GRAY);
+        customHeadersPanel.add(customHeadersHint, BorderLayout.SOUTH);
+        
+        javaArjunContent.add(customHeadersPanel, gbc2);
+        gbc2.gridwidth = 1; gbc2.fill = GridBagConstraints.HORIZONTAL;  // 重置
+        
         javaArjunConfigPanel.add(javaArjunContent, BorderLayout.CENTER);
         configContainer.add(javaArjunConfigPanel);
         configContainer.add(Box.createVerticalStrut(10));
@@ -1076,6 +1105,13 @@ public class UnifiedConfigTab {
         arjunMaxRetriesSpinner.setValue(config.getArjunMaxRetries());
         arjunRateLimitSpinner.setValue(config.getArjunRateLimit());
         
+        // ✅ 自定义HTTP头
+        StringBuilder headersText = new StringBuilder();
+        for (Map.Entry<String, String> entry : config.getArjunCustomHeaders().entrySet()) {
+            headersText.append(entry.getKey()).append(": ").append(entry.getValue()).append("\n");
+        }
+        arjunCustomHeadersArea.setText(headersText.toString().trim());
+        
         // ✅ 线程池配置
         scannerCoreThreadsSpinner.setValue(config.getScannerCoreThreads());
         scannerMaxThreadsSpinner.setValue(config.getScannerMaxThreads());
@@ -1266,6 +1302,25 @@ public class UnifiedConfigTab {
         config.setArjunThreads((Integer) arjunThreadsSpinner.getValue());
         config.setArjunMaxRetries((Integer) arjunMaxRetriesSpinner.getValue());
         config.setArjunRateLimit((Integer) arjunRateLimitSpinner.getValue());
+        
+        // ✅ 自定义HTTP头
+        Map<String, String> customHeaders = new HashMap<>();
+        String headersText = arjunCustomHeadersArea.getText().trim();
+        if (!headersText.isEmpty()) {
+            for (String line : headersText.split("\n")) {
+                line = line.trim();
+                if (line.isEmpty() || !line.contains(":")) {
+                    continue;
+                }
+                int colonIndex = line.indexOf(":");
+                String headerName = line.substring(0, colonIndex).trim();
+                String headerValue = line.substring(colonIndex + 1).trim();
+                if (!headerName.isEmpty() && !headerValue.isEmpty()) {
+                    customHeaders.put(headerName, headerValue);
+                }
+            }
+        }
+        config.setArjunCustomHeaders(customHeaders);
         
         // ✅ 线程池配置
         config.setScannerCoreThreads((Integer) scannerCoreThreadsSpinner.getValue());

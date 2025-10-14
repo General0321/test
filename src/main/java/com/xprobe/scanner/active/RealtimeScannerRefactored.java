@@ -357,12 +357,24 @@ public class RealtimeScannerRefactored {
                 // 异步调用 Arjun
                 arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
                     if (result.isSuccess()) {
+                        // ✅ 优化日志：区分找到参数和未找到参数的情况
                         if (!result.getFoundParameters().isEmpty()) {
+                            api.logging().raiseInfoEvent(String.format(
+                                "✅ Arjun 发现 %d 个参数: %s - %s",
+                                result.getFoundParameters().size(),
+                                epKey, result.getFoundParameters()
+                            ));
+                            
                             // ✅ 通知UI显示结果
                             String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
                             notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
                             
                             triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                        } else {
+                            api.logging().raiseDebugEvent(String.format(
+                                "Arjun 扫描完成，未发现隐藏参数: %s",
+                                epKey
+                            ));
                         }
                         parameterManager.markParametersAsScanned(
                             epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
@@ -655,18 +667,25 @@ public class RealtimeScannerRefactored {
                         // 异步调用 Arjun
                         arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
                             if (result.isSuccess()) {
-                                api.logging().raiseInfoEvent(String.format(
-                                    "Arjun 发现参数: %s - %s",
-                                    epKey, result.getFoundParameters()
-                                ));
-                                
-                                // ✅ 将发现的参数传递给漏洞扫描器
+                                // ✅ 优化日志：区分找到参数和未找到参数的情况
                                 if (!result.getFoundParameters().isEmpty()) {
+                                    api.logging().raiseInfoEvent(String.format(
+                                        "✅ Arjun 发现 %d 个参数: %s - %s",
+                                        result.getFoundParameters().size(),
+                                        epKey, result.getFoundParameters()
+                                    ));
+                                    
                                     // ✅ 通知UI显示结果
                                     String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
                                     notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
                                     
+                                    // ✅ 将发现的参数传递给漏洞扫描器
                                     triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                                } else {
+                                    api.logging().raiseDebugEvent(String.format(
+                                        "Arjun 扫描完成，未发现隐藏参数: %s",
+                                        epKey
+                                    ));
                                 }
                                 
                                 // 标记参数为已扫描
@@ -774,13 +793,25 @@ public class RealtimeScannerRefactored {
                     // 异步调用 Arjun（与SiteMap模式相同的逻辑）
                     arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
                         if (result.isSuccess()) {
-                            // ✅ 将发现的参数传递给漏洞扫描器
+                            // ✅ 优化日志：区分找到参数和未找到参数的情况
                             if (!result.getFoundParameters().isEmpty()) {
+                                api.logging().raiseInfoEvent(String.format(
+                                    "✅ Arjun 发现 %d 个参数: %s - %s",
+                                    result.getFoundParameters().size(),
+                                    epKey, result.getFoundParameters()
+                                ));
+                                
                                 // ✅ 通知UI显示结果
                                 String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
                                 notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
                                 
+                                // ✅ 将发现的参数传递给漏洞扫描器
                                 triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                            } else {
+                                api.logging().raiseDebugEvent(String.format(
+                                    "Arjun 扫描完成，未发现隐藏参数: %s",
+                                    epKey
+                                ));
                             }
                             
                             parameterManager.markParametersAsScanned(
@@ -891,19 +922,26 @@ public class RealtimeScannerRefactored {
                     // 异步调用 Arjun
                     arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
                         if (result.isSuccess()) {
-                            api.logging().raiseInfoEvent(String.format(
-                                "Arjun 发现参数: %s %s (%s) %s - %s",
-                                finalMethod, host, finalContentType, endpoint, 
-                                result.getFoundParameters()
-                            ));
-                            
-                            // ✅ 将发现的参数传递给漏洞扫描器
+                            // ✅ 优化日志：区分找到参数和未找到参数的情况
                             if (!result.getFoundParameters().isEmpty()) {
+                                api.logging().raiseInfoEvent(String.format(
+                                    "✅ Arjun 发现 %d 个参数: %s %s (%s) %s - %s",
+                                    result.getFoundParameters().size(),
+                                    finalMethod, host, finalContentType, endpoint, 
+                                    result.getFoundParameters()
+                                ));
+                                
                                 // ✅ 通知UI显示结果
                                 String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
                                 notifyArjunResult(mainDomain, endpoint, result.getFoundParameters(), paramType);
                                 
+                                // ✅ 将发现的参数传递给漏洞扫描器
                                 triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                            } else {
+                                api.logging().raiseDebugEvent(String.format(
+                                    "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
+                                    finalMethod, host, finalContentType, endpoint
+                                ));
                             }
                             
                             // 标记参数为已扫描
@@ -1057,6 +1095,23 @@ public class RealtimeScannerRefactored {
      */
     public void clearGlobalCustomDictionary() {
         parameterManager.clearGlobalCustomParameters();
+    }
+    
+    /**
+     * ✅ 清空Arjun扫描缓存
+     * 功能：清空已扫描的参数记录，允许重新扫描之前扫描过的端点
+     */
+    public void clearArjunCache() {
+        parameterManager.clearScannedParameters();
+    }
+    
+    /**
+     * ✅ 清空被动扫描缓存
+     * 功能：清空参数扫描去重缓存，使被动扫描可以重新扫描之前扫描过的参数
+     */
+    public void clearPassiveScanCache() {
+        passiveScanProcessedKeys.clear();
+        api.logging().raiseInfoEvent("✅ 清空被动扫描参数去重缓存");
     }
     
     // ========== 参数导入导出 ==========

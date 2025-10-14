@@ -135,6 +135,9 @@ public class UnifiedHttpEvaluator {
             case METHOD:
                 return evaluateMethod(request, element);
                 
+            case HOST:
+                return evaluateHost(request, element);
+                
             case PATH:
                 return evaluatePath(request, element);
                 
@@ -161,6 +164,22 @@ public class UnifiedHttpEvaluator {
     private static boolean evaluateMethod(HttpRequest request, HttpElementConfig element) {
         String method = request.method();
         return matchValue(method, element.getValueMatchConfig());
+    }
+    
+    /**
+     * ✅ 评估主机（Host）
+     */
+    private static boolean evaluateHost(HttpRequest request, HttpElementConfig element) {
+        try {
+            java.net.URI uri = new java.net.URI(request.url());
+            String host = uri.getHost();
+            if (host == null) {
+                host = "";
+            }
+            return matchValue(host, element.getValueMatchConfig());
+        } catch (Exception e) {
+            return false;
+        }
     }
     
     /**
@@ -439,6 +458,15 @@ public class UnifiedHttpEvaluator {
         switch (type) {
             case METHOD:
                 return request.method();
+                
+            case HOST:
+                try {
+                    java.net.URI uri = new java.net.URI(request.url());
+                    String host = uri.getHost();
+                    return host != null ? host : "";
+                } catch (Exception e) {
+                    return "";
+                }
                 
             case PATH:
                 return request.path();

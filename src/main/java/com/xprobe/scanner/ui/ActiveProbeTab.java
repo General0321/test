@@ -25,6 +25,7 @@ public class ActiveProbeTab {
     private final MontoyaApi api;
     private final ActiveScanner activeScanner;
     private final ConfigStorage configStorage;
+    private final com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner;  // ✅ 实时扫描器引用
     
     // 核心UI组件
     private JTable collectedDataTable;
@@ -39,6 +40,7 @@ public class ActiveProbeTab {
     private JButton refreshDataButton;
     private JButton addTargetButton;
     private JButton clearResultsButton;
+    private JButton clearCacheButton;  // ✅ 清空Arjun缓存按钮
     private JProgressBar progressBar;
     
     // 模式控制
@@ -67,6 +69,7 @@ public class ActiveProbeTab {
     public ActiveProbeTab(MontoyaApi api, ConfigurationManager configManager, 
                          com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner) {
         this.api = api;
+        this.realtimeScanner = realtimeScanner;  // ✅ 保存引用
         this.activeScanner = new ActiveScanner(api, configManager, realtimeScanner);
         this.configStorage = new ConfigStorage(api);
         
@@ -140,6 +143,7 @@ public class ActiveProbeTab {
         refreshDataButton = createStyledButton("🔄 刷新数据", new Color(52, 152, 219));
         addTargetButton = createStyledButton("➕ 手动添加", new Color(241, 196, 15));
         clearResultsButton = createStyledButton("🗑️ 清空结果", new Color(231, 76, 60));
+        clearCacheButton = createStyledButton("🧹 清空Arjun缓存", new Color(230, 126, 34));  // ✅ 清空Arjun扫描记录
         
         // 模式控制
         realtimeModeRadio = new JRadioButton("🔄 实时监听模式");
@@ -370,6 +374,7 @@ public class ActiveProbeTab {
         controlPanel.add(viewDetailsButton);
         
         controlPanel.add(clearResultsButton);
+        controlPanel.add(clearCacheButton);  // ✅ 添加清空缓存按钮
         
         JPanel modeConfigPanel = new JPanel(new BorderLayout(5, 5));
         modeConfigPanel.add(modePanel, BorderLayout.NORTH);
@@ -460,6 +465,7 @@ public class ActiveProbeTab {
         refreshDataButton.addActionListener(e -> refreshCollectedData());
         addTargetButton.addActionListener(e -> showAddTargetDialog());
         clearResultsButton.addActionListener(e -> clearResults());
+        clearCacheButton.addActionListener(e -> clearArjunCache());  // ✅ 清空Arjun缓存
         
         // 模式切换监听
         realtimeModeRadio.addActionListener(e -> switchToRealtimeMode());
@@ -887,6 +893,37 @@ public class ActiveProbeTab {
             } else {
                 statusLabel.setText("⚫ 主动探测已禁用");
                 statusLabel.setForeground(Color.GRAY);
+            }
+        }
+    }
+    
+    /**
+     * ✅ 清空Arjun扫描缓存
+     * 功能：清空已扫描的参数记录，使Arjun可以重新扫描之前扫描过的端点
+     */
+    private void clearArjunCache() {
+        int result = JOptionPane.showConfirmDialog(
+            panel,
+            "确定要清空Arjun扫描缓存吗？\n这将允许Arjun重新扫描之前已扫描过的端点。",
+            "确认清空缓存",
+            JOptionPane.YES_NO_OPTION,
+            JOptionPane.WARNING_MESSAGE
+        );
+        
+        if (result == JOptionPane.YES_OPTION) {
+            // 调用 ParameterManager 的清空方法
+            if (realtimeScanner != null) {
+                // RealtimeScanner 有 ParameterManager 实例
+                realtimeScanner.clearArjunCache();
+                
+                JOptionPane.showMessageDialog(
+                    panel,
+                    "✅ Arjun扫描缓存已清空！\n之前扫描过的端点现在可以重新扫描了。",
+                    "清空成功",
+                    JOptionPane.INFORMATION_MESSAGE
+                );
+                
+                api.logging().raiseInfoEvent("✅ 用户手动清空了Arjun扫描缓存");
             }
         }
     }

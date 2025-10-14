@@ -20,16 +20,23 @@ public class BurpHttpRequester {
     private final ObjectMapper jsonMapper;
     private final RateLimiter rateLimiter;    // ✅ 新增：速率限制器
     private final int timeout;                 // ✅ 新增：超时时间（秒）
+    private final Map<String, String> customHeaders;  // ✅ 自定义HTTP头（覆盖/添加）
     
     public BurpHttpRequester(MontoyaApi api) {
-        this(api, 9999, false, 15);  // 默认：9999 req/s, 非稳定模式, 15秒超时
+        this(api, 9999, false, 15, new HashMap<>());  // 默认：9999 req/s, 非稳定模式, 15秒超时, 无自定义头
     }
     
     public BurpHttpRequester(MontoyaApi api, int maxRequestsPerSecond, boolean stableMode, int timeout) {
+        this(api, maxRequestsPerSecond, stableMode, timeout, new HashMap<>());
+    }
+    
+    public BurpHttpRequester(MontoyaApi api, int maxRequestsPerSecond, boolean stableMode, int timeout, 
+                            Map<String, String> customHeaders) {
         this.api = api;
         this.jsonMapper = new ObjectMapper();
         this.rateLimiter = new RateLimiter(api, maxRequestsPerSecond, stableMode);
         this.timeout = timeout;
+        this.customHeaders = customHeaders != null ? new HashMap<>(customHeaders) : new HashMap<>();
     }
     
     /**
@@ -42,8 +49,35 @@ public class BurpHttpRequester {
             // ✅ 速率限制（Python: @limits + time.sleep(delay)）
             rateLimiter.acquire();
             
+            // ✅ 应用自定义HTTP头（覆盖/添加）
+            HttpRequest modifiedRequest = request;
+            if (customHeaders != null && !customHeaders.isEmpty()) {
+                for (Map.Entry<String, String> entry : customHeaders.entrySet()) {
+                    String headerName = entry.getKey();
+                    String headerValue = entry.getValue();
+                    
+                    // ✅ 空值检查：跳过无效的头
+                    if (headerName == null || headerName.trim().isEmpty() || 
+                        headerValue == null || headerValue.trim().isEmpty()) {
+                        continue;
+                    }
+                    
+                    // 检查请求中是否已有该头
+                    boolean headerExists = modifiedRequest.headers().stream()
+                        .anyMatch(header -> header.name().equalsIgnoreCase(headerName));
+                    
+                    if (headerExists) {
+                        // 覆盖现有头
+                        modifiedRequest = modifiedRequest.withUpdatedHeader(headerName, headerValue);
+                    } else {
+                        // 添加新头
+                        modifiedRequest = modifiedRequest.withAddedHeader(headerName, headerValue);
+                    }
+                }
+            }
+            
             // 发送请求
-            HttpRequestResponse result = api.http().sendRequest(request);
+            HttpRequestResponse result = api.http().sendRequest(modifiedRequest);
             
             if (result.response() == null) {
                 return RequestResult.error(new RuntimeException("响应为空"));

@@ -616,6 +616,7 @@ public class UniversalScanner extends AbstractScanner {
                 break;
                 
             case METHOD:
+            case HOST:
             case PATH:
             case BODY:
                 // 这些类型不需要逐个处理，只有一个目标
@@ -705,6 +706,11 @@ public class UniversalScanner extends AbstractScanner {
                 case METHOD:
                     modified = modified.withMethod(payload);
                     break;
+                    
+                case HOST:
+                    // HOST类型不支持注入，只用于匹配
+                    api.logging().raiseDebugEvent("HOST类型不支持注入，跳过");
+                    return originalRequest;
                     
                 case PATH:
                     modified = modified.withPath(payload);
@@ -838,6 +844,11 @@ public class UniversalScanner extends AbstractScanner {
                     // 注入到Method（通常不常见，但支持）
                     modified = modified.withMethod(payload);
                     break;
+                    
+                case HOST:
+                    // HOST类型不支持注入，只用于匹配
+                    api.logging().raiseDebugEvent("HOST类型不支持注入，跳过");
+                    return originalRequest;
                     
                 case PATH:
                     // ✅ P0修复: 注入到路径（检查是否需要URL编码）

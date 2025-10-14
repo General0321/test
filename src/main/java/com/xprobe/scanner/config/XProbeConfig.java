@@ -33,6 +33,7 @@ public class XProbeConfig implements Serializable {
     private int arjunThreads = 5;                 // 并发线程数（1-20）
     private int arjunMaxRetries = 5;              // 最大重试次数（1-10）
     private int arjunRateLimit = 9999;            // 速率限制（req/s）
+    private Map<String, String> arjunCustomHeaders = new HashMap<>();  // 自定义HTTP头（覆盖/添加）
     
     // Arjun实时模式配置
     private int arjunRealtimeInterval = 300;  // 定时检查间隔（秒），默认5分钟
@@ -380,6 +381,14 @@ public class XProbeConfig implements Serializable {
         this.arjunRateLimit = Math.max(1, Math.min(arjunRateLimit, 10000));  // 1-10000 req/s
     }
     
+    public Map<String, String> getArjunCustomHeaders() {
+        return arjunCustomHeaders != null ? arjunCustomHeaders : new HashMap<>();
+    }
+    
+    public void setArjunCustomHeaders(Map<String, String> arjunCustomHeaders) {
+        this.arjunCustomHeaders = arjunCustomHeaders != null ? arjunCustomHeaders : new HashMap<>();
+    }
+    
     // ✅ 规则文件配置的Getters和Setters
     public boolean isUseExternalRuleFile() {
         return useExternalRuleFile;
@@ -471,6 +480,7 @@ public class XProbeConfig implements Serializable {
         copy.setArjunThreads(this.arjunThreads);
         copy.setArjunMaxRetries(this.arjunMaxRetries);
         copy.setArjunRateLimit(this.arjunRateLimit);
+        copy.setArjunCustomHeaders(this.arjunCustomHeaders != null ? new HashMap<>(this.arjunCustomHeaders) : new HashMap<>());
         
         // Arjun实时模式配置
         copy.setArjunRealtimeInterval(this.arjunRealtimeInterval);

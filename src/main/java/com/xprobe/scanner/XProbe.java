@@ -190,8 +190,8 @@ public class XProbe implements BurpExtension {
         this.dashboardTab.setArjunService(realtimeScanner.getArjunService());  // ✅ 设置Arjun服务
         tabbedPane.addTab("📊 仪表板", this.dashboardTab.getComponent());
 
-        // 2. 扫描结果 - 结果展示
-        this.scanResultTab = new ScanResultTab(api, logModel);
+        // 2. 扫描结果 - 结果展示（传入realtimeScanner用于清空扫描缓存）
+        this.scanResultTab = new ScanResultTab(api, logModel, realtimeScanner);
         tabbedPane.addTab("📋 扫描结果", this.scanResultTab.getComponent());
 
         // 3. 被动扫描规则 - 核心功能

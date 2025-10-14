@@ -162,6 +162,7 @@ public class UnifiedHttpConfig implements Serializable {
      */
     public enum ElementType {
         METHOD("HTTP方法"),
+        HOST("主机"),  // ✅ 新增：主机匹配
         PATH("URL路径"),
         PARAMETER("URL参数"),
         HEADER("请求头"),
@@ -286,6 +287,10 @@ public class UnifiedHttpConfig implements Serializable {
         switch (element.getType()) {
             case METHOD:
                 conditions.add(createCondition("HTTP Method", element.getValueMatchConfig()));
+                break;
+                
+            case HOST:
+                conditions.add(createCondition("Host", element.getValueMatchConfig()));
                 break;
                 
             case PATH:

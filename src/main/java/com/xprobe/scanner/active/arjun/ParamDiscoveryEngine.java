@@ -49,16 +49,11 @@ public class ParamDiscoveryEngine {
      * 默认构造函数
      */
     public ParamDiscoveryEngine(MontoyaApi api) {
-        this(api, 250, 9999, false, 5, 5);
+        this(api, 250, 9999, false, 5, 5, new HashMap<>());
     }
     
     /**
-     * 完整构造函数
-     * @param chunkSize chunk大小（默认250）
-     * @param maxRequestsPerSecond 最大请求速率（默认9999）
-     * @param stableMode 稳定模式（默认false）
-     * @param threads 并发线程数（默认5）
-     * @param maxRetries 最大重试次数（默认5）
+     * 完整构造函数（兼容旧版本）
      */
     public ParamDiscoveryEngine(MontoyaApi api, 
                                  int chunkSize,
@@ -66,15 +61,34 @@ public class ParamDiscoveryEngine {
                                  boolean stableMode,
                                  int threads,
                                  int maxRetries) {
+        this(api, chunkSize, maxRequestsPerSecond, stableMode, threads, maxRetries, new HashMap<>());
+    }
+    
+    /**
+     * 完整构造函数（含自定义HTTP头）
+     * @param chunkSize chunk大小（默认250）
+     * @param maxRequestsPerSecond 最大请求速率（默认9999）
+     * @param stableMode 稳定模式（默认false）
+     * @param threads 并发线程数（默认5）
+     * @param maxRetries 最大重试次数（默认5）
+     * @param customHeaders 自定义HTTP头（覆盖/添加）
+     */
+    public ParamDiscoveryEngine(MontoyaApi api, 
+                                 int chunkSize,
+                                 int maxRequestsPerSecond,
+                                 boolean stableMode,
+                                 int threads,
+                                 int maxRetries,
+                                 Map<String, String> customHeaders) {
         this.api = api;
         this.chunkSize = chunkSize;
         this.threads = threads;
         
-        // ✅ 初始化Python功能组件
+        // ✅ 初始化Python功能组件（含自定义HTTP头）
         this.errorHandler = new ErrorHandler(api, 15, 60, stableMode);
         this.retryStrategy = new RetryStrategy(api, maxRetries);
         this.concurrentProcessor = new ConcurrentProcessor(api, threads);
-        this.requester = new BurpHttpRequester(api, maxRequestsPerSecond, stableMode, 15);
+        this.requester = new BurpHttpRequester(api, maxRequestsPerSecond, stableMode, 15, customHeaders);
         
         // 初始化核心组件
         this.baseline = new ResponseBaseline(api);
@@ -92,6 +106,9 @@ public class ParamDiscoveryEngine {
             long startTime = System.currentTimeMillis();
             
             try {
+                // ✅ 重置错误处理器状态（清除之前扫描的 killSwitch）
+                errorHandler.reset();
+                
                 api.logging().raiseInfoEvent("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 api.logging().raiseInfoEvent("🔍 参数发现开始: " + originalRequest.url());
                 api.logging().raiseInfoEvent("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");

@@ -23,6 +23,7 @@ public class ScanResultTab {
     private JSplitPane mainSplitPane;
     private final MontoyaApi api;
     private final LogModel logModel;
+    private final com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner;  // ✅ 实时扫描器（用于清空扫描缓存）
     
     // UI组件
     private JTable resultTable;
@@ -42,9 +43,11 @@ public class ScanResultTab {
     private HttpRequestEditor modifiedRequest;
     private HttpResponseEditor modifiedResponse;
 
-    public ScanResultTab(MontoyaApi api, LogModel logModel) {
+    public ScanResultTab(MontoyaApi api, LogModel logModel, 
+                        com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner) {
         this.api = api;
         this.logModel = logModel;
+        this.realtimeScanner = realtimeScanner;  // ✅ 保存实时扫描器引用（用于清空缓存）
         
         initializeComponents();
         setupLayout();
@@ -191,15 +194,18 @@ public class ScanResultTab {
         
         JButton refreshButton = new JButton("🔄 刷新");
         JButton exportButton = new JButton("📤 导出");
-        JButton clearButton = new JButton("🗑️ 清空");
+        JButton clearButton = new JButton("🗑️ 清空结果");
+        JButton clearCacheButton = new JButton("🧹 清空扫描缓存");  // ✅ 清空被动扫描缓存
         
         refreshButton.addActionListener(e -> refreshTable());
         exportButton.addActionListener(e -> exportResults());
         clearButton.addActionListener(e -> clearResults());
+        clearCacheButton.addActionListener(e -> clearPassiveScanCache());  // ✅ 清空被动扫描缓存
         
         rightPanel.add(refreshButton);
         rightPanel.add(exportButton);
         rightPanel.add(clearButton);
+        rightPanel.add(clearCacheButton);  // ✅ 添加清空缓存按钮
         
         // 中间：统计信息
         JPanel statsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 20, 0));
@@ -446,6 +452,53 @@ public class ScanResultTab {
             logModel.clear();
             updateStatistics();
             api.logging().raiseInfoEvent("扫描结果已清空");
+        }
+    }
+    
+    /**
+     * ✅ 清空被动扫描缓存
+     * 功能：清空扫描去重缓存，使被动扫描可以重新扫描
+     * 
+     * 说明：
+     * - 被动扫描的去重逻辑由规则的"去重颗粒度"配置决定
+     * - 去重key格式：根据规则配置动态生成（如：ruleId|method|host|path|param）
+     * - 编辑规则后，规则ID不变，内容变了，必须清空缓存才能用新规则重新扫描
+     * 
+     * 注意：
+     * - 添加新规则不需要清空缓存（新规则ID会自动扫描）
+     * - 修改规则后需要清空缓存（规则ID不变，需要强制重新扫描）
+     */
+    private void clearPassiveScanCache() {
+        int result = JOptionPane.showConfirmDialog(
+            mainSplitPane,
+            "确定要清空被动扫描缓存吗？\n\n" +
+            "这将清空扫描去重缓存，使被动扫描可以重新扫描之前的流量。\n\n" +
+            "适用场景：\n" +
+            "• 修改了规则，想用新规则重新扫描\n" +
+            "• 测试规则配置是否正确\n" +
+            "• 怀疑之前的扫描有漏报",
+            "确认清空缓存",
+            JOptionPane.YES_NO_OPTION,
+            JOptionPane.WARNING_MESSAGE
+        );
+        
+        if (result == JOptionPane.YES_OPTION) {
+            // ✅ 清空扫描去重缓存（RealtimeScanner）
+            // 说明：去重逻辑完全由规则的"去重颗粒度"配置决定
+            // 编辑规则时，ruleId不变，缓存中的旧key还在，必须清空才能重新扫描
+            if (realtimeScanner != null) {
+                realtimeScanner.clearPassiveScanCache();
+            }
+            
+            JOptionPane.showMessageDialog(
+                mainSplitPane,
+                "✅ 被动扫描缓存已清空！\n\n" +
+                "之前扫描过的流量现在可以重新扫描了。",
+                "清空成功",
+                JOptionPane.INFORMATION_MESSAGE
+            );
+            
+            api.logging().raiseInfoEvent("✅ 用户手动清空了被动扫描去重缓存");
         }
     }
     

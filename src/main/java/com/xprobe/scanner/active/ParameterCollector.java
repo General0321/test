@@ -397,7 +397,16 @@ public class ParameterCollector {
         Set<String> parameters = new HashSet<>();
         
         try {
-            String body = response.bodyToString();
+            // ✅ 修复：使用UTF-8编码获取响应体，避免中文乱码
+            String body;
+            try {
+                byte[] bodyBytes = response.body().getBytes();
+                body = new String(bodyBytes, java.nio.charset.StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                // 降级处理：使用默认方法
+                body = response.bodyToString();
+            }
+            
             if (body == null || body.isEmpty()) {
                 return parameters;
             }

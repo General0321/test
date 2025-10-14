@@ -63,13 +63,20 @@ public class ArjunService {
             maxRetries = xprobeConfig.getArjunMaxRetries();
         }
         
+        // ✅ 获取自定义HTTP头配置
+        Map<String, String> customHeaders = new HashMap<>();
+        if (xprobeConfig != null) {
+            customHeaders = xprobeConfig.getArjunCustomHeaders();
+        }
+        
         this.engine = new ParamDiscoveryEngine(
             api, 
             config.getChunkSize(),     // chunk大小
             rateLimit,                  // ✅ 从配置读取
             stableMode,                 // ✅ 从配置读取
             threads,                    // ✅ 从配置读取
-            maxRetries                  // ✅ 从配置读取
+            maxRetries,                 // ✅ 从配置读取
+            customHeaders               // ✅ 自定义HTTP头
         );
         
         api.logging().raiseInfoEvent(String.format(

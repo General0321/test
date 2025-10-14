@@ -52,6 +52,17 @@ public class ErrorHandler {
     }
     
     /**
+     * ✅ 重置错误处理器状态（用于新的扫描）
+     * 功能：清除 killSwitch 和错误计数，允许开始新的扫描
+     */
+    public void reset() {
+        killSwitch.set(false);
+        badRequestCount.set(0);
+        currentTimeout = 15;  // 重置为初始超时时间
+        api.logging().raiseDebugEvent("ErrorHandler 状态已重置");
+    }
+    
+    /**
      * 处理响应错误（核心方法，对应Python的error_handler()）
      * 
      * @param response 响应对象（可能为null）
