@@ -217,6 +217,9 @@ public class ActiveProbeTab {
         ));
         
         JScrollPane collectedScrollPane = new JScrollPane(collectedDataTable);
+        // ✅ BLIT滚动优化（像Burp一样丝滑）
+        collectedScrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        collectedScrollPane.getViewport().setScrollMode(JViewport.BLIT_SCROLL_MODE);
         collectedPanel.add(collectedScrollPane, BorderLayout.CENTER);
         
         // 添加右侧统计面板
@@ -235,6 +238,9 @@ public class ActiveProbeTab {
         ));
         
         JScrollPane resultScrollPane = new JScrollPane(arjunResultTable);
+        // ✅ BLIT滚动优化（像Burp一样丝滑）
+        resultScrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        resultScrollPane.getViewport().setScrollMode(JViewport.BLIT_SCROLL_MODE);
         resultPanel.add(resultScrollPane, BorderLayout.CENTER);
 
         splitPane.setTopComponent(collectedPanel);

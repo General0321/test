@@ -154,6 +154,9 @@ public class ScanResultTab {
             TitledBorder.TOP,
             new Font(Font.SANS_SERIF, Font.BOLD, 13)
         ));
+        // ✅ BLIT滚动优化（像Burp一样丝滑）
+        tableScrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        tableScrollPane.getViewport().setScrollMode(JViewport.BLIT_SCROLL_MODE);
         
         // 包含顶部控制面板和表格的面板
         JPanel tablePanel = new JPanel(new BorderLayout(5, 5));

@@ -686,6 +686,8 @@ public class UnifiedConfigTab {
         scrollPane.setBorder(null);
         scrollPane.getVerticalScrollBar().setUnitIncrement(16);  // 提高滚动速度
         scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);  // 禁用横向滚动
+        // ✅ BLIT滚动优化（像Burp一样丝滑）
+        scrollPane.getViewport().setScrollMode(JViewport.BLIT_SCROLL_MODE);
         
         mainPanel.add(scrollPane, BorderLayout.CENTER);
         

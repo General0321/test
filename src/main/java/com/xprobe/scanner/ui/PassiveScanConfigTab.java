@@ -217,6 +217,9 @@ public class PassiveScanConfigTab {
         
         JScrollPane tableScrollPane = new JScrollPane(configurationTable);
         tableScrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+        // ✅ BLIT滚动优化（像Burp一样丝滑）
+        tableScrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        tableScrollPane.getViewport().setScrollMode(JViewport.BLIT_SCROLL_MODE);
         tablePanel.add(tableScrollPane, BorderLayout.CENTER);
         
         // 表格按钮面板
@@ -241,6 +244,9 @@ public class PassiveScanConfigTab {
         
         JScrollPane detailScrollPane = new JScrollPane(detailTextArea);
         detailScrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+        // ✅ BLIT滚动优化（像Burp一样丝滑）
+        detailScrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        detailScrollPane.getViewport().setScrollMode(JViewport.BLIT_SCROLL_MODE);
         detailPanel.add(detailScrollPane, BorderLayout.CENTER);
         
         // 详情按钮面板
