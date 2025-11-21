@@ -44,9 +44,8 @@ public class ResponseElementDetailDialog extends JDialog {
         setLayout(new BorderLayout(10, 10));
         
         // 顶部标题
-        JLabel titleLabel = new JLabel(
-            "<html><b>配置: " + element.getType().getDisplayName() + "</b></html>"
-        );
+        JLabel titleLabel = new JLabel("配置: " + element.getType().getDisplayName());
+        titleLabel.setFont(titleLabel.getFont().deriveFont(Font.BOLD));
         titleLabel.setBorder(BorderFactory.createEmptyBorder(10, 10, 5, 10));
         add(titleLabel, BorderLayout.NORTH);
         
@@ -110,7 +109,7 @@ public class ResponseElementDetailDialog extends JDialog {
         
         // 匹配值
         JPanel valuesPanel = new JPanel(new BorderLayout(5, 5));
-        valuesPanel.add(new JLabel("<html><b>匹配值（每行一个，OR关系）:</b></html>"), 
+        valuesPanel.add(new JLabel("匹配值（每行一个，OR关系）:"), 
             BorderLayout.NORTH);
         
         valuesArea = new JTextArea(15, 40);
@@ -118,12 +117,7 @@ public class ResponseElementDetailDialog extends JDialog {
         JScrollPane scrollPane = new JScrollPane(valuesArea);
         valuesPanel.add(scrollPane, BorderLayout.CENTER);
         
-        JLabel hintLabel = new JLabel("<html>" +
-            "<i>提示:</i><br>" +
-            "• 每行一个匹配值<br>" +
-            "• 任意一个值匹配即可（OR逻辑）<br>" +
-            "• 支持正则表达式（选择正则匹配类型时）" +
-            "</html>");
+        JLabel hintLabel = new JLabel("提示：每行一个匹配值，任意一个值匹配即可（OR逻辑），支持正则表达式");
         valuesPanel.add(hintLabel, BorderLayout.SOUTH);
         
         panel.add(valuesPanel, BorderLayout.CENTER);
@@ -200,10 +194,8 @@ public class ResponseElementDetailDialog extends JDialog {
         gbc.gridy = 3;
         gbc.gridwidth = 2;
         String hint = element.getType() == ElementType.RESPONSE_TIME
-            ? "<html><i>示例: 响应时间 > 5000ms 表示延迟大于5秒<br>" +
-              "范围示例: 响应时间在 1000-5000ms 之间</i></html>"
-            : "<html><i>示例: 响应长度 > 1000 表示响应体大于1000字节<br>" +
-              "范围示例: 响应长度在 1000-10000 字节之间</i></html>";
+            ? "示例: 响应时间 > 5000ms 表示延迟大于5秒"
+            : "示例: 响应长度 > 1000 表示响应体大于1000字节";
         panel.add(new JLabel(hint), gbc);
         
         return panel;
@@ -231,7 +223,7 @@ public class ResponseElementDetailDialog extends JDialog {
     private JPanel createCollaboratorConfigPanel() {
         JPanel panel = new JPanel(new BorderLayout(10, 10));
         
-        JLabel titleLabel = new JLabel("<html><b>选择要检测的交互类型:</b></html>");
+        JLabel titleLabel = new JLabel("选择要检测的交互类型:");
         panel.add(titleLabel, BorderLayout.NORTH);
         
         JPanel checkPanel = new JPanel(new GridLayout(4, 1, 5, 5));
@@ -249,12 +241,7 @@ public class ResponseElementDetailDialog extends JDialog {
         
         panel.add(checkPanel, BorderLayout.CENTER);
         
-        JLabel hintLabel = new JLabel("<html>" +
-            "<i>提示:</i><br>" +
-            "• 至少选择一种交互类型<br>" +
-            "• 检测到任意选中的交互类型即认为匹配<br>" +
-            "• 通常DNS查询是最常见的外带方式" +
-            "</html>");
+        JLabel hintLabel = new JLabel("提示：至少选择一种交互类型，检测到任意选中的交互类型即认为匹配");
         panel.add(hintLabel, BorderLayout.SOUTH);
         
         return panel;
@@ -373,9 +360,9 @@ public class ResponseElementDetailDialog extends JDialog {
                     
                     // 根据操作符类型保存不同的值
                     if (operator == ComparisonOperator.BETWEEN || operator == ComparisonOperator.NOT_BETWEEN) {
-                        // 保存范围值
-                        config.setNumericValueMin((Long) numericSpinnerMin.getValue());
-                        config.setNumericValueMax((Long) numericSpinnerMax.getValue());
+                        // 保存范围值（安全转换，避免Double->Long转换错误）
+                        config.setNumericValueMin(((Number) numericSpinnerMin.getValue()).longValue());
+                        config.setNumericValueMax(((Number) numericSpinnerMax.getValue()).longValue());
                         
                         // 验证范围
                         if (config.getNumericValueMin() > config.getNumericValueMax()) {
@@ -386,8 +373,8 @@ public class ResponseElementDetailDialog extends JDialog {
                             return false;
                         }
                     } else {
-                        // 保存单个值
-                        config.setNumericValue((Long) numericSpinner.getValue());
+                        // 保存单个值（安全转换，避免Double->Long转换错误）
+                        config.setNumericValue(((Number) numericSpinner.getValue()).longValue());
                     }
                     break;
                     

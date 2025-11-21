@@ -141,10 +141,10 @@ public class PairBasedRuleConfigDialog extends JDialog {
      */
     private void updateModeLabel(JLabel label) {
         if (isSimpleMode) {
-            label.setText("<html><b>🌟 简单模式</b> - 适合大部分场景（单个请求-响应配对）</html>");
+            label.setText("🌟 简单模式 - 适合大部分场景（单个请求-响应配对）");
             label.setForeground(new Color(0, 128, 0));
         } else {
-            label.setText("<html><b>⚙️ 高级模式</b> - 多个配对 + 复杂逻辑</html>");
+            label.setText("⚙️ 高级模式 - 多个配对 + 复杂逻辑");
             label.setForeground(new Color(255, 140, 0));
         }
     }
@@ -203,23 +203,28 @@ public class PairBasedRuleConfigDialog extends JDialog {
                 List<RuleMatchPair> pairs = new ArrayList<>();
                 
                 // 从简单模式面板获取配置
-                if (simpleRequestPanel != null || simpleResponsePanel != null) {
-                    RuleMatchPair pair = new RuleMatchPair();
-                    pair.setId(1);
-                    pair.setLabel("配对 1");
-                    pair.setEnabled(true);
+                if (simpleRequestPanel != null && simpleResponsePanel != null) {
+                    UnifiedHttpConfig requestConfig = simpleRequestPanel.getConfig();
+                    UnifiedResponseConfig responseConfig = simpleResponsePanel.getConfig();
                     
-                    if (simpleRequestPanel != null) {
-                        pair.setRequestConfig(simpleRequestPanel.getConfig());
+                    // 只有当简单模式有实际配置时才创建配对
+                    if (requestConfig != null && !requestConfig.getElements().isEmpty() &&
+                        responseConfig != null && !responseConfig.getElements().isEmpty()) {
+                        
+                        RuleMatchPair pair = new RuleMatchPair();
+                        pair.setId(1);
+                        pair.setLabel("配对 1");
+                        pair.setEnabled(true);
+                        pair.setRequestConfig(requestConfig);
+                        pair.setResponseConfig(responseConfig);
+                        
+                        pairs.add(pair);
                     }
-                    if (simpleResponsePanel != null) {
-                        pair.setResponseConfig(simpleResponsePanel.getConfig());
-                    }
-                    
-                    pairs.add(pair);
                 }
                 
-                pairManagementPanel = new PairManagementPanel(api, pairs, "1");
+                // 创建配对管理面板（可能是空列表）
+                String expression = pairs.isEmpty() ? "" : "1";
+                pairManagementPanel = new PairManagementPanel(api, pairs, expression);
                 pairContainerPanel.add(pairManagementPanel, BorderLayout.CENTER);
             }
         }
@@ -281,9 +286,7 @@ public class PairBasedRuleConfigDialog extends JDialog {
         gbc.gridy = 3;
         gbc.gridwidth = 2;
         gbc.weighty = 0;
-        JLabel hintLabel = new JLabel("<html><i>" +
-            "提示：规则名称用于标识此规则，描述用于说明此规则的用途和检测逻辑。注入模式在被动扫描配置Tab统一设置。" +
-            "</i></html>");
+        JLabel hintLabel = new JLabel("提示：规则名称用于标识此规则，描述用于说明此规则的用途和检测逻辑。注入模式在被动扫描配置Tab统一设置。");
         panel.add(hintLabel, gbc);
         
         return panel;
@@ -393,10 +396,7 @@ public class PairBasedRuleConfigDialog extends JDialog {
         panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
         
         // 说明文字
-        JLabel hintLabel = new JLabel(
-            "<html><b>🎯 配置说明：</b>在此配置<b>匹配条件</b>（哪些请求会被扫描）和<b>注入点</b>（在哪里注入Payload）" +
-            "<br><i>提示：大部分场景只需要配置一个请求-响应配对，这样更简单直观。</i></html>"
-        );
+        JLabel hintLabel = new JLabel("🎯 配置说明：在此配置匹配条件（哪些请求会被扫描）和注入点（在哪里注入Payload）");
         hintLabel.setBorder(BorderFactory.createCompoundBorder(
             BorderFactory.createLineBorder(new Color(70, 130, 180), 1),
             BorderFactory.createEmptyBorder(8, 10, 8, 10)
@@ -420,10 +420,7 @@ public class PairBasedRuleConfigDialog extends JDialog {
         panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
         
         // 说明文字
-        JLabel hintLabel = new JLabel(
-            "<html><b>🎯 配置说明：</b>在此配置<b>响应匹配条件</b>（什么样的响应代表检测成功）" +
-            "<br><i>提示：可以配置响应码、响应体、响应时间、Collaborator交互等条件。</i></html>"
-        );
+        JLabel hintLabel = new JLabel("🎯 配置说明：在此配置响应匹配条件（什么样的响应代表检测成功）");
         hintLabel.setBorder(BorderFactory.createCompoundBorder(
             BorderFactory.createLineBorder(new Color(220, 120, 70), 1),
             BorderFactory.createEmptyBorder(8, 10, 8, 10)

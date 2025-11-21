@@ -28,16 +28,54 @@ public class DeduplicationKeyGenerator {
      * @param targetIdentifier 目标标识符（参数名、Header名等）
      * @return 去重Key
      */
+    /**
+     * 生成去重Key（支持颗粒度控制）
+     * 
+     * @param method HTTP方法
+     * @param host 主机名
+     * @param path 请求路径
+     * @param contentType Content-Type
+     * @param config 扫描配置
+     * @param targetIdentifier 目标标识符（参数名、Header名等）
+     * @return 去重Key
+     */
     public static String generateKey(String method, 
                                      String host, 
                                      String path, 
                                      String contentType, 
                                      Configuration config,
                                      String targetIdentifier) {
+        return generateKey(method, host, path, contentType, config, targetIdentifier, null);
+    }
+
+    /**
+     * 生成去重Key（支持颗粒度控制和配对ID）
+     * 
+     * @param method HTTP方法
+     * @param host 主机名
+     * @param path 请求路径
+     * @param contentType Content-Type
+     * @param config 扫描配置
+     * @param targetIdentifier 目标标识符（参数名、Header名等）
+     * @param pairId 配对ID（可选，用于区分同一规则下的不同配对）
+     * @return 去重Key
+     */
+    public static String generateKey(String method, 
+                                     String host, 
+                                     String path, 
+                                     String contentType, 
+                                     Configuration config,
+                                     String targetIdentifier,
+                                     Integer pairId) {
         // 基础部分
         String cleanPath = cleanPath(path);
         String normalizedContentType = normalizeContentType(contentType);
         String ruleId = config.getRuleId();
+        
+        // 如果提供了pairId，将其附加到ruleId后，确保不同配对生成不同的Key
+        if (pairId != null) {
+            ruleId = ruleId + "_p" + pairId;
+        }
         
         // 获取去重颗粒度
         Configuration.DeduplicationGranularity granularity = config.getDeduplicationGranularity();
@@ -117,7 +155,7 @@ public class DeduplicationKeyGenerator {
                                                String path, 
                                                String contentType, 
                                                Configuration config) {
-        return generateKey(method, host, path, contentType, config, null);
+        return generateKey(method, host, path, contentType, config, null, null);
     }
     
     /**

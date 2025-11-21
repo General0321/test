@@ -8,6 +8,7 @@ import com.xprobe.scanner.config.XProbeConfigManager;
 import com.xprobe.scanner.config.RuleMatchPair;
 import com.xprobe.scanner.config.UnifiedHttpConfig;
 import com.xprobe.scanner.config.UnifiedResponseConfig;
+import com.xprobe.scanner.config.ResponseComparisonConfig;
 import com.xprobe.scanner.core.*;
 import com.xprobe.scanner.core.PayloadVariableResolver.PayloadContext;
 import com.xprobe.scanner.models.ScanResult;
@@ -46,7 +47,7 @@ public class UniversalScanner extends AbstractScanner {
     
     // ✅ 内部类：配对评估结果（包含响应对象）
     private static class PairEvaluationResult {
-        boolean matched;
+        boolean matched;  // ✅ 非final，允许后续修改
         HttpResponse response;
         HttpRequest modifiedRequest;
         long responseTime;
@@ -150,12 +151,38 @@ public class UniversalScanner extends AbstractScanner {
             Map<Integer, PairEvaluationResult> pairEvaluations = new HashMap<>();
             List<PairEvaluationResult> allEvaluations = new ArrayList<>();  // ✅ 保存所有评估（包括未命中的）
             
+            // ✨ 新增：保存每个Pair的响应特征，供后续Pair引用
+            Map<Integer, PairResponseFeatures> allPairFeatures = new HashMap<>();
+            
             for (RuleMatchPair pair : pairs) {
                 try {
-                    // ✅ 传递allEvaluations列表，让评估方法能够记录所有请求
-                    PairEvaluationResult evaluation = evaluatePair(pair, originalRequest, payloadResolver, config, allEvaluations);
+                    // ✅ 所有Pair都基于同一个拦截到的请求
+                    // ✅ 传递allEvaluations列表和allPairFeatures，让评估方法能够记录所有请求并引用前面的特征
+                    PairEvaluationResult evaluation = evaluatePair(
+                        pair, originalRequest, payloadResolver, config, allEvaluations, allPairFeatures
+                    );
                     pairResults.put(pair.getId(), evaluation.matched);
                     pairEvaluations.put(pair.getId(), evaluation);
+                    
+                    // ✨ 保存当前Pair的响应特征（如果有响应）
+                    if (evaluation.response != null) {
+                        // 判断是否需要保存响应体内容
+                        boolean needBodyComparison = needsBodyComparison(pair);
+                        
+                        PairResponseFeatures features = PairResponseFeatures.fromResponse(
+                            pair.getId(),
+                            evaluation.response,
+                            evaluation.responseTime,
+                            needBodyComparison
+                        );
+                        allPairFeatures.put(pair.getId(), features);
+                        
+                        api.logging().raiseDebugEvent(String.format(
+                            "保存配对 [%d] 响应特征: 状态码=%d, 长度=%d, 时间=%dms",
+                            pair.getId(), features.getStatusCode(), 
+                            features.getResponseLength(), features.getResponseTime()
+                        ));
+                    }
                     
                     // ✅ 主评估结果已经在evaluatePair中添加到allEvaluations了
                     
@@ -222,12 +249,38 @@ public class UniversalScanner extends AbstractScanner {
     }
     
     /**
+     * 判断当前Pair是否需要保存响应体内容
+     */
+    private boolean needsBodyComparison(RuleMatchPair pair) {
+        ResponseComparisonConfig comparisonConfig = pair.getComparisonConfig();
+        if (comparisonConfig == null) {
+            return false;
+        }
+        
+        // 如果配置了响应体对比模式，则需要保存响应体
+        ResponseComparisonConfig.BodyComparisonMode bodyMode = comparisonConfig.getBodyComparisonMode();
+        if (bodyMode != null && bodyMode != ResponseComparisonConfig.BodyComparisonMode.NONE) {
+            return true;
+        }
+        
+        // 如果配置了跨Pair引用且引用类型是RESPONSE_BODY，则需要保存响应体
+        if (comparisonConfig.getReferencePairId() != null && 
+            "RESPONSE_BODY".equals(comparisonConfig.getReferenceFeatureType())) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+    /**
      * 评估单个配对
      * @param allEvaluations 用于保存所有评估结果的列表（包括未命中的）
+     * @param allPairFeatures 所有之前Pair的响应特征（供当前Pair引用）
      */
     private PairEvaluationResult evaluatePair(RuleMatchPair pair, HttpRequest originalRequest, 
                                               PayloadVariableResolver payloadResolver, Configuration config,
-                                              List<PairEvaluationResult> allEvaluations) {
+                                              List<PairEvaluationResult> allEvaluations,
+                                              Map<Integer, PairResponseFeatures> allPairFeatures) {
         UnifiedHttpConfig requestConfig = pair.getRequestConfig();
         UnifiedResponseConfig responseConfig = pair.getResponseConfig();
         
@@ -260,15 +313,39 @@ public class UniversalScanner extends AbstractScanner {
                     return new PairEvaluationResult(false);
                 }
                 
+                // ✅ 关键修复：将被动检测的请求也添加到allEvaluations（确保多对匹配时所有请求都被记录）
+                PairEvaluationResult passiveResult = new PairEvaluationResult(false, response, originalRequest, responseTime);
+                allEvaluations.add(passiveResult);
+                
                 // 评估响应（无payload上下文）
-                boolean responseMatched = UnifiedResponseEvaluator.evaluate(
-                    response, responseConfig, null, responseTime
+                // ✨ 如果响应配置为空，默认响应匹配通过（用于盲注等场景，只依赖跨Pair对比）
+                boolean responseMatched;
+                if (responseConfig.getElements() == null || responseConfig.getElements().isEmpty()) {
+                    responseMatched = true;  // 响应配置为空，跳过响应匹配
+                } else {
+                    responseMatched = UnifiedResponseEvaluator.evaluate(
+                        response, responseConfig, null, responseTime
+                    );
+                }
+                
+                // ✨ 新增：检查跨Pair特征对比
+                boolean crossPairMatched = evaluateCrossPairComparison(
+                    pair, response, responseTime, allPairFeatures
                 );
                 
-                if (responseMatched) {
+                // 最终匹配结果：响应匹配 AND 跨Pair对比匹配（如果配置了）
+                boolean finalMatched = responseMatched && crossPairMatched;
+                
+                if (finalMatched) {
                     api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] 被动检测成功");
+                    // ✅ 更新matched状态
+                    passiveResult.matched = true;
                     return new PairEvaluationResult(true, response, originalRequest, responseTime);
                 }
+                
+                // 即使不匹配，也返回包含响应的结果
+                return new PairEvaluationResult(false, response, originalRequest, responseTime);
+                
             } catch (Exception e) {
                 api.logging().raiseErrorEvent("❌ 被动检测时发送请求失败: " + e.getMessage());
             }
@@ -288,7 +365,8 @@ public class UniversalScanner extends AbstractScanner {
         
         // 4. ✅ 统一去重过滤（与批量/逐个模式无关）
         //    去重决定"打不打"，批量/逐个决定"怎么打"
-        List<InjectionTarget> validTargets = filterDuplicateTargets(allTargets, config, originalRequest);
+        //    ✅ 修复：传递pairId，确保不同配对即使针对同一参数也能分别执行
+        List<InjectionTarget> validTargets = filterDuplicateTargets(allTargets, config, originalRequest, pair.getId());
         
         if (validTargets.isEmpty()) {
             // 所有目标都被去重过滤掉了
@@ -301,10 +379,10 @@ public class UniversalScanner extends AbstractScanner {
         // 📌 批量模式 vs 逐个模式
         if (injectionMode == Configuration.InjectionMode.BATCH) {
             // ========== 批量模式（BATCH）：所有validTargets同时注入相同payload ==========
-            return evaluateBatchMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations);
+            return evaluateBatchMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures);
         } else {
             // ========== 逐个模式（INDIVIDUAL）：每个validTarget分别注入 ==========
-            return evaluateIndividualMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations);
+            return evaluateIndividualMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures);
         }
     }
     
@@ -316,7 +394,8 @@ public class UniversalScanner extends AbstractScanner {
      */
     private List<InjectionTarget> filterDuplicateTargets(List<InjectionTarget> allTargets, 
                                                          Configuration config, 
-                                                         HttpRequest originalRequest) {
+                                                         HttpRequest originalRequest,
+                                                         Integer pairId) {
         // 获取请求上下文信息
         String method = originalRequest.method();
         String host = originalRequest.httpService().host();
@@ -331,8 +410,9 @@ public class UniversalScanner extends AbstractScanner {
         
         for (InjectionTarget target : allTargets) {
             // ✅ 只检查是否重复，不标记（使用生成key的方式检查）
+            // ✅ 修复：传入pairId，确保不同配对生成不同的Key
             String dedupKey = com.xprobe.scanner.core.DeduplicationKeyGenerator.generateKey(
-                method, host, path, contentType, config, target.name
+                method, host, path, contentType, config, target.name, pairId
             );
             
             // 检查这个key是否已经在去重集合中
@@ -372,6 +452,7 @@ public class UniversalScanner extends AbstractScanner {
      * ✅ 去重已在外部统一处理，这里只负责"怎么打"
      * @param validTargets 已经过去重过滤的有效目标列表
      * @param allEvaluations 用于保存所有评估结果的列表（包括未命中的）
+     * @param allPairFeatures 所有之前Pair的响应特征（供当前Pair引用）
      */
     private PairEvaluationResult evaluateBatchMode(List<InjectionTarget> validTargets,
                                                    List<UnifiedHttpConfig.HttpElementConfig> injectionPoints,
@@ -380,7 +461,8 @@ public class UniversalScanner extends AbstractScanner {
                                                    PayloadVariableResolver payloadResolver,
                                                    Configuration config,
                                                    RuleMatchPair pair,
-                                                   List<PairEvaluationResult> allEvaluations) {
+                                                   List<PairEvaluationResult> allEvaluations,
+                                                   Map<Integer, PairResponseFeatures> allPairFeatures) {
         // ✅ 保存最后一个响应（用于记录未命中的请求）
         HttpResponse lastResponse = null;
         HttpRequest lastModifiedRequest = null;
@@ -448,12 +530,27 @@ public class UniversalScanner extends AbstractScanner {
                     
                 // 评估响应
                 System.out.println("🔍 [批量注入] 开始评估响应，配对ID: " + pair.getId());
-                boolean responseMatched = UnifiedResponseEvaluator.evaluate(
-                    response, responseConfig, payloadContext, responseTime
-                );
-                System.out.println("🔍 [批量注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
+                // ✨ 如果响应配置为空，默认响应匹配通过（用于盲注等场景，只依赖跨Pair对比）
+                boolean responseMatched;
+                if (responseConfig.getElements() == null || responseConfig.getElements().isEmpty()) {
+                    responseMatched = true;  // 响应配置为空，跳过响应匹配
+                    System.out.println("🔍 [批量注入] 响应配置为空，跳过响应匹配");
+                } else {
+                    responseMatched = UnifiedResponseEvaluator.evaluate(
+                        response, responseConfig, payloadContext, responseTime
+                    );
+                    System.out.println("🔍 [批量注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
+                }
                 
-                if (responseMatched) {
+                // ✨ 新增：检查跨Pair特征对比
+                boolean crossPairMatched = evaluateCrossPairComparison(
+                    pair, response, responseTime, allPairFeatures
+                );
+                
+                // 最终匹配结果：响应匹配 AND 跨Pair对比匹配（如果配置了）
+                boolean finalMatched = responseMatched && crossPairMatched;
+                
+                if (finalMatched) {
                     api.logging().raiseDebugEvent(
                         "配对 [" + pair.getId() + "] 批量注入匹配: " + 
                         injectionPoint.getType().getDisplayName() + 
@@ -490,7 +587,8 @@ public class UniversalScanner extends AbstractScanner {
                                                         PayloadVariableResolver payloadResolver,
                                                         Configuration config,
                                                         RuleMatchPair pair,
-                                                        List<PairEvaluationResult> allEvaluations) {
+                                                        List<PairEvaluationResult> allEvaluations,
+                                                        Map<Integer, PairResponseFeatures> allPairFeatures) {
         // ✅ 保存最后一个响应（用于记录未命中的请求）
         HttpResponse lastResponse = null;
         HttpRequest lastModifiedRequest = null;
@@ -553,12 +651,27 @@ public class UniversalScanner extends AbstractScanner {
                         
                         // 评估响应
                         System.out.println("🔍 [逐个注入] 开始评估响应，配对ID: " + pair.getId() + ", 目标: " + target.name);
-                        boolean responseMatched = UnifiedResponseEvaluator.evaluate(
-                            response, responseConfig, payloadContext, responseTime
-                        );
-                        System.out.println("🔍 [逐个注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
+                        // ✨ 如果响应配置为空，默认响应匹配通过（用于盲注等场景，只依赖跨Pair对比）
+                        boolean responseMatched;
+                        if (responseConfig.getElements() == null || responseConfig.getElements().isEmpty()) {
+                            responseMatched = true;  // 响应配置为空，跳过响应匹配
+                            System.out.println("🔍 [逐个注入] 响应配置为空，跳过响应匹配");
+                        } else {
+                            responseMatched = UnifiedResponseEvaluator.evaluate(
+                                response, responseConfig, payloadContext, responseTime
+                            );
+                            System.out.println("🔍 [逐个注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
+                        }
                         
-                        if (responseMatched) {
+                        // ✨ 新增：检查跨Pair特征对比
+                        boolean crossPairMatched = evaluateCrossPairComparison(
+                            pair, response, responseTime, allPairFeatures
+                        );
+                        
+                        // 最终匹配结果：响应匹配 AND 跨Pair对比匹配（如果配置了）
+                        boolean finalMatched = responseMatched && crossPairMatched;
+                        
+                        if (finalMatched) {
                             api.logging().raiseDebugEvent(
                                 "配对 [" + pair.getId() + "] 逐个注入匹配: " + 
                                 injectionPoint.getType().getDisplayName() + 
@@ -1285,5 +1398,120 @@ public class UniversalScanner extends AbstractScanner {
         }
         
         return "Medium";  // 默认
+    }
+    
+    /**
+     * ✨ 评估跨Pair特征对比
+     * 
+     * @param pair 当前Pair配置
+     * @param response 当前响应
+     * @param responseTime 当前响应时间
+     * @param allPairFeatures 所有之前Pair的响应特征
+     * @return true表示跨Pair对比通过（或未配置跨Pair对比），false表示对比失败
+     */
+    private boolean evaluateCrossPairComparison(RuleMatchPair pair, 
+                                                HttpResponse response,
+                                                long responseTime,
+                                                Map<Integer, PairResponseFeatures> allPairFeatures) {
+        ResponseComparisonConfig comparisonConfig = pair.getComparisonConfig();
+        
+        // 如果没有配置对比，默认通过
+        if (comparisonConfig == null) {
+            return true;
+        }
+        
+        boolean allChecksPass = true;
+        
+        // 1. 检查响应体对比模式
+        ResponseComparisonConfig.BodyComparisonMode bodyMode = comparisonConfig.getBodyComparisonMode();
+        if (bodyMode != null && bodyMode != ResponseComparisonConfig.BodyComparisonMode.NONE) {
+            Integer refPairId = comparisonConfig.getBodyComparisonReferencePairId();
+            if (refPairId == null) {
+                api.logging().raiseErrorEvent(String.format(
+                    "配对 [%d] 配置了响应体对比模式 %s，但未指定引用Pair ID",
+                    pair.getId(), bodyMode
+                ));
+                return false;
+            }
+            
+            PairResponseFeatures refFeatures = allPairFeatures.get(refPairId);
+            if (refFeatures == null) {
+                api.logging().raiseErrorEvent(String.format(
+                    "配对 [%d] 引用的Pair [%d] 特征不存在",
+                    pair.getId(), refPairId
+                ));
+                return false;
+            }
+            
+            // 构造当前Pair的特征（临时）
+            boolean needBodyComparison = needsBodyComparison(pair);
+            PairResponseFeatures currentFeatures = PairResponseFeatures.fromResponse(
+                pair.getId(), response, responseTime, needBodyComparison
+            );
+            
+            boolean useClean = comparisonConfig.isUseCleanedBodyComparison();
+            boolean bodyComparisonResult = false;
+            
+            switch (bodyMode) {
+                case BODY_EQUALS:
+                    bodyComparisonResult = ResponseComparisonEngine.isBodyEqual(
+                        currentFeatures, refFeatures, useClean
+                    );
+                    break;
+                case BODY_NOT_EQUALS:
+                    bodyComparisonResult = !ResponseComparisonEngine.isBodyEqual(
+                        currentFeatures, refFeatures, useClean
+                    );
+                    break;
+            }
+            
+            api.logging().raiseDebugEvent(String.format(
+                "配对 [%d] 响应体对比 (%s) 结果: %s (引用Pair [%d])",
+                pair.getId(), bodyMode, 
+                bodyComparisonResult ? "✅ 通过" : "❌ 失败",
+                refPairId
+            ));
+            
+            allChecksPass = allChecksPass && bodyComparisonResult;
+        }
+        
+        // 2. 检查通用跨Pair特征引用
+        if (comparisonConfig.getReferencePairId() != null && 
+            comparisonConfig.getReferenceFeatureType() != null) {
+            
+            Integer refPairId = comparisonConfig.getReferencePairId();
+            PairResponseFeatures refFeatures = allPairFeatures.get(refPairId);
+            
+            if (refFeatures == null) {
+                api.logging().raiseErrorEvent(String.format(
+                    "配对 [%d] 引用的Pair [%d] 特征不存在",
+                    pair.getId(), refPairId
+                ));
+                return false;
+            }
+            
+            // 构造当前Pair的特征（临时）
+            boolean needBodyComparison = needsBodyComparison(pair);
+            PairResponseFeatures currentFeatures = PairResponseFeatures.fromResponse(
+                pair.getId(), response, responseTime, needBodyComparison
+            );
+            
+            boolean crossPairResult = ResponseComparisonEngine.evaluateCrossPairFeature(
+                currentFeatures, refFeatures, comparisonConfig
+            );
+            
+            api.logging().raiseDebugEvent(String.format(
+                "配对 [%d] 跨Pair特征引用结果: %s (引用Pair [%d], 特征: %s, 操作: %s)",
+                pair.getId(),
+                crossPairResult ? "✅ 通过" : "❌ 失败",
+                refPairId,
+                comparisonConfig.getReferenceFeatureType(),
+                comparisonConfig.getReferenceOperator()
+            ));
+            
+            allChecksPass = allChecksPass && crossPairResult;
+        }
+        
+        return allChecksPass;
     }
 }

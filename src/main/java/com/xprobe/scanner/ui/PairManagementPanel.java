@@ -89,13 +89,7 @@ public class PairManagementPanel extends JPanel {
         pairsContainer.setLayout(new BoxLayout(pairsContainer, BoxLayout.Y_AXIS));
         
         // 提示标签
-        JLabel hintLabel = new JLabel("<html>" +
-            "<b>配对管理说明:</b><br>" +
-            "• 每个配对包含：请求配置 + 响应配置<br>" +
-            "• 点击「编辑配对」按钮进行详细配置<br>" +
-            "• 可以配置多个配对，使用逻辑表达式组合<br>" +
-            "• 例如：配对1检测错误消息，配对2检测时间延迟" +
-            "</html>");
+        JLabel hintLabel = new JLabel("配对管理说明：每个配对包含请求配置+响应配置，点击「编辑配对」按钮进行详细配置");
         hintLabel.setBorder(BorderFactory.createEmptyBorder(5, 5, 10, 5));
         pairsContainer.add(hintLabel);
         
@@ -110,10 +104,7 @@ public class PairManagementPanel extends JPanel {
         TitledBorder border = BorderFactory.createTitledBorder("配对间逻辑表达式");
         panel.setBorder(border);
         
-        JLabel label = new JLabel("<html>" +
-            "使用配对ID和逻辑运算符组合多个配对，例如: <code>1 OR 2</code> 表示满足配对1或配对2即可<br>" +
-            "留空则表示所有配对都需满足（AND关系）" +
-            "</html>");
+        JLabel label = new JLabel("使用配对ID和逻辑运算符组合多个配对，例如: 1 OR 2 表示满足配对1或配对2即可。留空则表示所有配对都需满足（AND关系）");
         panel.add(label, BorderLayout.NORTH);
         
         expressionArea = new JTextArea(2, 40);
@@ -138,10 +129,23 @@ public class PairManagementPanel extends JPanel {
      * 加载配对
      */
     private void loadPairs(String expression) {
-        for (RuleMatchPair pair : pairs) {
-            addPairPanel(pair);
-            if (pair.getId() >= nextPairId) {
-                nextPairId = pair.getId() + 1;
+        // 如果配对列表为空，显示提示信息
+        if (pairs.isEmpty()) {
+            JPanel emptyHintPanel = new JPanel(new BorderLayout());
+            emptyHintPanel.setBorder(BorderFactory.createEmptyBorder(20, 20, 20, 20));
+            
+            JLabel emptyLabel = new JLabel("📝 当前没有配对 - 点击顶部的 \"+ 添加新配对\" 按钮开始配置");
+            emptyLabel.setHorizontalAlignment(SwingConstants.CENTER);
+            emptyHintPanel.add(emptyLabel, BorderLayout.CENTER);
+            
+            pairsContainer.add(emptyHintPanel);
+        } else {
+            // 加载现有配对
+            for (RuleMatchPair pair : pairs) {
+                addPairPanel(pair);
+                if (pair.getId() >= nextPairId) {
+                    nextPairId = pair.getId() + 1;
+                }
             }
         }
         
@@ -158,7 +162,7 @@ public class PairManagementPanel extends JPanel {
      */
     private void addNewPair() {
         RuleMatchPair newPair = new RuleMatchPair(nextPairId++);
-        newPair.setLabel("新配对");
+        newPair.setLabel("配对 " + newPair.getId());
         
         // 打开编辑对话框
         PairEditorDialog dialog = new PairEditorDialog(
@@ -168,6 +172,15 @@ public class PairManagementPanel extends JPanel {
         );
         
         if (dialog.showDialog()) {
+            // 如果这是第一个配对，需要移除空提示
+            if (pairs.isEmpty()) {
+                pairsContainer.removeAll();
+                // 重新添加提示标签
+                JLabel hintLabel = new JLabel("配对管理说明：每个配对包含请求配置+响应配置，点击「编辑配对」按钮进行详细配置");
+                hintLabel.setBorder(BorderFactory.createEmptyBorder(5, 5, 10, 5));
+                pairsContainer.add(hintLabel);
+            }
+            
             pairs.add(newPair);
             addPairPanel(newPair);
             pairsContainer.revalidate();
@@ -314,23 +327,30 @@ public class PairManagementPanel extends JPanel {
             "(1 OR 2) AND 3  - (1或2) 且 3\n" +
             "1 OR 2 OR 3     - 满足任意一个\n\n" +
             
-            "常见使用场景：\n" +
+            "真实检测场景（基于HackerOne报告）：\n" +
             "─────────────────────────────────────────\n" +
-            "1. SQL注入综合检测：\n" +
-            "   配对1: 错误消息\n" +
-            "   配对2: 时间盲注\n" +
-            "   配对3: Boolean盲注\n" +
-            "   逻辑: 1 OR 2 OR 3\n\n" +
+            "1. 时间盲注检测（#1024984）：\n" +
+            "   配对1: SLEEP(0)  - 基准时间\n" +
+            "   配对2: SLEEP(5)  - 5秒延迟\n" +
+            "   配对3: SLEEP(10) - 10秒延迟\n" +
+            "   逻辑: 1 AND 2 AND 3（全部必须匹配）\n\n" +
             
-            "2. SSRF多协议检测：\n" +
-            "   配对1: HTTP外带\n" +
-            "   配对2: DNS外带\n" +
-            "   逻辑: 1 OR 2\n\n" +
+            "2. 布尔盲注检测（#1102591）：\n" +
+            "   配对1: TRUE payload  - 获取正常响应\n" +
+            "   配对2: FALSE payload - 获取异常响应\n" +
+            "   逻辑: 1 AND 2（两个响应必须不同）\n\n" +
             
-            "3. XSS组合检测：\n" +
-            "   配对1: 反射XSS\n" +
-            "   配对2: 存储XSS\n" +
-            "   逻辑: 1 OR 2\n";
+            "3. SQL注入综合检测：\n" +
+            "   配对1: 错误注入 - 检查错误消息\n" +
+            "   配对2: 时间盲注 - 检查响应延迟\n" +
+            "   配对3: 布尔盲注 - 检查响应差异\n" +
+            "   逻辑: 1 OR 2 OR 3（任意一个成功）\n\n" +
+            
+            "4. IDOR检测：\n" +
+            "   配对1: 创建资源 - 获取资源ID\n" +
+            "   配对2: 访问资源 - 检查是否能访问\n" +
+            "   配对3: 修改资源 - 检查是否能修改\n" +
+            "   逻辑: 1 AND (2 OR 3)\n";
         
         JTextArea textArea = new JTextArea(help);
         textArea.setEditable(false);
@@ -359,13 +379,12 @@ public class PairManagementPanel extends JPanel {
     }
     
     /**
-     * 配对显示面板
+     * 配对显示面板（重新设计，更简洁清晰）
      */
     private class PairDisplayPanel extends JPanel {
         
         private RuleMatchPair pair;
-        private JPanel contentPanel;
-        private boolean expanded = false;
+        private JLabel statusLabel;
         
         public PairDisplayPanel(RuleMatchPair pair) {
             this.pair = pair;
@@ -373,38 +392,29 @@ public class PairManagementPanel extends JPanel {
         }
         
         private void initComponents() {
-            setLayout(new BorderLayout());
+            setLayout(new BorderLayout(10, 10));
             setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(new Color(200, 200, 200), 1),
-                BorderFactory.createEmptyBorder(10, 10, 10, 10)
+                BorderFactory.createLineBorder(new Color(220, 220, 220), 1),
+                BorderFactory.createEmptyBorder(10, 15, 10, 15)
             ));
-            setMaximumSize(new Dimension(Integer.MAX_VALUE, 300));
+            setMaximumSize(new Dimension(Integer.MAX_VALUE, 80));
+            setBackground(Color.WHITE);
             
-            // 头部
-            add(createHeaderPanel(), BorderLayout.NORTH);
+            // 左侧：配对信息
+            add(createInfoPanel(), BorderLayout.CENTER);
             
-            // 内容（可展开/折叠）
-            contentPanel = createContentPanel();
-            contentPanel.setVisible(expanded);
-            add(contentPanel, BorderLayout.CENTER);
+            // 右侧：操作按钮
+            add(createButtonPanel(), BorderLayout.EAST);
         }
         
-        private JPanel createHeaderPanel() {
-            JPanel panel = new JPanel(new BorderLayout(10, 5));
+        private JPanel createInfoPanel() {
+            JPanel panel = new JPanel();
+            panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+            panel.setOpaque(false);
             
-            // 左侧：标题
-            JPanel titlePanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-            
-            JButton toggleButton = new JButton(expanded ? "▼" : "▶");
-            toggleButton.setPreferredSize(new Dimension(40, 25));
-            toggleButton.addActionListener(e -> {
-                expanded = !expanded;
-                toggleButton.setText(expanded ? "▼" : "▶");
-                contentPanel.setVisible(expanded);
-                revalidate();
-                repaint();
-            });
-            titlePanel.add(toggleButton);
+            // 第一行：ID + 标签
+            JPanel titlePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+            titlePanel.setOpaque(false);
             
             JLabel idLabel = new JLabel("[" + pair.getId() + "]");
             idLabel.setFont(idLabel.getFont().deriveFont(Font.BOLD, 14f));
@@ -413,106 +423,76 @@ public class PairManagementPanel extends JPanel {
             
             String label = pair.getLabel() != null && !pair.getLabel().isEmpty() 
                 ? pair.getLabel() 
-                : "配对" + pair.getId();
+                : "配对 " + pair.getId();
             JLabel nameLabel = new JLabel(label);
-            nameLabel.setFont(nameLabel.getFont().deriveFont(Font.BOLD, 13f));
+            nameLabel.setFont(nameLabel.getFont().deriveFont(Font.BOLD, 14f));
             titlePanel.add(nameLabel);
             
-            panel.add(titlePanel, BorderLayout.WEST);
+            panel.add(titlePanel);
+            panel.add(Box.createVerticalStrut(5));
             
-            // 右侧：按钮
-            JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+            // 第二行：配置状态摘要
+            statusLabel = new JLabel(getStatusSummary());
+            statusLabel.setFont(statusLabel.getFont().deriveFont(Font.PLAIN, 12f));
+            statusLabel.setForeground(new Color(100, 100, 100));
+            panel.add(statusLabel);
             
-            JButton editButton = new JButton("编辑配对");
+            return panel;
+        }
+        
+        private JPanel createButtonPanel() {
+            JPanel panel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
+            panel.setOpaque(false);
+            
+            // 编辑按钮
+            JButton editButton = new JButton("✏️ 编辑");
+            editButton.setFont(editButton.getFont().deriveFont(Font.PLAIN, 12f));
+            editButton.setPreferredSize(new Dimension(80, 30));
+            editButton.setFocusPainted(false);
             editButton.addActionListener(e -> editPair());
             
-            JButton deleteButton = new JButton("删除");
-            deleteButton.setForeground(Color.RED);
+            // 删除按钮
+            JButton deleteButton = new JButton("🗑️ 删除");
+            deleteButton.setFont(deleteButton.getFont().deriveFont(Font.PLAIN, 12f));
+            deleteButton.setPreferredSize(new Dimension(80, 30));
+            deleteButton.setForeground(new Color(200, 0, 0));
+            deleteButton.setFocusPainted(false);
             deleteButton.addActionListener(e -> removePair(PairDisplayPanel.this));
             
-            buttonPanel.add(editButton);
-            buttonPanel.add(deleteButton);
-            
-            panel.add(buttonPanel, BorderLayout.EAST);
+            panel.add(editButton);
+            panel.add(deleteButton);
             
             return panel;
         }
         
-        private JPanel createContentPanel() {
-            JPanel panel = new JPanel(new BorderLayout(10, 10));
-            panel.setBorder(BorderFactory.createEmptyBorder(10, 30, 0, 0));
+        private String getStatusSummary() {
+            StringBuilder sb = new StringBuilder();
             
             // 请求配置摘要
-            JPanel requestPanel = new JPanel(new BorderLayout(5, 5));
-            requestPanel.add(new JLabel("📤 请求配置:"), BorderLayout.NORTH);
-            JTextArea requestSummary = new JTextArea(getRequestSummary());
-            requestSummary.setEditable(false);
-            requestSummary.setBackground(new Color(250, 250, 250));
-            requestSummary.setRows(3);
-            requestPanel.add(new JScrollPane(requestSummary), BorderLayout.CENTER);
+            UnifiedHttpConfig requestConfig = pair.getRequestConfig();
+            if (requestConfig != null && !requestConfig.getElements().isEmpty()) {
+                long matchCount = requestConfig.getElements().stream()
+                    .filter(UnifiedHttpConfig.HttpElementConfig::isUseForMatch)
+                    .count();
+                long injectCount = requestConfig.getElements().stream()
+                    .filter(UnifiedHttpConfig.HttpElementConfig::isUseForInjection)
+                    .count();
+                sb.append("📤 请求: ").append(requestConfig.getElements().size())
+                  .append("个元素 (").append(matchCount).append("匹配, ")
+                  .append(injectCount).append("注入)");
+            } else {
+                sb.append("📤 请求: 未配置");
+            }
+            
+            sb.append("  |  ");
             
             // 响应配置摘要
-            JPanel responsePanel = new JPanel(new BorderLayout(5, 5));
-            responsePanel.add(new JLabel("📥 响应配置:"), BorderLayout.NORTH);
-            JTextArea responseSummary = new JTextArea(getResponseSummary());
-            responseSummary.setEditable(false);
-            responseSummary.setBackground(new Color(250, 250, 250));
-            responseSummary.setRows(3);
-            responsePanel.add(new JScrollPane(responseSummary), BorderLayout.CENTER);
-            
-            // 组合
-            JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
-                requestPanel, responsePanel);
-            splitPane.setResizeWeight(0.5);
-            panel.add(splitPane, BorderLayout.CENTER);
-            
-            return panel;
-        }
-        
-        private String getRequestSummary() {
-            UnifiedHttpConfig config = pair.getRequestConfig();
-            if (config == null || config.getElements().isEmpty()) {
-                return "（未配置）";
-            }
-            
-            StringBuilder sb = new StringBuilder();
-            for (UnifiedHttpConfig.HttpElementConfig element : config.getElements()) {
-                sb.append("[").append(element.getId()).append("] ");
-                sb.append(element.getType().getDisplayName());
-                if (element.getName() != null && !element.getName().isEmpty()) {
-                    sb.append(" ").append(element.getName());
-                }
-                if (element.isUseForMatch()) {
-                    sb.append(" [匹配]");
-                }
-                if (element.isUseForInjection()) {
-                    sb.append(" [注入]");
-                }
-                sb.append("\n");
-            }
-            
-            if (config.getConditionExpression() != null && !config.getConditionExpression().isEmpty()) {
-                sb.append("表达式: ").append(config.getConditionExpression());
-            }
-            
-            return sb.toString();
-        }
-        
-        private String getResponseSummary() {
-            UnifiedResponseConfig config = pair.getResponseConfig();
-            if (config == null || config.getElements().isEmpty()) {
-                return "（未配置）";
-            }
-            
-            StringBuilder sb = new StringBuilder();
-            for (UnifiedResponseConfig.ResponseElementConfig element : config.getElements()) {
-                sb.append("[").append(element.getId()).append("] ");
-                sb.append(element.getType().getDisplayName());
-                sb.append("\n");
-            }
-            
-            if (config.getConditionExpression() != null && !config.getConditionExpression().isEmpty()) {
-                sb.append("表达式: ").append(config.getConditionExpression());
+            UnifiedResponseConfig responseConfig = pair.getResponseConfig();
+            if (responseConfig != null && !responseConfig.getElements().isEmpty()) {
+                sb.append("📥 响应: ").append(responseConfig.getElements().size())
+                  .append("个条件");
+            } else {
+                sb.append("📥 响应: 未配置");
             }
             
             return sb.toString();
@@ -526,9 +506,8 @@ public class PairManagementPanel extends JPanel {
             );
             
             if (dialog.showDialog()) {
-                // 更新显示
-                removeAll();
-                initComponents();
+                // 更新显示 - 只更新状态标签
+                statusLabel.setText(getStatusSummary());
                 revalidate();
                 repaint();
             }

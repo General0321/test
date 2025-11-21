@@ -183,7 +183,7 @@ public class HttpElementDetailDialog extends JDialog {
         valuesPanel.add(scrollPane, BorderLayout.CENTER);
         
         // 提示标签
-        JLabel hintLabel = new JLabel("<html><i>提示: 支持正则表达式（需选择正则匹配类型）</i></html>");
+        JLabel hintLabel = new JLabel("提示: 支持正则表达式（需选择正则匹配类型）");
         hintLabel.setForeground(Color.GRAY);
         valuesPanel.add(hintLabel, BorderLayout.SOUTH);
         

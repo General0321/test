@@ -667,9 +667,7 @@ public class UnifiedConfigTab {
         customHeadersScroll.setPreferredSize(new Dimension(400, 100));
         customHeadersPanel.add(customHeadersScroll, BorderLayout.CENTER);
         
-        JLabel customHeadersHint = new JLabel("<html><i>格式: Header-Name: Header-Value （每行一个，存在则覆盖，不存在则添加）<br>" +
-            "示例: Authorization: Bearer token123<br>" +
-            "示例: User-Agent: CustomAgent/1.0</i></html>");
+        JLabel customHeadersHint = new JLabel("格式: Header-Name: Header-Value （每行一个）示例: Authorization: Bearer token123");
         customHeadersHint.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
         customHeadersHint.setForeground(Color.GRAY);
         customHeadersPanel.add(customHeadersHint, BorderLayout.SOUTH);

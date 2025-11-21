@@ -109,13 +109,7 @@ public class UnifiedHttpConfigPanel extends JPanel {
         elementsPanel = new JPanel();
         elementsPanel.setLayout(new BoxLayout(elementsPanel, BoxLayout.Y_AXIS));
         
-        JLabel hintLabel = new JLabel("<html>" +
-            "<b>配置说明:</b><br>" +
-            "• <b>匹配</b> = 请求条件，决定哪些请求会被此规则测试<br>" +
-            "• <b>注入</b> = 注入点，决定在哪里插入Payload<br>" +
-            "• 同一个元素可以同时用于匹配和注入<br>" +
-            "• 点击 <b>⚙️</b> 按钮配置详细信息（支持多个值、正则等）" +
-            "</html>");
+        JLabel hintLabel = new JLabel("配置说明：在此配置匹配条件（哪些请求会被扫描）和注入点（在哪里注入Payload）");
         hintLabel.setBorder(BorderFactory.createEmptyBorder(5, 5, 10, 5));
         elementsPanel.add(hintLabel);
         
@@ -130,10 +124,7 @@ public class UnifiedHttpConfigPanel extends JPanel {
         TitledBorder border = BorderFactory.createTitledBorder("复杂条件表达式（可选）");
         panel.setBorder(border);
         
-        JLabel label = new JLabel("<html>" +
-            "使用元素ID和逻辑运算符组合复杂条件，例如: <code>(1 AND 2) OR 3</code><br>" +
-            "留空则表示所有启用匹配的元素都需满足（AND关系）" +
-            "</html>");
+        JLabel label = new JLabel("使用元素ID和逻辑运算符组合复杂条件，例如: (1 AND 2) OR 3。留空则表示所有启用匹配的元素都需满足（AND关系）");
         panel.add(label, BorderLayout.NORTH);
         
         expressionArea = new JTextArea(2, 40);

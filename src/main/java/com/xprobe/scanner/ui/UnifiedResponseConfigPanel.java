@@ -98,13 +98,7 @@ public class UnifiedResponseConfigPanel extends JPanel {
         elementsPanel = new JPanel();
         elementsPanel.setLayout(new BoxLayout(elementsPanel, BoxLayout.Y_AXIS));
         
-        JLabel hintLabel = new JLabel("<html>" +
-            "<b>配置说明:</b><br>" +
-            "• 配置响应匹配条件，判断漏洞是否存在<br>" +
-            "• 点击 <b>⚙️</b> 按钮配置详细信息（支持多个值、正则等）<br>" +
-            "• 支持多种匹配类型：完全匹配、部分匹配、正则匹配等<br>" +
-            "• 可使用复杂表达式组合多个条件" +
-            "</html>");
+        JLabel hintLabel = new JLabel("配置说明：在此配置响应匹配条件（什么样的响应代表检测成功）");
         hintLabel.setBorder(BorderFactory.createEmptyBorder(5, 5, 10, 5));
         elementsPanel.add(hintLabel);
         
@@ -119,10 +113,7 @@ public class UnifiedResponseConfigPanel extends JPanel {
         TitledBorder border = BorderFactory.createTitledBorder("复杂条件表达式（可选）");
         panel.setBorder(border);
         
-        JLabel label = new JLabel("<html>" +
-            "使用元素ID和逻辑运算符组合复杂条件，例如: <code>(1 AND 2) OR 3</code><br>" +
-            "留空则表示所有元素都需满足（AND关系）" +
-            "</html>");
+        JLabel label = new JLabel("使用元素ID和逻辑运算符组合复杂条件，例如: (1 AND 2) OR 3。留空则表示所有元素都需满足（AND关系）");
         panel.add(label, BorderLayout.NORTH);
         
         expressionArea = new JTextArea(2, 40);

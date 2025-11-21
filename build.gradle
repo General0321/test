@@ -5,6 +5,11 @@ plugins {
 group 'com.xprobe'
 version '1.0.0'
 
+// 设置源文件编码为UTF-8
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+}
+
 repositories {
     mavenLocal()
     mavenCentral()
