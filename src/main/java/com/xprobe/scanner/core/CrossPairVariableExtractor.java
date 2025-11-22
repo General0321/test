@@ -30,7 +30,11 @@ public class CrossPairVariableExtractor {
             return extractedVars;
         }
         
+        // ✅ 修复：添加 null 检查
         String responseBody = response.bodyToString();
+        if (responseBody == null) {
+            responseBody = "";
+        }
         String responseHeaders = extractHeadersAsString(response);
         
         // 对每个提取规则执行
@@ -51,8 +55,9 @@ public class CrossPairVariableExtractor {
                     extractedVars.put(varName, value);
                 }
             } catch (Exception e) {
-                // 正则表达式错误，跳过
-                System.err.println("❌ 变量提取失败 [" + varName + "]: " + e.getMessage());
+                // ✅ 修复：正则表达式错误时，抛出异常由调用方处理
+                // 这样调用方可以记录详细的错误信息（包括变量名、正则表达式等）
+                throw new RuntimeException("变量提取失败 [变量名: " + varName + ", 正则: " + regex + "]: " + e.getMessage(), e);
             }
         }
         
