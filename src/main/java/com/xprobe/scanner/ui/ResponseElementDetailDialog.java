@@ -36,7 +36,7 @@ public class ResponseElementDetailDialog extends JDialog {
         initComponents();
         loadFromElement();
         
-        setSize(600, 500);
+        setSize(700, 600);  // ✅ 与请求配置对话框保持一致
         setLocationRelativeTo(owner);
     }
     
@@ -50,12 +50,42 @@ public class ResponseElementDetailDialog extends JDialog {
         add(titleLabel, BorderLayout.NORTH);
         
         // 中间配置面板
-        JPanel configPanel = createConfigPanel();
-        JScrollPane scrollPane = new JScrollPane(configPanel);
-        add(scrollPane, BorderLayout.CENTER);
+        // ✅ 修复：对于文本配置，使用特殊布局，将变量面板放在滚动面板外
+        ElementType type = element.getType();
+        if (type == ElementType.STATUS_CODE || type == ElementType.RESPONSE_HEADERS || type == ElementType.RESPONSE_BODY) {
+            // 文本配置：创建包含变量面板的完整面板
+            JPanel mainPanel = createTextConfigPanelWithVariables();
+            add(mainPanel, BorderLayout.CENTER);
+        } else {
+            // 其他配置：直接使用滚动面板
+            JPanel configPanel = createConfigPanel();
+            JScrollPane scrollPane = new JScrollPane(configPanel);
+            add(scrollPane, BorderLayout.CENTER);
+        }
         
         // 底部按钮
         add(createButtonPanel(), BorderLayout.SOUTH);
+    }
+    
+    /**
+     * ✅ 创建包含变量面板的文本配置面板（变量面板在滚动面板外，始终可见）
+     */
+    private JPanel createTextConfigPanelWithVariables() {
+        JPanel mainPanel = new JPanel(new BorderLayout(10, 10));
+        mainPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        
+        // 创建文本配置面板（不包含变量面板）
+        JPanel textConfigPanel = createTextConfigPanel();
+        
+        // 将文本配置面板放在滚动面板中
+        JScrollPane scrollPane = new JScrollPane(textConfigPanel);
+        mainPanel.add(scrollPane, BorderLayout.CENTER);
+        
+        // 变量面板放在滚动面板下方，始终可见
+        JPanel variablePanel = createVariableInsertPanel();
+        mainPanel.add(variablePanel, BorderLayout.SOUTH);
+        
+        return mainPanel;
     }
     
     private JPanel createConfigPanel() {
@@ -75,7 +105,10 @@ public class ResponseElementDetailDialog extends JDialog {
                 break;
                 
             default:
-                panel.add(createTextConfigPanel(), BorderLayout.CENTER);
+                // ✅ 修复：将变量面板移出滚动面板，使其始终可见
+                JPanel textConfigPanel = createTextConfigPanel();
+                panel.add(textConfigPanel, BorderLayout.CENTER);
+                // 变量面板已经在 createTextConfigPanel 中处理，但需要确保它不在滚动面板内
                 break;
         }
         
@@ -84,6 +117,7 @@ public class ResponseElementDetailDialog extends JDialog {
     
     /**
      * 文本匹配配置面板（用于Status Code, Headers, Body）
+     * ✅ 修复：参考请求配置的布局，将变量面板放在滚动面板外，使其始终可见
      */
     private JPanel createTextConfigPanel() {
         JPanel panel = new JPanel(new BorderLayout(10, 10));
@@ -107,19 +141,17 @@ public class ResponseElementDetailDialog extends JDialog {
         
         panel.add(typePanel, BorderLayout.NORTH);
         
-        // 匹配值
+        // 匹配值面板（只包含文本区域，变量面板已移到外层）
         JPanel valuesPanel = new JPanel(new BorderLayout(5, 5));
-        valuesPanel.add(new JLabel("匹配值（每行一个，OR关系，支持正则表达式和变量）:"), 
-            BorderLayout.NORTH);
+        valuesPanel.setBorder(BorderFactory.createTitledBorder("匹配值配置"));
+        
+        JLabel valuesLabel = new JLabel("匹配值（每行一个，OR关系，支持正则表达式和变量）:");
+        valuesPanel.add(valuesLabel, BorderLayout.NORTH);
         
         valuesArea = new JTextArea(12, 40);
         valuesArea.setLineWrap(false);
         JScrollPane scrollPane = new JScrollPane(valuesArea);
         valuesPanel.add(scrollPane, BorderLayout.CENTER);
-        
-        // ✅ 添加变量插入按钮面板
-        JPanel variablePanel = createVariableInsertPanel();
-        valuesPanel.add(variablePanel, BorderLayout.SOUTH);
         
         panel.add(valuesPanel, BorderLayout.CENTER);
         
@@ -152,23 +184,16 @@ public class ResponseElementDetailDialog extends JDialog {
         row2.add(createInsertButton("{{DNSLOG}}", valuesArea));
         panel.add(row2);
         
-        // 获取其他pair的随机值（任意pair）
-        JPanel row3 = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        row3.add(new JLabel("获取其他pair的随机值:"));
-        row3.add(createInsertButton("{{VAR:RANDOM_STRING}}", valuesArea));
-        row3.add(createInsertButton("{{VAR:UUID}}", valuesArea));
-        row3.add(createInsertButton("{{VAR:TIMESTAMP}}", valuesArea));
-        row3.add(createInsertButton("{{VAR:COLLABORATOR}}", valuesArea));
-        panel.add(row3);
-        
         // 指定pair的随机值
-        JPanel row4 = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        row4.add(new JLabel("指定pair的随机值:"));
-        row4.add(createInsertButton("{{PAIR:1:RANDOM_STRING}}", valuesArea));
-        row4.add(createInsertButton("{{PAIR:1:UUID}}", valuesArea));
-        row4.add(createInsertButton("{{PAIR:2:RANDOM_STRING}}", valuesArea));
-        row4.add(createInsertButton("{{PAIR:2:UUID}}", valuesArea));
-        panel.add(row4);
+        JPanel row3 = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        row3.add(new JLabel("指定pair的随机值:"));
+        row3.add(createInsertButton("{{PAIR:1:RANDOM_STRING}}", valuesArea));
+        row3.add(createInsertButton("{{PAIR:1:UUID}}", valuesArea));
+        row3.add(createInsertButton("{{PAIR:1:TIMESTAMP}}", valuesArea));
+        row3.add(createInsertButton("{{PAIR:1:COLLABORATOR}}", valuesArea));
+        row3.add(createInsertButton("{{PAIR:2:RANDOM_STRING}}", valuesArea));
+        row3.add(createInsertButton("{{PAIR:2:UUID}}", valuesArea));
+        panel.add(row3);
         
         return panel;
     }
