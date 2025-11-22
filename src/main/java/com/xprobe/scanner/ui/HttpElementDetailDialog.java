@@ -4,7 +4,6 @@ import com.xprobe.scanner.config.UnifiedHttpConfig.*;
 
 import javax.swing.*;
 import java.awt.*;
-import java.util.Arrays;
 
 /**
  * HTTP元素详细配置对话框

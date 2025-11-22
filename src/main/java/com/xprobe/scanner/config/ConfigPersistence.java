@@ -34,7 +34,7 @@ public class ConfigPersistence {
         this.mapper = new ObjectMapper();
         // 美化输出，便于阅读和编辑
         mapper.enable(SerializationFeature.INDENT_OUTPUT);
-        // 忽略未知属性（向前兼容）
+        // 忽略未知属性
         mapper.configure(
             com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, 
             false

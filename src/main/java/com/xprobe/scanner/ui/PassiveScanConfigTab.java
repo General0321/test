@@ -307,13 +307,12 @@ public class PassiveScanConfigTab {
             Configuration config = configurations.get(i);
             String enabledStatus = config.isEnabled() ? "✓ 启用" : "✗ 禁用";
             
-            // ✅ 从配对架构中统计注入点、payload和响应匹配规则数量
+            // 从配对架构中统计注入点、payload和响应匹配规则数量
             int injectionPointCount = 0;
             int payloadCount = 0;
             int matchRuleCount = 0;
             
             if (config.getPairs() != null && !config.getPairs().isEmpty()) {
-                // 新架构：从配对中统计
                 for (var pair : config.getPairs()) {
                     if (pair.getRequestConfig() != null && pair.getRequestConfig().getElements() != null) {
                         for (var element : pair.getRequestConfig().getElements()) {
@@ -329,11 +328,6 @@ public class PassiveScanConfigTab {
                         matchRuleCount += pair.getResponseConfig().getElements().size();
                     }
                 }
-            } else {
-                // 旧架构（兼容）
-                injectionPointCount = config.getInjectionPoints() != null ? config.getInjectionPoints().size() : 0;
-                payloadCount = config.getPayloads() != null ? config.getPayloads().size() : 0;
-                matchRuleCount = config.getMatchRules() != null ? config.getMatchRules().size() : 0;
             }
             
             // 使用customLabel作为规则名称，如果为空则使用默认名称
@@ -349,15 +343,6 @@ public class PassiveScanConfigTab {
                 payloadCount,
                 matchRuleCount
             });
-        }
-    }
-    
-    private String getRuleTypeDisplayName(String ruleType) {
-        switch (ruleType.toLowerCase()) {
-            case "lfi": return "LFI (本地文件包含)";
-            case "sql": return "SQL注入";
-            case "ssrf": return "SSRF (服务器端请求伪造)";
-            default: return ruleType;
         }
     }
     
@@ -390,7 +375,7 @@ public class PassiveScanConfigTab {
                     int pairIndex = 1;
                     for (var pair : config.getPairs()) {
                         details.append("配对 ").append(pairIndex++).append(": ")
-                               .append(pair.getName() != null ? pair.getName() : "未命名")
+                               .append(pair.getLabel() != null ? pair.getLabel() : "未命名")
                                .append(pair.isEnabled() ? " ✓" : " ✗").append("\n");
                         
                         // 请求配置摘要
@@ -409,60 +394,6 @@ public class PassiveScanConfigTab {
                     // 配对表达式
                     if (config.getPairExpression() != null && !config.getPairExpression().isEmpty()) {
                         details.append("配对逻辑: ").append(config.getPairExpression()).append("\n\n");
-                    }
-                } else {
-                    // ✅ 兼容旧架构显示
-                    // 请求条件
-                    if (config.getRequestConditions() != null && !config.getRequestConditions().isEmpty()) {
-                        details.append("【请求条件】\n");
-                        for (Configuration.RequestCondition condition : config.getRequestConditions()) {
-                            details.append("  • ").append(condition.getConditionType())
-                                   .append(" ").append(condition.getMatchType())
-                                   .append(" '").append(condition.getValue()).append("'")
-                                   .append(" [").append(condition.getOperator()).append("]\n");
-                        }
-                        details.append("\n");
-                    } else {
-                        details.append("【请求条件】匹配所有请求\n\n");
-                    }
-                    
-                    // 注入点
-                    if (config.getInjectionPoints() != null && !config.getInjectionPoints().isEmpty()) {
-                        details.append("【注入点】(共 ").append(config.getInjectionPoints().size()).append(" 个)\n");
-                        for (Configuration.InjectionPoint point : config.getInjectionPoints()) {
-                            details.append("  • ").append(point.getPointType())
-                                   .append(" → ").append(point.getTargetName())
-                                   .append(" (").append(point.getInjectionStrategy()).append(")\n");
-                        }
-                        details.append("\n");
-                    }
-                    
-                    // Payload
-                    if (config.getPayloads() != null && !config.getPayloads().isEmpty()) {
-                        details.append("【Payload】(共 ").append(config.getPayloads().size()).append(" 个)\n");
-                        int count = 0;
-                        for (String payload : config.getPayloads()) {
-                            count++;
-                            if (count <= 5) {
-                                details.append("  ").append(count).append(". ").append(payload).append("\n");
-                            } else if (count == 6) {
-                                details.append("  ... 还有 ").append(config.getPayloads().size() - 5).append(" 个payload\n");
-                                break;
-                            }
-                        }
-                        details.append("\n");
-                    }
-                    
-                    // 响应匹配规则
-                    if (config.getMatchRules() != null && !config.getMatchRules().isEmpty()) {
-                        details.append("【响应匹配规则】\n");
-                        for (Configuration.MatchRule rule : config.getMatchRules()) {
-                            details.append("  • ").append(rule.getLocation())
-                                   .append(" ").append(rule.getMatchType())
-                                   .append(" '").append(rule.getRule()).append("'")
-                                   .append(" [").append(rule.getOperator()).append("]\n");
-                        }
-                        details.append("\n");
                     }
                 }
                 

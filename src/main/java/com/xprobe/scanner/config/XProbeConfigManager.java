@@ -75,7 +75,7 @@ public class XProbeConfigManager {
     }
     
     /**
-     * ✅ 获取配置的副本（与getConfig()相同，保留以兼容旧代码）
+     * 获取配置的副本（与getConfig()相同）
      * 
      * @deprecated 使用 getConfig() 即可，已经返回副本
      */

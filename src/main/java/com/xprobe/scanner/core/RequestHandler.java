@@ -3,19 +3,14 @@ package com.xprobe.scanner.core;
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.handler.*;
 import burp.api.montoya.http.message.requests.HttpRequest;
-import burp.api.montoya.http.message.params.ParsedHttpParameter;
 import com.xprobe.scanner.config.Configuration;
 import com.xprobe.scanner.config.ConfigurationManager;
 import com.xprobe.scanner.config.XProbeConfigManager;
 import com.xprobe.scanner.models.RequestContext;
 import com.xprobe.scanner.models.ScanTask;
 
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * HTTP请求处理器，负责处理Burp拦截的HTTP请求
@@ -105,115 +100,21 @@ public class RequestHandler implements HttpHandler {
     }
     
     /**
-     * 收集所有需要扫描的任务（重载：接受HttpRequest）
-     * ✅ 支持从响应处理器触发被动扫描
+     * 收集所有需要扫描的任务
      */
     private List<ScanTask> collectScanTasks(HttpRequest request, RequestContext context) {
         List<ScanTask> tasks = new ArrayList<>();
         
-        // 获取所有参数
-        List<ParsedHttpParameter> parameters = request.parameters();
-        
-        // 获取Content-Type
-        String contentType = getContentType(request);
-        
         // 遍历所有启用的配置
         for (Configuration config : configManager.getEnabledConfigurations()) {
-            // 检查是否是配对架构
+            // 配对架构：创建一个基于整个请求的扫描任务
             if (config.getPairs() != null && !config.getPairs().isEmpty()) {
-                // 新架构：配对架构
-                // 创建一个基于整个请求的扫描任务
                 ScanTask task = new ScanTask(null, config, request, context);
                 tasks.add(task);
-            } else {
-                // 旧架构：按参数匹配
-                for (ParsedHttpParameter param : parameters) {
-                    if (isParameterMatch(param.name(), config)) {
-                        // 原子性检查并标记为扫描中（避免并发重复扫描）
-                        if (checkAndMarkParameterAsScanning(request, param, config, contentType)) {
-                            continue; // 跳过已扫描或正在扫描的参数
-                        }
-                        
-                        ScanTask task = new ScanTask(param, config, request, context);
-                        tasks.add(task);
-                    }
-                }
             }
         }
         
         return tasks;
-    }
-    
-    /**
-     * 收集所有需要扫描的任务（原版：接受HttpRequestToBeSent）
-     * ✅ 支持新旧两种架构
-     */
-    private List<ScanTask> collectScanTasks(HttpRequestToBeSent request, RequestContext context) {
-        List<ScanTask> tasks = new ArrayList<>();
-        
-        // 获取所有参数
-        List<ParsedHttpParameter> parameters = request.parameters();
-        
-        // 获取Content-Type
-        String contentType = getContentType(request);
-        
-        // 遍历所有启用的配置
-        for (Configuration config : configManager.getEnabledConfigurations()) {
-            // 检查是否是配对架构
-            if (config.getPairs() != null && !config.getPairs().isEmpty()) {
-                // 新架构：配对架构
-                // 创建一个基于整个请求的扫描任务
-                ScanTask task = new ScanTask(null, config, request, context);
-                tasks.add(task);
-            } else {
-                // 旧架构：按参数匹配
-                for (ParsedHttpParameter param : parameters) {
-                    if (isParameterMatch(param.name(), config)) {
-                        // 原子性检查并标记为扫描中（避免并发重复扫描）
-                        if (checkAndMarkParameterAsScanning(request, param, config, contentType)) {
-                            continue; // 跳过已扫描或正在扫描的参数
-                        }
-                        
-                        ScanTask task = new ScanTask(param, config, request, context);
-                        tasks.add(task);
-                    }
-                }
-            }
-        }
-        
-        return tasks;
-    }
-    
-    /**
-     * 获取请求的Content-Type（重载：HttpRequest）
-     */
-    private String getContentType(HttpRequest request) {
-        try {
-            for (var header : request.headers()) {
-                if ("Content-Type".equalsIgnoreCase(header.name())) {
-                    return header.value();
-                }
-            }
-            return "application/x-www-form-urlencoded";
-        } catch (Exception e) {
-            return "application/x-www-form-urlencoded";
-        }
-    }
-    
-    /**
-     * 获取请求的Content-Type（原版：HttpRequestToBeSent）
-     */
-    private String getContentType(HttpRequestToBeSent request) {
-        try {
-            for (var header : request.headers()) {
-                if ("Content-Type".equalsIgnoreCase(header.name())) {
-                    return header.value();
-                }
-            }
-            return "application/x-www-form-urlencoded";
-        } catch (Exception e) {
-            return "application/x-www-form-urlencoded";
-        }
     }
     
     /**
@@ -242,88 +143,4 @@ public class RequestHandler implements HttpHandler {
         }
     }
     
-    /**
-     * 检查并标记参数为扫描中状态（重载：HttpRequest）
-     */
-    private boolean checkAndMarkParameterAsScanning(HttpRequest request, ParsedHttpParameter param, 
-                                            Configuration config, String contentType) {
-        try {
-            String url = request.url();
-            URI uri = new URI(url);
-            String host = uri.getHost();
-            String path = uri.getPath();
-            
-            boolean alreadyProcessed = realtimeScanner.checkAndMarkPassiveScanProcessed(
-                request.method(), 
-                host, 
-                path, 
-                contentType, 
-                param.name(),
-                config);
-            
-            return alreadyProcessed;
-        } catch (URISyntaxException e) {
-            api.logging().raiseErrorEvent("Error parsing URL: " + e.getMessage());
-            return false;
-        }
-    }
-    
-    /**
-     * 检查并标记参数为扫描中状态（原版：HttpRequestToBeSent）
-     * 如果已经扫描过或正在扫描中，返回 true；否则标记为扫描中并返回 false
-     */
-    private boolean checkAndMarkParameterAsScanning(HttpRequestToBeSent request, ParsedHttpParameter param, 
-                                            Configuration config, String contentType) {
-        try {
-            // 从URL中提取host和path
-            String url = request.url();
-            URI uri = new URI(url);
-            String host = uri.getHost();
-            String path = uri.getPath();
-            
-            // ✅ 使用新的去重逻辑：支持颗粒度控制
-            // 使用 DeduplicationKeyGenerator 生成去重key
-            boolean alreadyProcessed = realtimeScanner.checkAndMarkPassiveScanProcessed(
-                request.method(), 
-                host, 
-                path, 
-                contentType, 
-                param.name(),  // targetIdentifier
-                config);       // 传递完整配置，支持颗粒度控制
-            
-            return alreadyProcessed;
-        } catch (URISyntaxException | IllegalArgumentException e) {
-            // 如果检查失败，默认不跳过（继续扫描）
-            api.logging().raiseErrorEvent("检查参数扫描状态时出错: " + e.getMessage());
-            return false;
-        }
-    }
-    
-    /**
-     * 检查参数名是否匹配配置规则
-     */
-    private boolean isParameterMatch(String paramName, Configuration config) {
-        String parameterNameType = config.getParameterNameType();
-        List<String> parameterNames = config.getParameterNames();
-        
-        if ("String Match".equals(parameterNameType)) {
-            // 字符串精确匹配
-            return parameterNames.contains(paramName);
-        } else if ("Regex Match".equals(parameterNameType)) {
-            // 正则表达式匹配
-            for (String regex : parameterNames) {
-                try {
-                    Pattern pattern = Pattern.compile(regex);
-                    Matcher matcher = pattern.matcher(paramName);
-                    if (matcher.matches()) {
-                        return true;
-                    }
-                } catch (Exception e) {
-                    api.logging().raiseErrorEvent("Invalid regex pattern: " + regex);
-                }
-            }
-        }
-        
-        return false;
-    }
 }

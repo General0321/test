@@ -25,7 +25,6 @@ public class RulePersistence {
         this.mapper = new ObjectMapper();
         // 美化输出，便于阅读和编辑
         mapper.enable(SerializationFeature.INDENT_OUTPUT);
-        // 忽略未知属性（向前兼容）
         mapper.configure(
             com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, 
             false
@@ -85,26 +84,9 @@ public class RulePersistence {
             throw new IOException("无法读取规则文件: " + file.getAbsolutePath());
         }
         
-        try {
-            // 尝试加载新格式（带版本信息）
-            RulePackage rulePackage = mapper.readValue(file, RulePackage.class);
-            return rulePackage.getRules() != null ? rulePackage.getRules() : new ArrayList<>();
-        } catch (Exception e) {
-            // 兼容旧格式（直接是规则数组）
-            try {
-                Configuration[] rulesArray = mapper.readValue(file, Configuration[].class);
-                List<Configuration> rules = new ArrayList<>();
-                if (rulesArray != null) {
-                    for (Configuration rule : rulesArray) {
-                        rules.add(rule);
-                    }
-                }
-                return rules;
-            } catch (Exception e2) {
-                // ✅ 修正：使用e2而不是e
-                throw new IOException("规则文件格式错误: " + e2.getMessage(), e2);
-            }
-        }
+        // 加载规则文件（带版本信息）
+        RulePackage rulePackage = mapper.readValue(file, RulePackage.class);
+        return rulePackage.getRules() != null ? rulePackage.getRules() : new ArrayList<>();
     }
     
     /**

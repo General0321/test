@@ -109,6 +109,10 @@ public class CrossPairVariableExtractor {
     /**
      * 替换文本中的变量占位符
      * 
+     * 支持的格式：
+     * - {{PAIR:id:name}} - 从指定Pair获取变量（优先匹配）
+     * - {{VAR:name}} - 从变量映射中获取变量
+     * 
      * @param text 原始文本
      * @param variables 变量映射
      * @return 替换后的文本
@@ -120,11 +124,73 @@ public class CrossPairVariableExtractor {
         
         String result = text;
         
-        // 替换所有 {{VAR:变量名}} 格式的占位符
-        for (Map.Entry<String, String> var : variables.entrySet()) {
-            String placeholder = "{{VAR:" + var.getKey() + "}}";
-            result = result.replace(placeholder, var.getValue());
+        // 1. 优先替换 {{PAIR:id:name}} 格式的占位符
+        Pattern pairPattern = Pattern.compile("\\{\\{PAIR:(\\d+):([^}]+)\\}\\}");
+        Matcher pairMatcher = pairPattern.matcher(result);
+        StringBuffer pairSb = new StringBuffer();
+        while (pairMatcher.find()) {
+            String pairId = pairMatcher.group(1);
+            String varName = pairMatcher.group(2);
+            
+            // 尝试多种key格式
+            String[] keysToTry = {
+                "PAIR:" + pairId + ":" + varName,
+                "PAIR:" + pairId + ":" + varName.toUpperCase(),
+                "PAIR:" + pairId + ":" + varName.toLowerCase()
+            };
+            
+            String replacement = null;
+            for (String key : keysToTry) {
+                if (variables.containsKey(key)) {
+                    replacement = variables.get(key);
+                    break;
+                }
+            }
+            
+            if (replacement != null) {
+                pairMatcher.appendReplacement(pairSb, Matcher.quoteReplacement(replacement));
+            } else {
+                // 如果找不到，保持原始占位符
+                pairMatcher.appendReplacement(pairSb, Matcher.quoteReplacement(pairMatcher.group(0)));
+            }
         }
+        pairMatcher.appendTail(pairSb);
+        result = pairSb.toString();
+        
+        // 2. 替换 {{VAR:变量名}} 格式的占位符
+        Pattern varPattern = Pattern.compile("\\{\\{VAR:([^}]+)\\}\\}");
+        Matcher varMatcher = varPattern.matcher(result);
+        StringBuffer varSb = new StringBuffer();
+        while (varMatcher.find()) {
+            String varName = varMatcher.group(1);
+            
+            // 尝试多种key格式
+            String[] keysToTry = {
+                varName,
+                varName.toUpperCase(),
+                varName.toLowerCase(),
+                "VAR:" + varName,
+                "VAR:" + varName.toUpperCase(),
+                "VAR:" + varName.toLowerCase()
+            };
+            
+            String replacement = null;
+            for (String key : keysToTry) {
+                if (variables.containsKey(key)) {
+                    replacement = variables.get(key);
+                    break;
+                }
+            }
+            
+            if (replacement != null) {
+                varMatcher.appendReplacement(varSb, Matcher.quoteReplacement(replacement));
+            } else {
+                // 如果找不到，保持原始占位符
+                varMatcher.appendReplacement(varSb, Matcher.quoteReplacement(varMatcher.group(0)));
+            }
+        }
+        varMatcher.appendTail(varSb);
+        result = varSb.toString();
         
         return result;
     }
@@ -140,7 +206,8 @@ public class CrossPairVariableExtractor {
             return false;
         }
         
-        return text.contains("{{VAR:") && text.contains("}}");
+        // 检查是否包含 {{VAR:...}} 或 {{PAIR:...}} 格式
+        return (text.contains("{{VAR:") || text.contains("{{PAIR:")) && text.contains("}}");
     }
     
     /**
@@ -156,11 +223,18 @@ public class CrossPairVariableExtractor {
             return varNames;
         }
         
-        Pattern pattern = Pattern.compile("\\{\\{VAR:(\\w+)\\}\\}");
-        Matcher matcher = pattern.matcher(text);
+        // 提取 {{PAIR:id:name}} 格式
+        Pattern pairPattern = Pattern.compile("\\{\\{PAIR:(\\d+):([^}]+)\\}\\}");
+        Matcher pairMatcher = pairPattern.matcher(text);
+        while (pairMatcher.find()) {
+            varNames.add("PAIR:" + pairMatcher.group(1) + ":" + pairMatcher.group(2));
+        }
         
-        while (matcher.find()) {
-            varNames.add(matcher.group(1));
+        // 提取 {{VAR:name}} 格式
+        Pattern varPattern = Pattern.compile("\\{\\{VAR:([^}]+)\\}\\}");
+        Matcher varMatcher = varPattern.matcher(text);
+        while (varMatcher.find()) {
+            varNames.add(varMatcher.group(1));
         }
         
         return varNames;

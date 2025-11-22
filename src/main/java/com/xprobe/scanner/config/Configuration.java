@@ -14,74 +14,17 @@ public class Configuration implements Serializable {  // 定义 Configuration �
     private String description;           // 规则描述
     private boolean enabled;              // 是否启用
     
-    // ========== 旧字段（向后兼容）==========
-    private List<String> parameterNames;  // 参数名列表（兼容模式）
-    private String parameterNameType;     // 参数名类型（兼容模式）
-    private List<String> parameterValues; // 参数值列表（即payload列表）
-    private List<MatchRule> matchRules;   // 匹配规则列表
-    
-    // ========== 新字段（灵活注入系统）==========
-    private List<RequestCondition> requestConditions;  // 请求匹配条件
-    private List<InjectionPoint> injectionPoints;     // 注入点列表
-    private DeduplicationGranularity deduplicationGranularity;  // 去重颗粒度
-    
-    // ========== 配对架构（最新）==========
+    // ========== 配对架构 ==========
     private List<RuleMatchPair> pairs;                // 请求-响应配对列表
     private String pairExpression;                    // 配对间逻辑表达式
+    private DeduplicationGranularity deduplicationGranularity;  // 去重颗粒度
 
 
     // 默认构造函数
     public Configuration() {
         this.ruleId = UUID.randomUUID().toString();
-        this.requestConditions = new ArrayList<>();
-        this.injectionPoints = new ArrayList<>();
-        this.parameterValues = new ArrayList<>();
-        this.matchRules = new ArrayList<>();
         this.pairs = new ArrayList<>();
         this.enabled = true;
-    }
-    
-    // 构造函数，初始化所有属性（兼容旧代码）
-    public Configuration(List<String> parameterNames, String parameterNameType,
-                         List<String> parameterValues, List<MatchRule> matchRules,
-                         String customLabel, boolean enabled) {
-        this.ruleId = UUID.randomUUID().toString();    // 自动生成规则ID
-        this.parameterNames = parameterNames;          // 初始化参数名列表
-        this.parameterNameType = parameterNameType;    // 初始化参数名类型
-        this.parameterValues = parameterValues;        // 初始化参数值列表
-        this.matchRules = matchRules;                  // 初始化匹配规则列表
-        this.customLabel = customLabel;                // 初始化自定义标签
-        this.enabled = enabled;
-        
-        // 初始化新字段
-        this.requestConditions = new ArrayList<>();
-        this.injectionPoints = new ArrayList<>();
-        
-        // 自动从旧配置迁移到新配置
-        migrateToNewFormat();
-    }
-    
-    /**
-     * 将旧格式配置迁移到新格式
-     */
-    private void migrateToNewFormat() {
-        // 如果已有注入点配置，不进行迁移
-        if (injectionPoints != null && !injectionPoints.isEmpty()) {
-            return;
-        }
-        
-        // 从旧的parameterNames迁移到注入点
-        if (parameterNames != null && !parameterNames.isEmpty()) {
-            InjectionPoint point = new InjectionPoint();
-            point.setPointType("Parameter Value");
-            point.setTargetName(String.join(",", parameterNames));
-            point.setInjectionStrategy("Replace");
-            
-            if (injectionPoints == null) {
-                injectionPoints = new ArrayList<>();
-            }
-            injectionPoints.add(point);
-        }
     }
 
     // ========== 规则ID相关方法 ==========
@@ -107,39 +50,6 @@ public class Configuration implements Serializable {  // 定义 Configuration �
         this.ruleId = UUID.randomUUID().toString();
     }
     
-    // ========== 请求条件相关方法 ==========
-    
-    public List<RequestCondition> getRequestConditions() {
-        return requestConditions;
-    }
-    
-    public void setRequestConditions(List<RequestCondition> requestConditions) {
-        this.requestConditions = requestConditions;
-    }
-    
-    // ========== 注入点相关方法 ==========
-    
-    public List<InjectionPoint> getInjectionPoints() {
-        return injectionPoints;
-    }
-    
-    public void setInjectionPoints(List<InjectionPoint> injectionPoints) {
-        this.injectionPoints = injectionPoints;
-    }
-    
-    // ========== Payload相关方法 ==========
-    
-    /**
-     * 获取payload列表（新名称，语义更清晰）
-     */
-    public List<String> getPayloads() {
-        return parameterValues;
-    }
-    
-    public void setPayloads(List<String> payloads) {
-        this.parameterValues = payloads;
-    }
-    
     // ========== 去重颗粒度相关方法 ==========
     
     public DeduplicationGranularity getDeduplicationGranularity() {
@@ -153,76 +63,12 @@ public class Configuration implements Serializable {  // 定义 Configuration �
         this.deduplicationGranularity = granularity;
     }
     
-    // ========== 旧方法（向后兼容）==========
-    
-    public List<String> getParameterNames() {  // 获取参数名列表
-        return parameterNames;
-    }
-
-    public void setParameterNames(List<String> parameterNames) {  // 设置参数名列表
-        this.parameterNames = parameterNames;
-    }
-
-    public String getParameterNameType() {  // 获取参数名类型
-        return parameterNameType;
-    }
-
-    public void setParameterNameType(String parameterNameType) {  // 设置参数名类型
-        this.parameterNameType = parameterNameType;
-    }
-
-    public List<String> getParameterValues() {  // 获取参数值列表
-        return parameterValues;
-    }
-
-    public void setParameterValues(List<String> parameterValues) {  // 设置参数值列表
-        this.parameterValues = parameterValues;
-    }
-
-    public List<MatchRule> getMatchRules() {  // 获取匹配规则列表
-        return matchRules;
-    }
-
-    // 获取规则字符串列表
-    public List<String> getAllMatchRuleStrings() {
-        List<String> ruleStrings = new ArrayList<>();
-        if (matchRules != null) {
-            for (MatchRule matchRule : matchRules) {
-                if (matchRule.getRule() != null) {
-                    ruleStrings.add(matchRule.getRule());
-                }
-            }
-        }
-        return ruleStrings;
-    }
-
-
-    public void setMatchRules(List<MatchRule> matchRules) {  // 设置匹配规则列表
-        this.matchRules = matchRules;
-    }
-
-    public String getCustomLabel() {  // 获取自定义标签
+    public String getCustomLabel() {
         return customLabel;
     }
 
-    public void setCustomLabel(String customLabel) {  // 设置自定义标签
+    public void setCustomLabel(String customLabel) {
         this.customLabel = customLabel;
-    }
-
-    // 获取第一个匹配规则
-    public String getMatchRule() {
-        if (matchRules != null && !matchRules.isEmpty()) {
-            return matchRules.get(0).getRule();  // 假设获取第一个匹配规则
-        }
-        return null;
-    }
-
-    // 获取第一个匹配类型
-    public String getMatchType() {
-        if (matchRules != null && !matchRules.isEmpty()) {
-            return matchRules.get(0).getMatchType();  // 假设获取第一个匹配类型
-        }
-        return null;
     }
 
     public boolean isEnabled() {  // 获取启用状态
@@ -404,8 +250,8 @@ public class Configuration implements Serializable {  // 定义 Configuration �
         
         private String conditionType;     // 条件类型
         private String matchType;         // 匹配类型
-        private String value;             // 匹配值（单行，向后兼容）
-        private List<String> values;      // 匹配值（多行，新增）
+        private String value;             // 匹配值（单行）
+        private List<String> values;      // 匹配值（多行）
         private String operator;          // 逻辑操作符（AND/OR）
         private boolean multiLine = false; // 是否启用多行模式
         
@@ -461,7 +307,7 @@ public class Configuration implements Serializable {  // 定义 Configuration �
         public void setMultiLine(boolean multiLine) { this.multiLine = multiLine; }
         
         /**
-         * 获取所有匹配值（兼容单行和多行）
+         * 获取所有匹配值
          */
         public List<String> getAllValues() {
             if (multiLine && values != null && !values.isEmpty()) {
@@ -488,12 +334,6 @@ public class Configuration implements Serializable {  // 定义 Configuration �
         private String pointType;        // 注入点类型
         private String targetName;       // 目标名称（参数名/Header名等）
         private String description;      // 描述（可选）
-        
-        // ===== 废弃字段（向后兼容）=====
-        @Deprecated
-        private String injectionStrategy;// 注入策略（已废弃，使用payload变量替代）
-        @Deprecated
-        private String marker;           // 标记符（已废弃）
         
         /**
          * 注入点类型:
@@ -530,13 +370,6 @@ public class Configuration implements Serializable {  // 定义 Configuration �
             this.targetName = targetName;
         }
         
-        @Deprecated
-        public InjectionPoint(String pointType, String targetName, String injectionStrategy) {
-            this.pointType = pointType;
-            this.targetName = targetName;
-            this.injectionStrategy = injectionStrategy;
-        }
-        
         // Getters and Setters
         public String getPointType() { return pointType; }
         public void setPointType(String pointType) { this.pointType = pointType; }
@@ -546,23 +379,6 @@ public class Configuration implements Serializable {  // 定义 Configuration �
         
         public String getDescription() { return description; }
         public void setDescription(String description) { this.description = description; }
-        
-        @Deprecated
-        public String getInjectionStrategy() { return injectionStrategy; }
-        @Deprecated
-        public void setInjectionStrategy(String injectionStrategy) { this.injectionStrategy = injectionStrategy; }
-        
-        @Deprecated
-        public String getMarker() { return marker; }
-        @Deprecated
-        public void setMarker(String marker) { this.marker = marker; }
-        
-        /**
-         * 检查是否需要从旧格式迁移
-         */
-        public boolean needsMigration() {
-            return injectionStrategy != null && !injectionStrategy.isEmpty();
-        }
     }
 
     // 内部类 MatchRule，用于存储匹配规则信息

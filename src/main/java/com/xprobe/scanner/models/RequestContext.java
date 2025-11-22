@@ -1,7 +1,5 @@
 package com.xprobe.scanner.models;
 
-import burp.api.montoya.core.ToolType;
-
 /**
  * 请求上下文信息
  */

@@ -1,6 +1,5 @@
 package com.xprobe.scanner.scanners;
 
-import burp.api.montoya.http.message.HttpRequestResponse;
 import com.xprobe.scanner.models.ScanTask;
 import com.xprobe.scanner.models.ScanResult;
 import java.util.List;

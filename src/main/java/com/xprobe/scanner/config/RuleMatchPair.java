@@ -23,7 +23,7 @@ public class RuleMatchPair implements Serializable {
     
     // ========== 高级模式配置（新增）==========
     
-    /** 检测模式（默认：STANDARD标准模式，保持向后兼容） */
+    /** 检测模式（默认：STANDARD标准模式） */
     private PairMode mode = PairMode.STANDARD;
     
     /** 响应对比配置（用于BOOLEAN_COMPARISON和TIME_BASED_VERIFICATION） */
@@ -73,7 +73,6 @@ public class RuleMatchPair implements Serializable {
         this.label = label;
     }
     
-    // ✅ 添加getName()作为getLabel()的别名（向后兼容）
     public String getName() {
         return label;
     }

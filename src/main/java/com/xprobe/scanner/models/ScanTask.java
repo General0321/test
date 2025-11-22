@@ -39,12 +39,11 @@ public class ScanTask {
     }
     
     public String getScanType() {
-        // ✅ 智能判断：配对架构使用UniversalScanner
+        // 配对架构使用UniversalScanner
         if (configuration.getPairs() != null && !configuration.getPairs().isEmpty()) {
             return com.xprobe.scanner.scanners.UniversalScanner.SCANNER_TYPE;
         }
         
-        // 旧架构使用customLabel
         return configuration.getCustomLabel();
     }
 }

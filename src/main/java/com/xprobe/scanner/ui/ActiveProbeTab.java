@@ -549,29 +549,6 @@ public class ActiveProbeTab {
     }
     
     /**
-     * 从Proxy实时流量检查并触发Arjun探测
-     * 
-     * 🔴 优化1：实时监听模式使用 ParameterCollector 中的实时数据
-     */
-    private void checkAndTriggerArjunFromProxy() {
-        try {
-            statusLabel.setText("🔄 从Proxy实时流量触发Arjun探测...");
-            statusLabel.setForeground(new Color(52, 152, 219));
-            
-            // 🔴 调用新方法：使用ParameterCollector中的实时数据
-            activeScanner.getRealtimeScanner().triggerArjunScanFromProxy();
-            
-            statusLabel.setText("✅ Proxy实时流量Arjun探测已触发");
-            statusLabel.setForeground(new Color(46, 204, 113));
-            
-        } catch (Exception e) {
-            statusLabel.setText("❌ Proxy探测触发失败: " + e.getMessage());
-            statusLabel.setForeground(Color.RED);
-            api.logging().raiseErrorEvent("从Proxy触发Arjun失败: " + e.getMessage());
-        }
-    }
-    
-    /**
      * 开始自动刷新（每3秒更新一次收集数据）
      */
     private void startAutoRefresh() {

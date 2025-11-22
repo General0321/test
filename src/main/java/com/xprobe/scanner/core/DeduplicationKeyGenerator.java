@@ -3,7 +3,6 @@ package com.xprobe.scanner.core;
 import com.xprobe.scanner.config.Configuration;
 import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
-import java.util.stream.Collectors;
 
 /**
  * 去重Key生成器
@@ -147,24 +146,14 @@ public class DeduplicationKeyGenerator {
         }
     }
     
-    /**
-     * 向后兼容的方法（不指定targetIdentifier）
-     */
-    public static String generatePassiveScanKey(String method, 
-                                               String host, 
-                                               String path, 
-                                               String contentType, 
-                                               Configuration config) {
-        return generateKey(method, host, path, contentType, config, null, null);
-    }
     
     /**
      * 自动检测去重颗粒度
      */
     private static Configuration.DeduplicationGranularity detectGranularity(Configuration config) {
-        // ✅ 新架构：检查是否有配对
+        // 检查是否有配对
         if (config.getPairs() != null && !config.getPairs().isEmpty()) {
-            // 新架构：检查第一个配对的请求配置
+            // 检查第一个配对的请求配置
             var firstPair = config.getPairs().get(0);
             if (firstPair.getRequestConfig() != null) {
                 var elements = firstPair.getRequestConfig().getElements();
@@ -189,42 +178,8 @@ public class DeduplicationKeyGenerator {
             }
         }
         
-        // ✅ 旧架构：检查注入点
-        java.util.List<Configuration.InjectionPoint> points = config.getInjectionPoints();
-        
-        if (points == null || points.isEmpty()) {
-            return Configuration.DeduplicationGranularity.REQUEST;
-        }
-        
-        // 只有一个注入点
-        if (points.size() == 1) {
-            Configuration.InjectionPoint point = points.get(0);
-            String type = point.getPointType();
-            
-            if (type == null) {
-                return Configuration.DeduplicationGranularity.REQUEST;
-            }
-            
-            switch (type) {
-                case "Parameter Value":
-                case "Request Header Value":
-                case "Cookie Value":
-                    // 这些类型通常需要对每个目标分别扫描
-                    return Configuration.DeduplicationGranularity.PARAMETER;
-                    
-                case "Request Body":
-                case "URL Path":
-                case "Query String":
-                    // 这些类型通常整体替换
-                    return Configuration.DeduplicationGranularity.REQUEST;
-                    
-                default:
-                    return Configuration.DeduplicationGranularity.REQUEST;
-            }
-        }
-        
-        // 多个注入点 → 注入点级别
-        return Configuration.DeduplicationGranularity.INJECTION_POINT;
+        // 默认使用请求级别
+        return Configuration.DeduplicationGranularity.REQUEST;
     }
     
     /**
@@ -237,7 +192,7 @@ public class DeduplicationKeyGenerator {
     private static String generateInjectionPointHash(Configuration config) {
         StringBuilder signature = new StringBuilder();
         
-        // ✅ 新架构：基于配对的注入点
+        // 基于配对的注入点
         if (config.getPairs() != null && !config.getPairs().isEmpty()) {
             for (var pair : config.getPairs()) {
                 if (pair.getRequestConfig() != null) {
@@ -255,21 +210,6 @@ public class DeduplicationKeyGenerator {
                         }
                     }
                 }
-            }
-        }
-        
-        // ✅ 旧架构：基于注入点列表
-        if (signature.length() == 0) {
-            java.util.List<Configuration.InjectionPoint> injectionPoints = config.getInjectionPoints();
-            if (injectionPoints != null && !injectionPoints.isEmpty()) {
-                signature.append(injectionPoints.stream()
-                    .map(point -> String.format("%s:%s:%s",
-                        point.getPointType() != null ? point.getPointType() : "",
-                        point.getTargetName() != null ? point.getTargetName() : "",
-                        point.getInjectionStrategy() != null ? point.getInjectionStrategy() : ""
-                    ))
-                    .collect(Collectors.joining(";"))
-                );
             }
         }
         

@@ -2,7 +2,6 @@ package com.xprobe.scanner.active.arjun.core;
 
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.message.requests.HttpRequest;
-import burp.api.montoya.http.message.responses.HttpResponse;
 import com.xprobe.scanner.active.arjun.http.BurpHttpRequester;
 import com.xprobe.scanner.active.arjun.model.AnomalyResult;
 import com.xprobe.scanner.active.arjun.model.BaselineFactors;

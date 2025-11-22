@@ -36,13 +36,13 @@ public abstract class AbstractScanner implements Scanner {
     
     @Override
     public boolean canScan(ScanTask task) {
-        // ✅ 旧Scanner跳过配对架构的任务（由UniversalScanner处理）
+        // 跳过配对架构的任务（由UniversalScanner处理）
         if (task.getConfiguration().getPairs() != null && 
             !task.getConfiguration().getPairs().isEmpty()) {
             return false;
         }
         
-        // ✅ 检查参数是否为null（旧架构必须有parameter）
+        // 检查参数是否为null
         if (task.getParameter() == null) {
             return false;
         }
@@ -60,8 +60,8 @@ public abstract class AbstractScanner implements Scanner {
             List<ScanResult> results = new ArrayList<>();
             HttpRequest originalRequest = task.getRequest().copyToTempFile();
             
-            // 从配置中获取payload
-            List<String> payloads = task.getConfiguration().getParameterValues();
+            // 从配置中获取payload（配对架构不支持此方法）
+            List<String> payloads = new ArrayList<>();
             for (String payload : payloads) {
                 try {
                     HttpRequest modifiedRequest = buildRequest(originalRequest, task.getParameter(), payload);

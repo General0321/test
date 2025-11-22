@@ -47,8 +47,8 @@ public class ResponseComparisonEngine {
         
         // 2. 对比响应长度
         if (config.isCompareLength()) {
-            int len1 = response1.body().length();
-            int len2 = response2.body().length();
+            int len1 = response1.body() != null ? response1.body().length() : 0;
+            int len2 = response2.body() != null ? response2.body().length() : 0;
             int diff = Math.abs(len1 - len2);
             
             if (diff > config.getLengthDifferenceThreshold()) {
@@ -252,7 +252,7 @@ public class ResponseComparisonEngine {
         
         return String.format("Status=%d, Length=%d, Headers=%d", 
             response.statusCode(),
-            response.body().length(),
+            response.body() != null ? response.body().length() : 0,
             response.headers().size()
         );
     }

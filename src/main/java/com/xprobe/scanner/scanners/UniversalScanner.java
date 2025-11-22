@@ -353,7 +353,8 @@ public class UniversalScanner extends AbstractScanner {
                 if (pair.getExtractVariables() != null && !pair.getExtractVariables().isEmpty()) {
                     java.util.Map<String, String> newVars = CrossPairVariableExtractor.extractVariables(response, pair.getExtractVariables());
                     if (newVars != null && !newVars.isEmpty()) {
-                        accumulatedVars.putAll(newVars);
+                        // ✅ 修复：注册为多种格式，与 registerPayloadVariables 保持一致
+                        registerExtractedVariables(pair.getId(), newVars, accumulatedVars);
                         api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] 提取变量: " + newVars.keySet());
                     }
                 }
@@ -577,40 +578,51 @@ public class UniversalScanner extends AbstractScanner {
                     PairEvaluationResult evalResult = new PairEvaluationResult(false, response, modifiedRequest, responseTime);
                     allEvaluations.add(evalResult);
                     
-                // 评估响应
-                System.out.println("🔍 [批量注入] 开始评估响应，配对ID: " + pair.getId());
-                // ✨ 如果响应配置为空，默认响应匹配通过（用于盲注等场景，只依赖跨Pair对比）
-                boolean responseMatched;
-                if (responseConfig.getElements() == null || responseConfig.getElements().isEmpty()) {
-                    responseMatched = true;  // 响应配置为空，跳过响应匹配
-                    System.out.println("🔍 [批量注入] 响应配置为空，跳过响应匹配");
-                } else {
-                    responseMatched = UnifiedResponseEvaluator.evaluate(
-                        response, responseConfig, payloadContext, responseTime, accumulatedVars
+                    // ✅ 修复：响应评估逻辑移到 try 块内部
+                    // 评估响应
+                    api.logging().raiseDebugEvent("🔍 [批量注入] 开始评估响应，配对ID: " + pair.getId());
+                    // ✨ 如果响应配置为空，默认响应匹配通过（用于盲注等场景，只依赖跨Pair对比）
+                    boolean responseMatched;
+                    if (responseConfig.getElements() == null || responseConfig.getElements().isEmpty()) {
+                        responseMatched = true;  // 响应配置为空，跳过响应匹配
+                        api.logging().raiseDebugEvent("🔍 [批量注入] 响应配置为空，跳过响应匹配");
+                    } else {
+                        responseMatched = UnifiedResponseEvaluator.evaluate(
+                            response, responseConfig, payloadContext, responseTime, accumulatedVars
+                        );
+                        api.logging().raiseDebugEvent("🔍 [批量注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
+                    }
+                    
+                    // ✨ 新增：检查跨Pair特征对比
+                    boolean crossPairMatched = evaluateCrossPairComparison(
+                        pair, response, responseTime, allPairFeatures
                     );
-                    System.out.println("🔍 [批量注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
-                }
-                
-                // ✨ 新增：检查跨Pair特征对比
-                boolean crossPairMatched = evaluateCrossPairComparison(
-                    pair, response, responseTime, allPairFeatures
-                );
-                
-                // 最终匹配结果：响应匹配 AND 跨Pair对比匹配（如果配置了）
-                boolean finalMatched = responseMatched && crossPairMatched;
-                
-                if (finalMatched) {
-                    // ✅ 修复：添加 null 检查，防止 NPE
-                    String payloadDisplay = (resolvedPayload != null && resolvedPayload.length() > 0)
-                        ? resolvedPayload.substring(0, Math.min(50, resolvedPayload.length()))
-                        : "(空payload)";
-                    api.logging().raiseDebugEvent(
-                        "配对 [" + pair.getId() + "] 批量注入匹配: " + 
-                        injectionPoint.getType().getDisplayName() + 
-                        ", Payload: " + payloadDisplay
-                    );
-                    return new PairEvaluationResult(true, response, modifiedRequest, responseTime);
-                }
+                    
+                    // 最终匹配结果：响应匹配 AND 跨Pair对比匹配（如果配置了）
+                    boolean finalMatched = responseMatched && crossPairMatched;
+                    
+                    // ✨ 新增：链式变量提取（extractVariables）- 无论是否匹配都提取
+                    if (pair.getExtractVariables() != null && !pair.getExtractVariables().isEmpty()) {
+                        java.util.Map<String, String> newVars = CrossPairVariableExtractor.extractVariables(response, pair.getExtractVariables());
+                        if (newVars != null && !newVars.isEmpty()) {
+                            // ✅ 修复：注册为多种格式，与 registerPayloadVariables 保持一致
+                            registerExtractedVariables(pair.getId(), newVars, accumulatedVars);
+                            api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] 批量注入提取变量: " + newVars.keySet());
+                        }
+                    }
+                    
+                    if (finalMatched) {
+                        // ✅ 修复：添加 null 检查，防止 NPE
+                        String payloadDisplay = (resolvedPayload != null && resolvedPayload.length() > 0)
+                            ? resolvedPayload.substring(0, Math.min(50, resolvedPayload.length()))
+                            : "(空payload)";
+                        api.logging().raiseDebugEvent(
+                            "配对 [" + pair.getId() + "] 批量注入匹配: " + 
+                            injectionPoint.getType().getDisplayName() + 
+                            ", Payload: " + payloadDisplay
+                        );
+                        return new PairEvaluationResult(true, response, modifiedRequest, responseTime);
+                    }
                     
                 } catch (Exception e) {
                     api.logging().raiseErrorEvent("❌ 批量注入时出错: " + e.getMessage());
@@ -726,18 +738,19 @@ public class UniversalScanner extends AbstractScanner {
                         PairEvaluationResult evalResult = new PairEvaluationResult(false, response, modifiedRequest, responseTime);
                         allEvaluations.add(evalResult);
                         
+                        // ✅ 修复：响应评估逻辑移到 try 块内部
                         // 评估响应
-                        System.out.println("🔍 [逐个注入] 开始评估响应，配对ID: " + pair.getId() + ", 目标: " + target.name);
+                        api.logging().raiseDebugEvent("🔍 [逐个注入] 开始评估响应，配对ID: " + pair.getId() + ", 目标: " + target.name);
                         // ✨ 如果响应配置为空，默认响应匹配通过（用于盲注等场景，只依赖跨Pair对比）
                         boolean responseMatched;
                         if (responseConfig.getElements() == null || responseConfig.getElements().isEmpty()) {
                             responseMatched = true;  // 响应配置为空，跳过响应匹配
-                            System.out.println("🔍 [逐个注入] 响应配置为空，跳过响应匹配");
+                            api.logging().raiseDebugEvent("🔍 [逐个注入] 响应配置为空，跳过响应匹配");
                         } else {
                             responseMatched = UnifiedResponseEvaluator.evaluate(
                                 response, responseConfig, payloadContext, responseTime, accumulatedVars
                             );
-                            System.out.println("🔍 [逐个注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
+                            api.logging().raiseDebugEvent("🔍 [逐个注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
                         }
                         
                         // ✨ 新增：检查跨Pair特征对比
@@ -747,6 +760,16 @@ public class UniversalScanner extends AbstractScanner {
                         
                         // 最终匹配结果：响应匹配 AND 跨Pair对比匹配（如果配置了）
                         boolean finalMatched = responseMatched && crossPairMatched;
+                        
+                        // ✨ 新增：链式变量提取（extractVariables）- 无论是否匹配都提取
+                        if (pair.getExtractVariables() != null && !pair.getExtractVariables().isEmpty()) {
+                            java.util.Map<String, String> newVars = CrossPairVariableExtractor.extractVariables(response, pair.getExtractVariables());
+                            if (newVars != null && !newVars.isEmpty()) {
+                                // ✅ 修复：注册为多种格式，与 registerPayloadVariables 保持一致
+                                registerExtractedVariables(pair.getId(), newVars, accumulatedVars);
+                                api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] 逐个注入提取变量: " + newVars.keySet());
+                            }
+                        }
                         
                         if (finalMatched) {
                             // ✅ 修复：添加 null 检查，防止 NPE
@@ -1402,86 +1425,6 @@ public class UniversalScanner extends AbstractScanner {
     }
     
     /**
-     * 构建扫描结果
-     */
-    private ScanResult buildScanResult(Configuration config, HttpRequest request, 
-                                      Map<Integer, Boolean> pairResults,
-                                      Map<Integer, PairEvaluationResult> pairEvaluations,
-                                      boolean vulnerable) {
-        StringBuilder evidence = new StringBuilder();
-        evidence.append("规则: ").append(config.getCustomLabel()).append("\n");
-        evidence.append("配对匹配结果:\n");
-        
-        // ✅ 查找第一个有响应的评估结果（优先匹配成功的）
-        PairEvaluationResult selectedEvaluation = null;
-        for (Map.Entry<Integer, Boolean> entry : pairResults.entrySet()) {
-            evidence.append("  配对 [").append(entry.getKey()).append("]: ")
-                   .append(entry.getValue() ? "✓ 匹配" : "✗ 不匹配")
-                   .append("\n");
-            
-            // 优先选择匹配成功的评估结果
-            if (selectedEvaluation == null && entry.getValue()) {
-                PairEvaluationResult eval = pairEvaluations.get(entry.getKey());
-                if (eval != null && eval.response != null) {
-                    selectedEvaluation = eval;
-                }
-            }
-        }
-        
-        // 如果没有匹配成功的，选择任意一个有响应的
-        if (selectedEvaluation == null) {
-            selectedEvaluation = pairEvaluations.values().stream()
-                .filter(e -> e.response != null)
-                .findFirst()
-                .orElse(null);
-        }
-        
-        if (config.getPairExpression() != null && !config.getPairExpression().isEmpty()) {
-            evidence.append("配对逻辑: ").append(config.getPairExpression()).append("\n");
-        }
-        
-        // ✅ 构建结果，包含响应对象
-        ScanResult.Builder builder = new ScanResult.Builder()
-            .vulnerable(vulnerable)  // ✅ 使用传入的vulnerable标志
-            .scanType(config.getCustomLabel())
-            .evidence(evidence.toString())
-            .originalRequest(request);
-        
-        // ✅ 如果有评估结果，添加响应信息
-        if (selectedEvaluation != null) {
-            if (selectedEvaluation.response != null) {
-                builder.response(selectedEvaluation.response);
-            }
-            if (selectedEvaluation.modifiedRequest != null) {
-                builder.modifiedRequest(selectedEvaluation.modifiedRequest);
-            }
-            if (selectedEvaluation.responseTime > 0) {
-                builder.responseTime(selectedEvaluation.responseTime);
-            }
-        }
-        
-        return builder.build();
-    }
-    
-    /**
-     * 根据配置确定严重程度
-     */
-    private String determineSeverity(Configuration config) {
-        // 可以根据规则名称或其他信息判断严重程度
-        String label = config.getCustomLabel().toLowerCase();
-        
-        if (label.contains("sql") || label.contains("rce") || label.contains("命令注入")) {
-            return "High";
-        } else if (label.contains("xss") || label.contains("ssrf") || label.contains("xxe")) {
-            return "Medium";
-        } else if (label.contains("信息泄露") || label.contains("disclosure")) {
-            return "Low";
-        }
-        
-        return "Medium";  // 默认
-    }
-    
-    /**
      * ✨ 评估跨Pair特征对比
      * 
      * @param pair 当前Pair配置
@@ -1616,6 +1559,27 @@ public class UniversalScanner extends AbstractScanner {
                 return;
             }
             String normalizedUpper = key.toUpperCase();
+            accumulatedVars.put(normalizedUpper, value);
+            accumulatedVars.put(key, value);
+            accumulatedVars.put("PAIR:" + pairId + ":" + normalizedUpper, value);
+            accumulatedVars.put("PAIR:" + pairId + ":" + key, value);
+        });
+    }
+    
+    /**
+     * ✅ 注册从响应中提取的变量（与 registerPayloadVariables 保持一致的格式）
+     * 确保提取的变量可以通过 {{PAIR:id:name}} 和 {{VAR:name}} 格式访问
+     */
+    private void registerExtractedVariables(int pairId, Map<String, String> extractedVars, Map<String, String> accumulatedVars) {
+        if (extractedVars == null || extractedVars.isEmpty() || accumulatedVars == null) {
+            return;
+        }
+        extractedVars.forEach((key, value) -> {
+            if (key == null || key.isEmpty() || value == null) {
+                return;
+            }
+            String normalizedUpper = key.toUpperCase();
+            // 注册多种格式，与 registerPayloadVariables 保持一致
             accumulatedVars.put(normalizedUpper, value);
             accumulatedVars.put(key, value);
             accumulatedVars.put("PAIR:" + pairId + ":" + normalizedUpper, value);

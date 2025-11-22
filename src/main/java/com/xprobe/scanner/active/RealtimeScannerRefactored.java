@@ -1,10 +1,7 @@
 package com.xprobe.scanner.active;
 
 import burp.api.montoya.MontoyaApi;
-import burp.api.montoya.http.HttpService;
-import burp.api.montoya.http.handler.HttpRequestToBeSent;
 import burp.api.montoya.http.message.requests.HttpRequest;
-import burp.api.montoya.http.message.responses.HttpResponse;
 import burp.api.montoya.http.message.params.HttpParameter;
 import burp.api.montoya.http.message.params.ParsedHttpParameter;
 import burp.api.montoya.sitemap.SiteMap;
@@ -1227,27 +1224,6 @@ public class RealtimeScannerRefactored {
      */
     public void markAsProcessed(String key) {
         passiveScanProcessedKeys.put(key, Boolean.TRUE);
-    }
-    
-    /**
-     * 标准化 Content-Type
-     */
-    private String normalizeContentType(String contentType) {
-        if (contentType == null || contentType.isEmpty()) {
-            return "application/x-www-form-urlencoded";
-        }
-        
-        String lower = contentType.toLowerCase();
-        if (lower.contains("json")) {
-            return "application/json";
-        } else if (lower.contains("xml")) {
-            return "application/xml";
-        } else if (lower.contains("form")) {
-            return "application/x-www-form-urlencoded";
-        } else if (lower.contains("multipart")) {
-            return "multipart/form-data";
-        }
-        return contentType;
     }
     
     // ========== 统计信息 ==========

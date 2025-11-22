@@ -4,14 +4,8 @@ import com.xprobe.scanner.active.ScanResult;
 import com.xprobe.scanner.active.ScanTarget;
 import com.xprobe.scanner.config.ConfigurationManager;
 import com.xprobe.scanner.core.RequestHandler;
-import com.xprobe.scanner.models.ScanTask;
-import com.xprobe.scanner.models.RequestContext;
 import burp.api.montoya.MontoyaApi;
-import burp.api.montoya.http.message.requests.HttpRequest;
-import burp.api.montoya.http.message.params.HttpParameter;
-import burp.api.montoya.http.message.params.HttpParameterType;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
@@ -21,12 +15,10 @@ import java.util.concurrent.CompletableFuture;
 public class ScanResultIntegrator {
     private final MontoyaApi api;
     private final ConfigurationManager configManager;
-    private final RequestHandler requestHandler;
 
     public ScanResultIntegrator(MontoyaApi api, ConfigurationManager configManager, RequestHandler requestHandler) {
         this.api = api;
         this.configManager = configManager;
-        this.requestHandler = requestHandler;
     }
 
     /**
@@ -56,17 +48,23 @@ public class ScanResultIntegrator {
 
     /**
      * 检查参数是否匹配配置
+     * 配对架构：检查请求配置中是否有匹配的参数
      */
     private boolean isParameterMatch(String parameter, com.xprobe.scanner.config.Configuration config) {
-        return config.getParameterNames().stream()
-            .anyMatch(paramName -> {
-                if ("String Match".equals(config.getParameterNameType())) {
-                    return paramName.equals(parameter);
-                } else if ("Regex Match".equals(config.getParameterNameType())) {
-                    return parameter.matches(paramName);
+        // 配对架构：检查所有配对的请求配置
+        if (config.getPairs() != null && !config.getPairs().isEmpty()) {
+            for (var pair : config.getPairs()) {
+                if (pair.getRequestConfig() != null && pair.getRequestConfig().getElements() != null) {
+                    for (var element : pair.getRequestConfig().getElements()) {
+                        if (element.getType() == com.xprobe.scanner.config.UnifiedHttpConfig.ElementType.PARAMETER &&
+                            element.getName() != null && element.getName().equals(parameter)) {
+                            return true;
+                        }
+                    }
                 }
-                return false;
-            });
+            }
+        }
+        return false;
     }
 
     /**
@@ -74,33 +72,9 @@ public class ScanResultIntegrator {
      */
     private void createPassiveScanTasks(ScanResult result) {
         try {
-            // 创建HTTP请求
-            HttpRequest request = HttpRequest.httpRequestFromUrl(result.getEndpoint());
-            
-            // 创建请求上下文
-            RequestContext context = new RequestContext(
-                "ACTIVE_SCAN", 
-                request.method(), 
-                request.url(), 
-                request.toString().hashCode()
-            );
-            
             // 为每个匹配的配置创建扫描任务
-            for (com.xprobe.scanner.config.Configuration config : configManager.getEnabledConfigurations()) {
-                if (isParameterMatch(result.getParameter(), config)) {
-                    // 创建参数
-                    HttpParameter parameter = HttpParameter.parameter(
-                        result.getParameter(), 
-                        "test", 
-                        HttpParameterType.URL
-                    );
-                    
-                    // 转换为ParsedHttpParameter
-                    var parsedParam = request.parameters().stream()
-                        .filter(p -> p.name().equals(result.getParameter()))
-                        .findFirst()
-                        .orElse(null);
-                    
+            for (com.xprobe.scanner.config.Configuration ignored : configManager.getEnabledConfigurations()) {
+                if (isParameterMatch(result.getParameter(), ignored)) {
                     // 异步执行扫描
                     CompletableFuture.runAsync(() -> {
                         try {
@@ -132,16 +106,9 @@ public class ScanResultIntegrator {
      */
     public void createPassiveScanTasksFromTarget(ScanTarget target) {
         try {
-            HttpRequest request = HttpRequest.httpRequestFromUrl(target.getUrl());
-            RequestContext context = new RequestContext(
-                "ACTIVE_SCAN", 
-                request.method(), 
-                request.url(), 
-                request.toString().hashCode()
-            );
-            
             // 为所有启用的配置创建扫描任务
-            for (com.xprobe.scanner.config.Configuration config : configManager.getEnabledConfigurations()) {
+            int configCount = configManager.getEnabledConfigurations().size();
+            for (int i = 0; i < configCount; i++) {
                 // 这里可以添加更复杂的逻辑来确定哪些参数应该被扫描
                 // 暂时为每个配置创建一个通用的扫描任务
                 CompletableFuture.runAsync(() -> {

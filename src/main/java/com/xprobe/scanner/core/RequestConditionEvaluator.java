@@ -14,7 +14,7 @@ public class RequestConditionEvaluator {
     
     /**
      * 评估请求是否匹配条件表达式
-     * 优先使用表达式，如果没有表达式则使用简单链式逻辑（向后兼容）
+     * 优先使用表达式，如果没有表达式则使用简单链式逻辑
      */
     public static boolean evaluate(HttpRequest request, 
                                    List<Configuration.RequestCondition> conditions,
@@ -24,12 +24,12 @@ public class RequestConditionEvaluator {
             return expression.evaluate(request);
         }
         
-        // 向后兼容：使用简单链式逻辑
+        // 使用简单链式逻辑
         return evaluateSimple(request, conditions);
     }
     
     /**
-     * 评估请求是否匹配所有条件（简单链式逻辑，向后兼容）
+     * 评估请求是否匹配所有条件（简单链式逻辑）
      */
     public static boolean evaluate(HttpRequest request, 
                                    List<Configuration.RequestCondition> conditions) {

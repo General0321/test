@@ -186,7 +186,7 @@ public abstract class ConditionExpression implements Serializable {
      */
     public static class Builder {
         /**
-         * 从条件列表创建简单的AND链式表达式（向后兼容）
+         * 从条件列表创建简单的AND链式表达式
          */
         public static ConditionExpression fromSimpleConditions(
                 List<Configuration.RequestCondition> conditions) {

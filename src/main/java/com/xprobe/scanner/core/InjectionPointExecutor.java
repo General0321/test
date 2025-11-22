@@ -4,7 +4,6 @@ import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.params.HttpParameter;
 import burp.api.montoya.http.message.params.HttpParameterType;
 import com.xprobe.scanner.config.Configuration;
-import java.util.List;
 
 /**
  * 注入点执行器（简化版）
