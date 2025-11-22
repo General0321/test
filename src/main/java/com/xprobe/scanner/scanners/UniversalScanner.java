@@ -217,6 +217,8 @@ public class UniversalScanner extends AbstractScanner {
             
             // ✅ 为所有发送的请求创建结果条目
             if (!allEvaluations.isEmpty()) {
+                api.logging().raiseDebugEvent("🔍 [扫描结果] 共 " + allEvaluations.size() + " 个评估结果，最终结果: " + finalResult);
+                
                 // 第一个结果作为主结果
                 PairEvaluationResult firstEval = allEvaluations.get(0);
                 ScanResult mainResult = new ScanResult.Builder()
@@ -250,6 +252,8 @@ public class UniversalScanner extends AbstractScanner {
                         .build();
                     results.add(additionalResult);
                 }
+            } else {
+                api.logging().raiseDebugEvent("⚠️ [扫描结果] 规则 " + config.getCustomLabel() + " 没有产生任何评估结果（allEvaluations为空）");
             }
             
             return results;
@@ -369,13 +373,13 @@ public class UniversalScanner extends AbstractScanner {
                 
                 if (finalMatched) {
                     api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] 被动检测成功");
-                    // ✅ 更新matched状态
+                    // ✅ 更新matched状态并返回已添加到allEvaluations的对象
                     passiveResult.matched = true;
-                    return new PairEvaluationResult(true, response, originalRequest, responseTime);
+                    return passiveResult;
                 }
                 
-                // 即使不匹配，也返回包含响应的结果
-                return new PairEvaluationResult(false, response, originalRequest, responseTime);
+                // 即使不匹配，也返回已添加到allEvaluations的对象
+                return passiveResult;
                 
             } catch (Exception e) {
                 api.logging().raiseErrorEvent("❌ 被动检测时发送请求失败: " + e.getMessage());
@@ -631,7 +635,9 @@ public class UniversalScanner extends AbstractScanner {
                             injectionPoint.getType().getDisplayName() + 
                             ", Payload: " + payloadDisplay
                         );
-                        return new PairEvaluationResult(true, response, modifiedRequest, responseTime);
+                        // ✅ 修复：更新已添加到allEvaluations的对象状态，并返回它
+                        evalResult.matched = true;
+                        return evalResult;
                     }
                     
                 } catch (Exception e) {
@@ -642,7 +648,16 @@ public class UniversalScanner extends AbstractScanner {
         }
         
         // ✅ 即使没有匹配，也返回最后一个响应（确保请求被记录）
+        // 注意：lastResponse对应的evalResult已经在循环中添加到allEvaluations了
         if (lastResponse != null) {
+            // 查找最后一个添加到allEvaluations的结果并返回
+            if (!allEvaluations.isEmpty()) {
+                PairEvaluationResult lastEval = allEvaluations.get(allEvaluations.size() - 1);
+                if (lastEval.response == lastResponse) {
+                    return lastEval;
+                }
+            }
+            // 如果找不到，创建新对象（这种情况不应该发生）
             return new PairEvaluationResult(false, lastResponse, lastModifiedRequest, lastResponseTime);
         }
         
@@ -796,7 +811,9 @@ public class UniversalScanner extends AbstractScanner {
                                 injectionPoint.getType().getDisplayName() + 
                                 " [" + target.name + "], Payload: " + payloadDisplay
                             );
-                            return new PairEvaluationResult(true, response, modifiedRequest, responseTime);
+                            // ✅ 修复：更新已添加到allEvaluations的对象状态，并返回它
+                            evalResult.matched = true;
+                            return evalResult;
                         }
                         
                     } catch (Exception e) {
@@ -806,7 +823,16 @@ public class UniversalScanner extends AbstractScanner {
         }
         
         // ✅ 即使没有匹配，也返回最后一个响应（确保请求被记录）
+        // 注意：lastResponse对应的evalResult已经在循环中添加到allEvaluations了
         if (lastResponse != null) {
+            // 查找最后一个添加到allEvaluations的结果并返回
+            if (!allEvaluations.isEmpty()) {
+                PairEvaluationResult lastEval = allEvaluations.get(allEvaluations.size() - 1);
+                if (lastEval.response == lastResponse) {
+                    return lastEval;
+                }
+            }
+            // 如果找不到，创建新对象（这种情况不应该发生）
             return new PairEvaluationResult(false, lastResponse, lastModifiedRequest, lastResponseTime);
         }
         
