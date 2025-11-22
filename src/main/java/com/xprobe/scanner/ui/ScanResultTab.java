@@ -7,11 +7,9 @@ import com.xprobe.scanner.Logs.LogModel;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
-import javax.swing.border.TitledBorder;
 import javax.swing.table.TableRowSorter;
 import java.awt.*;
 import java.io.File;
-import java.io.FileWriter;
 import java.io.PrintWriter;
 
 import static burp.api.montoya.ui.editor.EditorOptions.READ_ONLY;
@@ -28,14 +26,16 @@ public class ScanResultTab {
     
     // UI组件
     private JTable resultTable;
-    private JTextField searchField;
+    private JTextField searchField;  // 搜索框
     private JComboBox<String> filterComboBox;
-    private JComboBox<String> vulnerableFilterComboBox;  // ✅ 新增：命中规则过滤
+    private JComboBox<String> vulnerableFilterComboBox;  // 命中规则过滤
     private TableRowSorter<LogModel> sorter;
     
-    // 统计标签
-    private JLabel totalCountLabel;
-    private JLabel filteredCountLabel;
+    // 统计标签（使用组合面板：文字 + 带颜色的数字）
+    private JPanel totalCountPanel;
+    private JLabel totalCountNumberLabel;  // 数字部分（浅蓝色）
+    private JPanel filteredCountPanel;
+    private JLabel filteredCountNumberLabel;  // 数字部分（浅绿色）
     private JLabel methodStatsLabel;
     
     // 编辑器
@@ -79,24 +79,15 @@ public class ScanResultTab {
                 super.changeSelection(rowIndex, columnIndex, toggle, extend);
             }
             
-            // ✅ 高亮显示命中规则的行
+            // ✅ 使用默认样式（去掉颜色高亮）
             @Override
             public Component prepareRenderer(javax.swing.table.TableCellRenderer renderer, int row, int column) {
                 Component c = super.prepareRenderer(renderer, row, column);
                 
                 if (!isRowSelected(row)) {
-                    int modelRow = convertRowIndexToModel(row);
-                    LogModel.LogEntry entry = logModel.get(modelRow);
-                    
-                    if (entry.isVulnerable()) {
-                        // 命中规则：高亮显示（浅红色背景）
-                        c.setBackground(new Color(255, 230, 230));
-                        c.setForeground(new Color(200, 0, 0));
-                    } else {
-                        // 未命中：正常显示
-                        c.setBackground(Color.WHITE);
-                        c.setForeground(Color.BLACK);
-                    }
+                    // 未选中行：使用默认白色背景
+                    c.setBackground(Color.WHITE);
+                    c.setForeground(Color.BLACK);
                 } else {
                     // 选中行：使用默认选中颜色
                     c.setBackground(getSelectionBackground());
@@ -110,34 +101,65 @@ public class ScanResultTab {
         resultTable.setAutoCreateRowSorter(true);
         resultTable.setRowHeight(22);
         resultTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        resultTable.getTableHeader().setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+        // ✅ 使用普通字体，不使用粗体（Burp Suite风格）
+        resultTable.getTableHeader().setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
         
         // 设置表格排序器
         sorter = new TableRowSorter<>(logModel);
         resultTable.setRowSorter(sorter);
         
+        // ✅ 设置列宽（URL列要相对长）
+        javax.swing.table.TableColumnModel columnModel = resultTable.getColumnModel();
+        // #: 50, 来源: 80, Method: 80, URL: 400（更宽）, 响应码: 80, 响应长度: 100, 响应时间: 100, 命中规则: 150
+        if (columnModel.getColumnCount() >= 8) {
+            columnModel.getColumn(0).setPreferredWidth(50);   // #
+            columnModel.getColumn(1).setPreferredWidth(80);   // 来源
+            columnModel.getColumn(2).setPreferredWidth(80);   // Method
+            columnModel.getColumn(3).setPreferredWidth(400);  // URL (更宽)
+            columnModel.getColumn(4).setPreferredWidth(80);   // 响应码
+            columnModel.getColumn(5).setPreferredWidth(100);  // 响应长度
+            columnModel.getColumn(6).setPreferredWidth(100);  // 响应时间
+            columnModel.getColumn(7).setPreferredWidth(150);  // 命中规则
+        }
+        
         // 搜索框
-        searchField = new JTextField(30);
+        searchField = new JTextField(20);
         searchField.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
         
-        // 过滤下拉框
+        // 过滤下拉框（匹配图片中的"全部"）
         filterComboBox = new JComboBox<>(new String[]{
             "全部", "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"
         });
         
-        // ✅ 新增：命中规则过滤下拉框（初始只有"全部流量"和"所有命中"）
+        // 命中规则过滤下拉框（匹配图片中的"全部流量"）
         vulnerableFilterComboBox = new JComboBox<>(new String[]{
             "全部流量", "所有命中"
         });
         
-        // 统计标签
-        totalCountLabel = new JLabel("总计: 0");
-        filteredCountLabel = new JLabel("显示: 0");
-        methodStatsLabel = new JLabel("");
+        // ✅ 统计标签（使用组合面板：文字 + 带颜色的数字）
+        Font statsFont = new Font(Font.SANS_SERIF, Font.PLAIN, 12);
         
-        Font statsFont = new Font(Font.SANS_SERIF, Font.BOLD, 12);
-        totalCountLabel.setFont(statsFont);
-        filteredCountLabel.setFont(statsFont);
+        // 总计：文字 + 数字（浅蓝色）
+        totalCountPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        JLabel totalTextLabel = new JLabel("总计: ");
+        totalTextLabel.setFont(statsFont);
+        totalCountNumberLabel = new JLabel("0");
+        totalCountNumberLabel.setFont(statsFont);
+        totalCountNumberLabel.setForeground(new Color(0x5DADE2));  // 浅蓝色
+        totalCountPanel.add(totalTextLabel);
+        totalCountPanel.add(totalCountNumberLabel);
+        
+        // 显示：文字 + 数字（浅绿色）
+        filteredCountPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        JLabel filteredTextLabel = new JLabel("显示: ");
+        filteredTextLabel.setFont(statsFont);
+        filteredCountNumberLabel = new JLabel("0");
+        filteredCountNumberLabel.setFont(statsFont);
+        filteredCountNumberLabel.setForeground(new Color(0x58D68D));  // 浅绿色
+        filteredCountPanel.add(filteredTextLabel);
+        filteredCountPanel.add(filteredCountNumberLabel);
+        
+        methodStatsLabel = new JLabel("");
         methodStatsLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
     }
     
@@ -150,13 +172,6 @@ public class ScanResultTab {
         
         // 表格滚动面板
         JScrollPane tableScrollPane = new JScrollPane(resultTable);
-        tableScrollPane.setBorder(new TitledBorder(
-            BorderFactory.createLineBorder(new Color(52, 152, 219), 2),
-            "📊 扫描结果列表",
-            TitledBorder.LEFT,
-            TitledBorder.TOP,
-            new Font(Font.SANS_SERIF, Font.BOLD, 13)
-        ));
         // ✅ BLIT滚动优化（像Burp一样丝滑）
         tableScrollPane.getVerticalScrollBar().setUnitIncrement(16);
         tableScrollPane.getViewport().setScrollMode(JViewport.BLIT_SCROLL_MODE);
@@ -173,74 +188,59 @@ public class ScanResultTab {
     }
     
     private JPanel createTopPanel() {
+        // 顶部控制面板：左侧、中间、右侧三部分
         JPanel topPanel = new JPanel(new BorderLayout(10, 5));
-        topPanel.setBorder(new EmptyBorder(10, 10, 5, 10));
+        topPanel.setBorder(new EmptyBorder(5, 10, 5, 10));
         
-        // 左侧：搜索和过滤
-        JPanel leftPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
+        // 左侧：搜索图标、搜索框、过滤下拉框和清除按钮
+        JPanel leftPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         
-        leftPanel.add(new JLabel("🔍 搜索:"));
+        // 🔍 搜索图标（最左上角）
+        JLabel searchIcon = new JLabel("🔍");
+        searchIcon.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 16));
+        leftPanel.add(searchIcon);
         leftPanel.add(searchField);
         
-        leftPanel.add(Box.createHorizontalStrut(10));
-        leftPanel.add(new JLabel("📋 方法:"));
+        leftPanel.add(Box.createHorizontalStrut(5));
         leftPanel.add(filterComboBox);
-        
-        // ✅ 新增：命中规则过滤
-        leftPanel.add(Box.createHorizontalStrut(10));
-        leftPanel.add(new JLabel("🎯 筛选:"));
         leftPanel.add(vulnerableFilterComboBox);
-        
-        JButton clearFilterButton = new JButton("清除过滤");
+        JButton clearFilterButton = new JButton("清除");
         clearFilterButton.addActionListener(e -> clearFilters());
         leftPanel.add(clearFilterButton);
         
         // 右侧：操作按钮
-        JPanel rightPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
-        
-        JButton refreshButton = new JButton("🔄 刷新");
-        JButton exportButton = new JButton("📤 导出");
-        JButton clearButton = new JButton("🗑️ 清空结果");
-        JButton clearCacheButton = new JButton("🧹 清空扫描缓存");  // ✅ 清空被动扫描缓存
-        
+        JPanel rightPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
+        JButton refreshButton = new JButton("刷新");
+        JButton exportButton = new JButton("导出");
+        JButton clearButton = new JButton("清空结果");
+        JButton clearCacheButton = new JButton("清空扫描缓存");
         refreshButton.addActionListener(e -> refreshTable());
         exportButton.addActionListener(e -> exportResults());
         clearButton.addActionListener(e -> clearResults());
-        clearCacheButton.addActionListener(e -> clearPassiveScanCache());  // ✅ 清空被动扫描缓存
-        
+        clearCacheButton.addActionListener(e -> clearPassiveScanCache());
         rightPanel.add(refreshButton);
         rightPanel.add(exportButton);
         rightPanel.add(clearButton);
-        rightPanel.add(clearCacheButton);  // ✅ 添加清空缓存按钮
+        rightPanel.add(clearCacheButton);
         
         // 中间：统计信息
-        JPanel statsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 20, 0));
-        statsPanel.add(totalCountLabel);
+        JPanel statsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 0));
+        statsPanel.add(totalCountPanel);
         statsPanel.add(new JLabel("|"));
-        statsPanel.add(filteredCountLabel);
+        statsPanel.add(filteredCountPanel);
         statsPanel.add(new JLabel("|"));
         statsPanel.add(methodStatsLabel);
         
-        // 组合面板
-        JPanel controlPanel = new JPanel(new BorderLayout());
-        controlPanel.add(leftPanel, BorderLayout.WEST);
-        controlPanel.add(statsPanel, BorderLayout.CENTER);
-        controlPanel.add(rightPanel, BorderLayout.EAST);
-        
-        topPanel.add(controlPanel, BorderLayout.CENTER);
+        // 组合：左侧 | 中间（统计） | 右侧
+        topPanel.add(leftPanel, BorderLayout.WEST);
+        topPanel.add(statsPanel, BorderLayout.CENTER);
+        topPanel.add(rightPanel, BorderLayout.EAST);
         
         return topPanel;
     }
     
     private JPanel createEditorPanel() {
         JPanel editorPanel = new JPanel(new BorderLayout());
-        editorPanel.setBorder(new TitledBorder(
-            BorderFactory.createLineBorder(new Color(46, 204, 113), 2),
-            "📝 请求/响应详情",
-            TitledBorder.LEFT,
-            TitledBorder.TOP,
-            new Font(Font.SANS_SERIF, Font.BOLD, 13)
-        ));
         
         // 选项卡
         JTabbedPane tabs = new JTabbedPane();
@@ -261,8 +261,8 @@ public class ScanResultTab {
         );
         modifiedRequestResponse.setResizeWeight(0.5);
         
-        tabs.addTab("📨 原始请求/响应", originalRequestResponse);
-        tabs.addTab("🔧 修改后请求/响应", modifiedRequestResponse);
+        tabs.addTab("原始请求/响应", originalRequestResponse);
+        tabs.addTab("修改后请求/响应", modifiedRequestResponse);
         
         editorPanel.add(tabs, BorderLayout.CENTER);
         
@@ -284,7 +284,7 @@ public class ScanResultTab {
         // 方法过滤下拉框
         filterComboBox.addActionListener(e -> applyFilters());
         
-        // ✅ 命中规则过滤下拉框
+        // 命中规则过滤下拉框
         vulnerableFilterComboBox.addActionListener(e -> applyFilters());
         
         // ✅ 初始化节流定时器（每2秒最多更新一次规则筛选选项）
@@ -338,7 +338,7 @@ public class ScanResultTab {
         String methodFilter = (String) filterComboBox.getSelectedItem();
         String vulnerableFilter = (String) vulnerableFilterComboBox.getSelectedItem();
         
-        // ✅ 安全检查：避免在更新下拉框时触发过滤
+        // 安全检查：避免在更新下拉框时触发过滤
         if (vulnerableFilter == null) {
             return;
         }
@@ -358,7 +358,7 @@ public class ScanResultTab {
                 filters.add(RowFilter.regexFilter(methodFilter, 2)); // 第2列是Method
             }
             
-            // ✅ 命中规则过滤
+            // 命中规则过滤
             if (!"全部流量".equals(vulnerableFilter)) {
                 filters.add(new RowFilter<LogModel, Object>() {
                     @Override
@@ -393,7 +393,7 @@ public class ScanResultTab {
     private void clearFilters() {
         searchField.setText("");
         filterComboBox.setSelectedIndex(0);
-        vulnerableFilterComboBox.setSelectedIndex(0);  // ✅ 重置命中规则过滤
+        vulnerableFilterComboBox.setSelectedIndex(0);
         sorter.setRowFilter(null);
         updateStatistics();
     }
@@ -411,28 +411,46 @@ public class ScanResultTab {
         
         if (fileChooser.showSaveDialog(mainSplitPane) == JFileChooser.APPROVE_OPTION) {
             File file = fileChooser.getSelectedFile();
-            try (PrintWriter writer = new PrintWriter(new FileWriter(file))) {
-                // 写入CSV头
-                writer.println("ID,来源,Method,URL,响应码,响应长度,响应时间");
+            try (java.io.OutputStreamWriter osw = new java.io.OutputStreamWriter(
+                    new java.io.FileOutputStream(file), 
+                    java.nio.charset.StandardCharsets.UTF_8);
+                 java.io.BufferedWriter bw = new java.io.BufferedWriter(osw);
+                 PrintWriter writer = new PrintWriter(bw)) {
                 
-                // 写入数据
-                for (int i = 0; i < logModel.getRowCount(); i++) {
-                    writer.printf("%s,%s,%s,%s,%s,%s,%s%n",
-                        logModel.getValueAt(i, 0),
-                        logModel.getValueAt(i, 1),
-                        logModel.getValueAt(i, 2),
-                        logModel.getValueAt(i, 3),
-                        logModel.getValueAt(i, 4),
-                        logModel.getValueAt(i, 5),
-                        logModel.getValueAt(i, 6)
+                // ✅ 写入UTF-8 BOM（可选，有助于Excel等软件识别UTF-8编码）
+                writer.write('\ufeff');
+                
+                // 写入CSV头（包含所有列）
+                writer.println("ID,来源,Method,URL,响应码,响应长度,响应时间,命中规则");
+                
+                // ✅ 导出当前表格中显示的数据（过滤后的结果）
+                int visibleRowCount = resultTable.getRowCount();
+                for (int i = 0; i < visibleRowCount; i++) {
+                    // 将视图行索引转换为模型行索引
+                    int modelRow = resultTable.convertRowIndexToModel(i);
+                    
+                    // 获取数据（包括所有8列）
+                    writer.printf("%s,%s,%s,%s,%s,%s,%s,%s%n",
+                        escapeCsvValue(logModel.getValueAt(modelRow, 0)),
+                        escapeCsvValue(logModel.getValueAt(modelRow, 1)),
+                        escapeCsvValue(logModel.getValueAt(modelRow, 2)),
+                        escapeCsvValue(logModel.getValueAt(modelRow, 3)),
+                        escapeCsvValue(logModel.getValueAt(modelRow, 4)),
+                        escapeCsvValue(logModel.getValueAt(modelRow, 5)),
+                        escapeCsvValue(logModel.getValueAt(modelRow, 6)),
+                        escapeCsvValue(logModel.getValueAt(modelRow, 7))  // 命中规则
                     );
                 }
                 
                 JOptionPane.showMessageDialog(mainSplitPane, 
-                    "扫描结果已成功导出到: " + file.getAbsolutePath(), 
+                    String.format("扫描结果已成功导出到: %s\n\n导出 %d 条记录（当前表格显示的数据）", 
+                        file.getAbsolutePath(), visibleRowCount), 
                     "导出成功", 
                     JOptionPane.INFORMATION_MESSAGE);
-                api.logging().raiseInfoEvent("扫描结果已导出到: " + file.getAbsolutePath());
+                api.logging().raiseInfoEvent(String.format(
+                    "扫描结果已导出到: %s (共 %d 条记录)", 
+                    file.getAbsolutePath(), visibleRowCount
+                ));
                 
             } catch (Exception e) {
                 JOptionPane.showMessageDialog(mainSplitPane, 
@@ -442,6 +460,21 @@ public class ScanResultTab {
                 api.logging().raiseErrorEvent("导出扫描结果失败: " + e.getMessage());
             }
         }
+    }
+    
+    /**
+     * ✅ CSV值转义（处理包含逗号、引号、换行符的值）
+     */
+    private String escapeCsvValue(Object value) {
+        if (value == null) {
+            return "";
+        }
+        String str = value.toString();
+        // 如果包含逗号、引号或换行符，需要用引号包裹并转义引号
+        if (str.contains(",") || str.contains("\"") || str.contains("\n") || str.contains("\r")) {
+            return "\"" + str.replace("\"", "\"\"") + "\"";
+        }
+        return str;
     }
     
     private void clearResults() {
@@ -530,8 +563,9 @@ public class ScanResultTab {
         int total = logModel.getRowCount();
         int filtered = resultTable.getRowCount();
         
-        totalCountLabel.setText(String.format("总计: %d", total));
-        filteredCountLabel.setText(String.format("显示: %d", filtered));
+        // ✅ 更新数字部分（颜色已在初始化时设置）
+        totalCountNumberLabel.setText(String.valueOf(total));
+        filteredCountNumberLabel.setText(String.valueOf(filtered));
         
         // 统计各种方法的数量
         java.util.Map<String, Integer> methodCounts = new java.util.HashMap<>();
@@ -549,11 +583,7 @@ public class ScanResultTab {
         
         methodStatsLabel.setText(stats.length() > 0 ? stats.toString() : "无数据");
         
-        // 更新颜色
-        totalCountLabel.setForeground(new Color(52, 152, 219));
-        filteredCountLabel.setForeground(
-            filtered < total ? new Color(241, 196, 15) : new Color(46, 204, 113)
-        );
+        // ✅ 去掉颜色设置，使用默认颜色
     }
     
     /**
