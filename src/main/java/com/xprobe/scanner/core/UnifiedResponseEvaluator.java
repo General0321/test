@@ -29,7 +29,8 @@ public class UnifiedResponseEvaluator {
     public static boolean evaluate(HttpResponse response, 
                                    UnifiedResponseConfig config,
                                    PayloadContext payloadContext,
-                                   long responseTime) {
+                                   long responseTime,
+                                   Map<String, String> sharedVariables) {
         if (config == null || config.getElements() == null || config.getElements().isEmpty()) {
             return false;
         }
@@ -37,7 +38,7 @@ public class UnifiedResponseEvaluator {
         // 评估每个元素
         Map<Integer, Boolean> elementResults = new HashMap<>();
         for (ResponseElementConfig element : config.getElements()) {
-            boolean result = evaluateElement(response, element, payloadContext, responseTime);
+            boolean result = evaluateElement(response, element, payloadContext, responseTime, sharedVariables);
             elementResults.put(element.getId(), result);
         }
         
@@ -58,7 +59,8 @@ public class UnifiedResponseEvaluator {
     private static boolean evaluateElement(HttpResponse response,
                                           ResponseElementConfig element,
                                           PayloadContext payloadContext,
-                                          long responseTime) {
+                                          long responseTime,
+                                          Map<String, String> sharedVariables) {
         if (element == null || element.getMatchConfig() == null) {
             return false;
         }
@@ -68,13 +70,13 @@ public class UnifiedResponseEvaluator {
         
         switch (type) {
             case STATUS_CODE:
-                return evaluateStatusCode(response, matchConfig);
+                return evaluateStatusCode(response, matchConfig, payloadContext, sharedVariables);
                 
             case RESPONSE_HEADERS:
-                return evaluateHeaders(response, matchConfig);
+                return evaluateHeaders(response, matchConfig, payloadContext, sharedVariables);
                 
             case RESPONSE_BODY:
-                return evaluateBody(response, matchConfig);
+                return evaluateBody(response, matchConfig, payloadContext, sharedVariables);
                 
             case RESPONSE_TIME:
                 return evaluateTime(responseTime, matchConfig);
@@ -93,17 +95,21 @@ public class UnifiedResponseEvaluator {
     /**
      * 评估状态码
      */
-    private static boolean evaluateStatusCode(HttpResponse response, MatchConfig config) {
+    private static boolean evaluateStatusCode(HttpResponse response, MatchConfig config,
+                                              PayloadContext payloadContext,
+                                              Map<String, String> sharedVariables) {
         if (response == null) return false;
         
         String statusCode = String.valueOf(response.statusCode());
-        return matchTextValues(statusCode, config);
+        return matchTextValues(statusCode, config, payloadContext, sharedVariables);
     }
     
     /**
      * 评估响应头
      */
-    private static boolean evaluateHeaders(HttpResponse response, MatchConfig config) {
+    private static boolean evaluateHeaders(HttpResponse response, MatchConfig config,
+                                           PayloadContext payloadContext,
+                                           Map<String, String> sharedVariables) {
         if (response == null) return false;
         
         // 将所有响应头拼接成一个字符串
@@ -112,32 +118,43 @@ public class UnifiedResponseEvaluator {
             headersText.append(header.name()).append(": ").append(header.value()).append("\n");
         });
         
-        return matchTextValues(headersText.toString(), config);
+        return matchTextValues(headersText.toString(), config, payloadContext, sharedVariables);
     }
     
     /**
      * 评估响应体
      */
-    private static boolean evaluateBody(HttpResponse response, MatchConfig config) {
+    private static boolean evaluateBody(HttpResponse response, MatchConfig config,
+                                        PayloadContext payloadContext,
+                                        Map<String, String> sharedVariables) {
         if (response == null) {
             return false;
         }
         
         // ✅ 修复：使用UTF-8编码获取响应体，避免中文乱码
+        // ✅ 修复：添加 null 检查，防止 NPE
         String body;
         try {
-            byte[] bodyBytes = response.body().getBytes();
-            body = new String(bodyBytes, java.nio.charset.StandardCharsets.UTF_8);
+            if (response.body() != null) {
+                byte[] bodyBytes = response.body().getBytes();
+                body = new String(bodyBytes, java.nio.charset.StandardCharsets.UTF_8);
+            } else {
+                body = "";
+            }
         } catch (Exception e) {
             // 降级处理：使用默认方法
-            body = response.bodyToString();
+            try {
+                body = response.bodyToString();
+            } catch (Exception ex) {
+                body = "";
+            }
         }
         
         if (body == null) {
             body = "";
         }
         
-        return matchTextValues(body, config);
+        return matchTextValues(body, config, payloadContext, sharedVariables);
     }
     
     /**
@@ -210,7 +227,9 @@ public class UnifiedResponseEvaluator {
      * 文本匹配
      * ✅ 修复：区分正向匹配（OR）和反向匹配（AND）
      */
-    private static boolean matchTextValues(String actual, MatchConfig config) {
+    private static boolean matchTextValues(String actual, MatchConfig config,
+                                           PayloadContext payloadContext,
+                                           Map<String, String> sharedVariables) {
         if (actual == null) {
             actual = "";
         }
@@ -233,7 +252,13 @@ public class UnifiedResponseEvaluator {
                     continue;
                 }
                 
-                boolean matched = matchSingleValue(actual, value, 
+                String resolvedValue = resolveExpectedValue(value, payloadContext, sharedVariables);
+                // ✅ 修复：如果变量解析失败（返回null），跳过此值
+                if (resolvedValue == null || resolvedValue.isEmpty()) {
+                    continue;
+                }
+                
+                boolean matched = matchSingleValue(actual, resolvedValue, 
                     matchType == MatchType.NOT_EQUALS ? MatchType.EQUALS : MatchType.CONTAINS,
                     caseSensitive);
                 
@@ -252,7 +277,13 @@ public class UnifiedResponseEvaluator {
                     continue;
                 }
                 
-                boolean result = matchSingleValue(actual, value, matchType, caseSensitive);
+                String resolvedValue = resolveExpectedValue(value, payloadContext, sharedVariables);
+                // ✅ 修复：如果变量解析失败（返回null），跳过此值
+                if (resolvedValue == null || resolvedValue.isEmpty()) {
+                    continue;
+                }
+                
+                boolean result = matchSingleValue(actual, resolvedValue, matchType, caseSensitive);
                 if (result) {
                     return true;  // 任意一个值匹配即返回true
                 }
@@ -264,9 +295,18 @@ public class UnifiedResponseEvaluator {
     
     /**
      * 单个值匹配
+     * ✅ 修复：添加 null 检查，防止 NPE
      */
     private static boolean matchSingleValue(String actual, String expected, 
                                            MatchType matchType, boolean caseSensitive) {
+        // ✅ 修复：null 安全检查
+        if (actual == null) {
+            actual = "";
+        }
+        if (expected == null) {
+            return false;  // 如果期望值为 null，无法匹配
+        }
+        
         if (!caseSensitive) {
             actual = actual.toLowerCase();
             expected = expected.toLowerCase();
@@ -383,9 +423,16 @@ public class UnifiedResponseEvaluator {
     
     /**
      * 评估布尔表达式
+     * ✅ 修复：添加 null 检查
      */
     private static boolean evaluateBooleanExpression(String expr) {
+        if (expr == null) {
+            return false;
+        }
         expr = expr.trim();
+        if (expr.isEmpty()) {
+            return false;
+        }
         
         // 处理括号
         while (expr.contains("(")) {
@@ -436,6 +483,143 @@ public class UnifiedResponseEvaluator {
         
         // 单个布尔值
         return Boolean.parseBoolean(expr.trim());
+    }
+
+    private static final java.util.regex.Pattern DOUBLE_BRACE_PATTERN = java.util.regex.Pattern.compile("\\{\\{([^}]+)\\}\\}");
+    private static final java.util.regex.Pattern SINGLE_BRACE_PATTERN = java.util.regex.Pattern.compile("\\{([A-Za-z0-9_:\\-\\.]+)\\}");
+
+    private static String resolveExpectedValue(String value, PayloadContext payloadContext,
+                                               Map<String, String> sharedVariables) {
+        if (value == null) {
+            return null;
+        }
+        String result = replacePlaceholders(value, payloadContext, sharedVariables, DOUBLE_BRACE_PATTERN);
+        // ✅ 修复：确保 result 不为 null 才继续处理单括号变量
+        if (result != null) {
+            result = replacePlaceholders(result, payloadContext, sharedVariables, SINGLE_BRACE_PATTERN);
+        }
+        return result;
+    }
+
+    private static String replacePlaceholders(String input,
+                                              PayloadContext payloadContext,
+                                              Map<String, String> sharedVariables,
+                                              java.util.regex.Pattern pattern) {
+        if (input == null) {
+            return null;
+        }
+        java.util.regex.Matcher matcher = pattern.matcher(input);
+        StringBuffer sb = new StringBuffer();
+        boolean found = false;
+        while (matcher.find()) {
+            found = true;
+            String token = matcher.group(1);
+            String replacement = resolvePlaceholderValue(token, payloadContext, sharedVariables);
+            if (replacement == null) {
+                replacement = matcher.group(0);  // 保持原始占位符
+            }
+            matcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        if (!found) {
+            return input;
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
+    }
+
+    private static String resolvePlaceholderValue(String token,
+                                                  PayloadContext payloadContext,
+                                                  Map<String, String> sharedVariables) {
+        if (token == null) {
+            return null;
+        }
+        String trimmed = token.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        String upper = trimmed.toUpperCase();
+
+        if (upper.startsWith("PAIR:")) {
+            String[] parts = trimmed.split(":", 3);
+            if (parts.length < 3) {
+                return null;
+            }
+            try {
+                int pairId = Integer.parseInt(parts[1].trim());
+                String varName = parts[2].trim();
+                return lookupSharedVariable(varName, pairId, sharedVariables);
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+
+        if (upper.startsWith("VAR:")) {
+            String varName = trimmed.substring(4);
+            return lookupSharedVariable(varName, null, sharedVariables);
+        }
+
+        if (upper.startsWith("CTX:")) {
+            String varName = trimmed.substring(4);
+            return lookupPayloadVariable(varName, payloadContext);
+        }
+
+        // 首先在payload上下文中查找
+        String ctxValue = lookupPayloadVariable(trimmed, payloadContext);
+        if (ctxValue != null) {
+            return ctxValue;
+        }
+
+        // 然后在共享变量中查找
+        return lookupSharedVariable(trimmed, null, sharedVariables);
+    }
+
+    private static String lookupPayloadVariable(String name, PayloadContext payloadContext) {
+        if (payloadContext == null || payloadContext.getVariables() == null || name == null) {
+            return null;
+        }
+        Map<String, String> vars = payloadContext.getVariables();
+        String exact = vars.get(name);
+        if (exact != null) {
+            return exact;
+        }
+        String lower = vars.get(name.toLowerCase());
+        if (lower != null) {
+            return lower;
+        }
+        return vars.get(name.toUpperCase());
+    }
+
+    private static String lookupSharedVariable(String name, Integer pairId, Map<String, String> sharedVariables) {
+        if (sharedVariables == null || name == null) {
+            return null;
+        }
+        String exactKey = name;
+        if (pairId != null) {
+            String key = "PAIR:" + pairId + ":" + name;
+            if (sharedVariables.containsKey(key)) {
+                return sharedVariables.get(key);
+            }
+            String keyUpper = "PAIR:" + pairId + ":" + name.toUpperCase();
+            if (sharedVariables.containsKey(keyUpper)) {
+                return sharedVariables.get(keyUpper);
+            }
+            String keyLower = "PAIR:" + pairId + ":" + name.toLowerCase();
+            if (sharedVariables.containsKey(keyLower)) {
+                return sharedVariables.get(keyLower);
+            }
+        }
+        if (sharedVariables.containsKey(exactKey)) {
+            return sharedVariables.get(exactKey);
+        }
+        String upper = name.toUpperCase();
+        if (sharedVariables.containsKey(upper)) {
+            return sharedVariables.get(upper);
+        }
+        String lower = name.toLowerCase();
+        if (sharedVariables.containsKey(lower)) {
+            return sharedVariables.get(lower);
+        }
+        return null;
     }
 }
 

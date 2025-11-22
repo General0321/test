@@ -109,20 +109,85 @@ public class ResponseElementDetailDialog extends JDialog {
         
         // 匹配值
         JPanel valuesPanel = new JPanel(new BorderLayout(5, 5));
-        valuesPanel.add(new JLabel("匹配值（每行一个，OR关系）:"), 
+        valuesPanel.add(new JLabel("匹配值（每行一个，OR关系，支持正则表达式和变量）:"), 
             BorderLayout.NORTH);
         
-        valuesArea = new JTextArea(15, 40);
+        valuesArea = new JTextArea(12, 40);
         valuesArea.setLineWrap(false);
         JScrollPane scrollPane = new JScrollPane(valuesArea);
         valuesPanel.add(scrollPane, BorderLayout.CENTER);
         
-        JLabel hintLabel = new JLabel("提示：每行一个匹配值，任意一个值匹配即可（OR逻辑），支持正则表达式");
-        valuesPanel.add(hintLabel, BorderLayout.SOUTH);
+        // ✅ 添加变量插入按钮面板
+        JPanel variablePanel = createVariableInsertPanel();
+        valuesPanel.add(variablePanel, BorderLayout.SOUTH);
         
         panel.add(valuesPanel, BorderLayout.CENTER);
         
         return panel;
+    }
+    
+    /**
+     * ✅ 创建变量插入按钮面板
+     * 支持检测请求配置中的随机变量，以及跨pair变量
+     * 参考请求配置中的变量面板实现
+     */
+    private JPanel createVariableInsertPanel() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBorder(BorderFactory.createTitledBorder("可用变量（点击插入）"));
+        
+        // 随机值（当前pair的请求配置中生成的）
+        JPanel row1 = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        row1.add(new JLabel("随机值:"));
+        row1.add(createInsertButton("{{RANDOM_STRING}}", valuesArea));
+        row1.add(createInsertButton("{{RANDOM_NUMBER}}", valuesArea));
+        row1.add(createInsertButton("{{UUID}}", valuesArea));
+        row1.add(createInsertButton("{{TIMESTAMP}}", valuesArea));
+        panel.add(row1);
+        
+        // 外带检测变量
+        JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        row2.add(new JLabel("外带检测:"));
+        row2.add(createInsertButton("{{COLLABORATOR}}", valuesArea));
+        row2.add(createInsertButton("{{DNSLOG}}", valuesArea));
+        panel.add(row2);
+        
+        // 获取其他pair的随机值（任意pair）
+        JPanel row3 = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        row3.add(new JLabel("获取其他pair的随机值:"));
+        row3.add(createInsertButton("{{VAR:RANDOM_STRING}}", valuesArea));
+        row3.add(createInsertButton("{{VAR:UUID}}", valuesArea));
+        row3.add(createInsertButton("{{VAR:TIMESTAMP}}", valuesArea));
+        row3.add(createInsertButton("{{VAR:COLLABORATOR}}", valuesArea));
+        panel.add(row3);
+        
+        // 指定pair的随机值
+        JPanel row4 = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        row4.add(new JLabel("指定pair的随机值:"));
+        row4.add(createInsertButton("{{PAIR:1:RANDOM_STRING}}", valuesArea));
+        row4.add(createInsertButton("{{PAIR:1:UUID}}", valuesArea));
+        row4.add(createInsertButton("{{PAIR:2:RANDOM_STRING}}", valuesArea));
+        row4.add(createInsertButton("{{PAIR:2:UUID}}", valuesArea));
+        panel.add(row4);
+        
+        return panel;
+    }
+    
+    /**
+     * ✅ 创建插入按钮（参考请求配置的实现）
+     */
+    private JButton createInsertButton(String variable, JTextArea targetArea) {
+        JButton button = new JButton(variable);
+        button.setFont(new Font("Monospaced", Font.PLAIN, 10));
+        button.addActionListener(e -> {
+            int pos = targetArea.getCaretPosition();
+            try {
+                targetArea.insert(variable, pos);
+            } catch (Exception ex) {
+                targetArea.append(variable);
+            }
+        });
+        return button;
     }
     
     /**

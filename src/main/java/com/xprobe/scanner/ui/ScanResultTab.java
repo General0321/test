@@ -24,6 +24,7 @@ public class ScanResultTab {
     private final MontoyaApi api;
     private final LogModel logModel;
     private final com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner;  // ✅ 实时扫描器（用于清空扫描缓存）
+    private final com.xprobe.scanner.core.OriginalResponseCache responseCache;  // ✅ 原始响应缓存（用于清空缓存）
     
     // UI组件
     private JTable resultTable;
@@ -44,10 +45,12 @@ public class ScanResultTab {
     private HttpResponseEditor modifiedResponse;
 
     public ScanResultTab(MontoyaApi api, LogModel logModel, 
-                        com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner) {
+                        com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner,
+                        com.xprobe.scanner.core.OriginalResponseCache responseCache) {
         this.api = api;
         this.logModel = logModel;
         this.realtimeScanner = realtimeScanner;  // ✅ 保存实时扫描器引用（用于清空扫描缓存）
+        this.responseCache = responseCache;  // ✅ 保存响应缓存引用（用于清空缓存）
         
         initializeComponents();
         setupLayout();
@@ -460,12 +463,13 @@ public class ScanResultTab {
     
     /**
      * ✅ 清空被动扫描缓存
-     * 功能：清空扫描去重缓存，使被动扫描可以重新扫描
+     * 功能：清空扫描去重缓存和原始响应缓存，使被动扫描可以重新扫描
      * 
      * 说明：
      * - 被动扫描的去重逻辑由规则的"去重颗粒度"配置决定
      * - 去重key格式：根据规则配置动态生成（如：ruleId|method|host|path|param）
      * - 编辑规则后，规则ID不变，内容变了，必须清空缓存才能用新规则重新扫描
+     * - 同时清空原始响应缓存，确保重新扫描时使用最新的响应
      * 
      * 注意：
      * - 添加新规则不需要清空缓存（新规则ID会自动扫描）
@@ -475,7 +479,9 @@ public class ScanResultTab {
         int result = JOptionPane.showConfirmDialog(
             mainSplitPane,
             "确定要清空被动扫描缓存吗？\n\n" +
-            "这将清空扫描去重缓存，使被动扫描可以重新扫描之前的流量。\n\n" +
+            "这将清空以下缓存：\n" +
+            "• 扫描去重缓存（使被动扫描可以重新扫描之前的流量）\n" +
+            "• 原始响应缓存（确保重新扫描时使用最新的响应）\n\n" +
             "适用场景：\n" +
             "• 修改了规则，想用新规则重新扫描\n" +
             "• 测试规则配置是否正确\n" +
@@ -494,9 +500,20 @@ public class ScanResultTab {
                 realtimeScanner.clearPassiveScanCache();
             }
             
+            // ✅ 清空原始响应缓存
+            int responseCacheSize = 0;
+            if (responseCache != null) {
+                responseCacheSize = responseCache.size();
+                responseCache.clear();
+                api.logging().raiseInfoEvent("✅ 原始响应缓存已清空（清空前: " + responseCacheSize + " 条）");
+            }
+            
             JOptionPane.showMessageDialog(
                 mainSplitPane,
                 "✅ 被动扫描缓存已清空！\n\n" +
+                "已清空：\n" +
+                "• 扫描去重缓存（使被动扫描可以重新扫描）\n" +
+                "• 原始响应缓存（" + responseCacheSize + " 条）\n\n" +
                 "说明：\n" +
                 "• 每个规则都有独立的去重缓存\n" +
                 "• 去重颗粒度由规则配置决定\n" +
@@ -505,7 +522,7 @@ public class ScanResultTab {
                 JOptionPane.INFORMATION_MESSAGE
             );
             
-            api.logging().raiseInfoEvent("✅ 用户手动清空了被动扫描去重缓存");
+            api.logging().raiseInfoEvent("✅ 用户手动清空了被动扫描缓存（去重缓存 + 响应缓存）");
         }
     }
     

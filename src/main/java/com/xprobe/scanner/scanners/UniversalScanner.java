@@ -20,6 +20,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
+import java.util.Arrays;
+import com.xprobe.scanner.core.CrossPairVariableExtractor;
 
 /**
  * 通用扫描器 - 基于配对架构的灵活扫描器
@@ -64,9 +66,12 @@ public class UniversalScanner extends AbstractScanner {
         }
     }
     
-    public UniversalScanner(MontoyaApi api, com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner, XProbeConfigManager xprobeConfigManager) {
+    private final OriginalResponseCache responseCache;
+
+    public UniversalScanner(MontoyaApi api, com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner, XProbeConfigManager xprobeConfigManager, OriginalResponseCache responseCache) {
         super(api, realtimeScanner);
         this.xprobeConfigManager = xprobeConfigManager;  // ✅ 改为配置管理器
+        this.responseCache = responseCache;
     }
     
     @Override
@@ -154,12 +159,15 @@ public class UniversalScanner extends AbstractScanner {
             // ✨ 新增：保存每个Pair的响应特征，供后续Pair引用
             Map<Integer, PairResponseFeatures> allPairFeatures = new HashMap<>();
             
+            // ✨ 新增：跨Pair变量表（链式变量传递）
+            Map<String, String> accumulatedVars = new HashMap<>();
+            
             for (RuleMatchPair pair : pairs) {
                 try {
                     // ✅ 所有Pair都基于同一个拦截到的请求
                     // ✅ 传递allEvaluations列表和allPairFeatures，让评估方法能够记录所有请求并引用前面的特征
                     PairEvaluationResult evaluation = evaluatePair(
-                        pair, originalRequest, payloadResolver, config, allEvaluations, allPairFeatures
+                        pair, originalRequest, payloadResolver, config, allEvaluations, allPairFeatures, accumulatedVars
                     );
                     pairResults.put(pair.getId(), evaluation.matched);
                     pairEvaluations.put(pair.getId(), evaluation);
@@ -280,7 +288,8 @@ public class UniversalScanner extends AbstractScanner {
     private PairEvaluationResult evaluatePair(RuleMatchPair pair, HttpRequest originalRequest, 
                                               PayloadVariableResolver payloadResolver, Configuration config,
                                               List<PairEvaluationResult> allEvaluations,
-                                              Map<Integer, PairResponseFeatures> allPairFeatures) {
+                                              Map<Integer, PairResponseFeatures> allPairFeatures,
+                                              Map<String, String> accumulatedVars) {
         UnifiedHttpConfig requestConfig = pair.getRequestConfig();
         UnifiedResponseConfig responseConfig = pair.getResponseConfig();
         
@@ -302,10 +311,15 @@ public class UniversalScanner extends AbstractScanner {
         // ✅ 如果没有注入点，执行被动检测（检查原始响应）
         if (injectionPoints.isEmpty()) {
             try {
-                // 发送原始请求
-                long startTime = System.currentTimeMillis();
-                HttpResponse response = api.http().sendRequest(originalRequest).response();
-                long responseTime = System.currentTimeMillis() - startTime;
+                long responseTime = 0;
+                HttpResponse response = getCachedResponse(originalRequest);
+                if (response != null) {
+                    api.logging().raiseDebugEvent("♻️ 使用缓存的原始响应 (未修改请求)");
+                } else {
+                    long startTime = System.currentTimeMillis();
+                    response = api.http().sendRequest(originalRequest).response();
+                    responseTime = System.currentTimeMillis() - startTime;
+                }
                 
                 // ✅ 安全检查：确保响应不为null
                 if (response == null) {
@@ -322,16 +336,27 @@ public class UniversalScanner extends AbstractScanner {
                 boolean responseMatched;
                 if (responseConfig.getElements() == null || responseConfig.getElements().isEmpty()) {
                     responseMatched = true;  // 响应配置为空，跳过响应匹配
+                    System.out.println("🔍 [被动检测] 响应配置为空，跳过响应匹配");
                 } else {
                     responseMatched = UnifiedResponseEvaluator.evaluate(
-                        response, responseConfig, null, responseTime
+                        response, responseConfig, null, responseTime, accumulatedVars
                     );
+                    System.out.println("🔍 [被动检测] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
                 }
                 
                 // ✨ 新增：检查跨Pair特征对比
                 boolean crossPairMatched = evaluateCrossPairComparison(
                     pair, response, responseTime, allPairFeatures
                 );
+                
+                // ✨ 新增：链式变量提取（extractVariables）
+                if (pair.getExtractVariables() != null && !pair.getExtractVariables().isEmpty()) {
+                    java.util.Map<String, String> newVars = CrossPairVariableExtractor.extractVariables(response, pair.getExtractVariables());
+                    if (newVars != null && !newVars.isEmpty()) {
+                        accumulatedVars.putAll(newVars);
+                        api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] 提取变量: " + newVars.keySet());
+                    }
+                }
                 
                 // 最终匹配结果：响应匹配 AND 跨Pair对比匹配（如果配置了）
                 boolean finalMatched = responseMatched && crossPairMatched;
@@ -379,10 +404,10 @@ public class UniversalScanner extends AbstractScanner {
         // 📌 批量模式 vs 逐个模式
         if (injectionMode == Configuration.InjectionMode.BATCH) {
             // ========== 批量模式（BATCH）：所有validTargets同时注入相同payload ==========
-            return evaluateBatchMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures);
+            return evaluateBatchMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures, accumulatedVars);
         } else {
             // ========== 逐个模式（INDIVIDUAL）：每个validTarget分别注入 ==========
-            return evaluateIndividualMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures);
+            return evaluateIndividualMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures, accumulatedVars);
         }
     }
     
@@ -462,7 +487,8 @@ public class UniversalScanner extends AbstractScanner {
                                                    Configuration config,
                                                    RuleMatchPair pair,
                                                    List<PairEvaluationResult> allEvaluations,
-                                                   Map<Integer, PairResponseFeatures> allPairFeatures) {
+                                                   Map<Integer, PairResponseFeatures> allPairFeatures,
+                                                   Map<String, String> accumulatedVars) {
         // ✅ 保存最后一个响应（用于记录未命中的请求）
         HttpResponse lastResponse = null;
         HttpRequest lastModifiedRequest = null;
@@ -494,7 +520,17 @@ public class UniversalScanner extends AbstractScanner {
                     Map<String, String> context = new HashMap<>();
                     context.put("original", originalValue);
                     PayloadContext payloadContext = payloadResolver.resolvePayload(rawPayload, context);
+                    registerPayloadVariables(pair.getId(), payloadContext, accumulatedVars);
                     String resolvedPayload = payloadContext.getResolvedPayload();
+                    // ✨ 链式变量替换（支持 {{VAR:name}} 和 {name}）
+                    resolvedPayload = CrossPairVariableExtractor.replaceVariables(resolvedPayload, accumulatedVars);
+                    if (accumulatedVars != null && !accumulatedVars.isEmpty()) {
+                        for (java.util.Map.Entry<String, String> ent : accumulatedVars.entrySet()) {
+                            if (ent.getKey() != null && ent.getValue() != null) {
+                                resolvedPayload = resolvedPayload.replace("{" + ent.getKey() + "}", ent.getValue());
+                            }
+                        }
+                    }
                     
                     // 执行注入（批量模式：所有匹配参数都会被注入）
                     HttpRequest modifiedRequest = injectPayload(originalRequest, injectionPoint, resolvedPayload);
@@ -502,10 +538,23 @@ public class UniversalScanner extends AbstractScanner {
                         continue;
                     }
                     
-                    // 发送请求
-                    long startTime = System.currentTimeMillis();
-                    HttpResponse response = api.http().sendRequest(modifiedRequest).response();
-                    long responseTime = System.currentTimeMillis() - startTime;
+                    boolean requestChanged = isRequestModified(originalRequest, modifiedRequest);
+                    HttpResponse response = null;
+                    long responseTime = 0;
+                    if (!requestChanged) {
+                        response = getCachedResponse(originalRequest);
+                        if (response != null) {
+                            api.logging().raiseDebugEvent("♻️ 批量模式未修改请求，复用原始响应");
+                        } else {
+                            long startTime = System.currentTimeMillis();
+                            response = api.http().sendRequest(modifiedRequest).response();
+                            responseTime = System.currentTimeMillis() - startTime;
+                        }
+                    } else {
+                        long startTime = System.currentTimeMillis();
+                        response = api.http().sendRequest(modifiedRequest).response();
+                        responseTime = System.currentTimeMillis() - startTime;
+                    }
                     
                     // ✅ 立即标记所有pointTargets为已处理（遵循颗粒度）
                     // 批量模式：这一个请求测试了所有pointTargets
@@ -537,7 +586,7 @@ public class UniversalScanner extends AbstractScanner {
                     System.out.println("🔍 [批量注入] 响应配置为空，跳过响应匹配");
                 } else {
                     responseMatched = UnifiedResponseEvaluator.evaluate(
-                        response, responseConfig, payloadContext, responseTime
+                        response, responseConfig, payloadContext, responseTime, accumulatedVars
                     );
                     System.out.println("🔍 [批量注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
                 }
@@ -551,10 +600,14 @@ public class UniversalScanner extends AbstractScanner {
                 boolean finalMatched = responseMatched && crossPairMatched;
                 
                 if (finalMatched) {
+                    // ✅ 修复：添加 null 检查，防止 NPE
+                    String payloadDisplay = (resolvedPayload != null && resolvedPayload.length() > 0)
+                        ? resolvedPayload.substring(0, Math.min(50, resolvedPayload.length()))
+                        : "(空payload)";
                     api.logging().raiseDebugEvent(
                         "配对 [" + pair.getId() + "] 批量注入匹配: " + 
                         injectionPoint.getType().getDisplayName() + 
-                        ", Payload: " + resolvedPayload.substring(0, Math.min(50, resolvedPayload.length()))
+                        ", Payload: " + payloadDisplay
                     );
                     return new PairEvaluationResult(true, response, modifiedRequest, responseTime);
                 }
@@ -588,7 +641,8 @@ public class UniversalScanner extends AbstractScanner {
                                                         Configuration config,
                                                         RuleMatchPair pair,
                                                         List<PairEvaluationResult> allEvaluations,
-                                                        Map<Integer, PairResponseFeatures> allPairFeatures) {
+                                                        Map<Integer, PairResponseFeatures> allPairFeatures,
+                                                        Map<String, String> accumulatedVars) {
         // ✅ 保存最后一个响应（用于记录未命中的请求）
         HttpResponse lastResponse = null;
         HttpRequest lastModifiedRequest = null;
@@ -612,7 +666,17 @@ public class UniversalScanner extends AbstractScanner {
                         Map<String, String> context = new HashMap<>();
                         context.put("original", target.originalValue);
                         PayloadContext payloadContext = payloadResolver.resolvePayload(rawPayload, context);
+                        registerPayloadVariables(pair.getId(), payloadContext, accumulatedVars);
                         String resolvedPayload = payloadContext.getResolvedPayload();
+                        // ✨ 链式变量替换（支持 {{VAR:name}}）
+                        resolvedPayload = CrossPairVariableExtractor.replaceVariables(resolvedPayload, accumulatedVars);
+                        if (accumulatedVars != null && !accumulatedVars.isEmpty()) {
+                            for (java.util.Map.Entry<String, String> ent : accumulatedVars.entrySet()) {
+                                if (ent.getKey() != null && ent.getValue() != null) {
+                                    resolvedPayload = resolvedPayload.replace("{" + ent.getKey() + "}", ent.getValue());
+                                }
+                            }
+                        }
                         
                         // 执行单个注入
                         HttpRequest modifiedRequest = injectPayloadToSingleTarget(
@@ -622,10 +686,23 @@ public class UniversalScanner extends AbstractScanner {
                             continue;
                         }
                         
-                        // 发送请求
-                        long startTime = System.currentTimeMillis();
-                        HttpResponse response = api.http().sendRequest(modifiedRequest).response();
-                        long responseTime = System.currentTimeMillis() - startTime;
+                        boolean requestChanged = isRequestModified(originalRequest, modifiedRequest);
+                        HttpResponse response = null;
+                        long responseTime = 0;
+                        if (!requestChanged) {
+                            response = getCachedResponse(originalRequest);
+                            if (response != null) {
+                                api.logging().raiseDebugEvent("♻️ 逐个模式未修改请求，复用原始响应");
+                            } else {
+                                long startTime = System.currentTimeMillis();
+                                response = api.http().sendRequest(modifiedRequest).response();
+                                responseTime = System.currentTimeMillis() - startTime;
+                            }
+                        } else {
+                            long startTime = System.currentTimeMillis();
+                            response = api.http().sendRequest(modifiedRequest).response();
+                            responseTime = System.currentTimeMillis() - startTime;
+                        }
                         
                         // ✅ 立即标记此target为已处理（只标记一次）
                         // 逐个模式：一旦开始测试某个target，立即标记，防止重复打
@@ -658,7 +735,7 @@ public class UniversalScanner extends AbstractScanner {
                             System.out.println("🔍 [逐个注入] 响应配置为空，跳过响应匹配");
                         } else {
                             responseMatched = UnifiedResponseEvaluator.evaluate(
-                                response, responseConfig, payloadContext, responseTime
+                                response, responseConfig, payloadContext, responseTime, accumulatedVars
                             );
                             System.out.println("🔍 [逐个注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
                         }
@@ -672,10 +749,14 @@ public class UniversalScanner extends AbstractScanner {
                         boolean finalMatched = responseMatched && crossPairMatched;
                         
                         if (finalMatched) {
+                            // ✅ 修复：添加 null 检查，防止 NPE
+                            String payloadDisplay = (resolvedPayload != null && resolvedPayload.length() > 0)
+                                ? resolvedPayload.substring(0, Math.min(50, resolvedPayload.length()))
+                                : "(空payload)";
                             api.logging().raiseDebugEvent(
                                 "配对 [" + pair.getId() + "] 逐个注入匹配: " + 
                                 injectionPoint.getType().getDisplayName() + 
-                                " [" + target.name + "], Payload: " + resolvedPayload.substring(0, Math.min(50, resolvedPayload.length()))
+                                " [" + target.name + "], Payload: " + payloadDisplay
                             );
                             return new PairEvaluationResult(true, response, modifiedRequest, responseTime);
                         }
@@ -1449,21 +1530,9 @@ public class UniversalScanner extends AbstractScanner {
                 pair.getId(), response, responseTime, needBodyComparison
             );
             
-            boolean useClean = comparisonConfig.isUseCleanedBodyComparison();
-            boolean bodyComparisonResult = false;
-            
-            switch (bodyMode) {
-                case BODY_EQUALS:
-                    bodyComparisonResult = ResponseComparisonEngine.isBodyEqual(
-                        currentFeatures, refFeatures, useClean
-                    );
-                    break;
-                case BODY_NOT_EQUALS:
-                    bodyComparisonResult = !ResponseComparisonEngine.isBodyEqual(
-                        currentFeatures, refFeatures, useClean
-                    );
-                    break;
-            }
+            boolean bodyComparisonResult = ResponseComparisonEngine.compareResponseBody(
+                currentFeatures, refFeatures, comparisonConfig
+            );
             
             api.logging().raiseDebugEvent(String.format(
                 "配对 [%d] 响应体对比 (%s) 结果: %s (引用Pair [%d])",
@@ -1512,6 +1581,70 @@ public class UniversalScanner extends AbstractScanner {
             allChecksPass = allChecksPass && crossPairResult;
         }
         
+        // 3. 时间对比（相对引用Pair倍数）
+        if (comparisonConfig.getTimeComparisonMode() == ResponseComparisonConfig.TimeComparisonMode.RELATIVE_TO_PAIR
+                && comparisonConfig.getReferencePairId() != null) {
+            Integer refPairId = comparisonConfig.getReferencePairId();
+            PairResponseFeatures refFeatures = allPairFeatures.get(refPairId);
+            if (refFeatures == null) {
+                api.logging().raiseErrorEvent(String.format(
+                    "配对 [%d] 时间对比引用的Pair [%d] 特征不存在",
+                    pair.getId(), refPairId
+                ));
+                return false;
+            }
+            boolean timeOk = ResponseComparisonEngine.verifyTimeDelayWithReference(
+                responseTime, comparisonConfig, refFeatures
+            );
+            api.logging().raiseDebugEvent(String.format(
+                "配对 [%d] 相对时间对比结果: %s (引用Pair [%d], 倍数=%.2f)",
+                pair.getId(), timeOk ? "✅ 通过" : "❌ 失败", refPairId,
+                comparisonConfig.getRelativeTimeMultiplier() != null ? comparisonConfig.getRelativeTimeMultiplier() : 1.0
+            ));
+            allChecksPass = allChecksPass && timeOk;
+        }
+        
         return allChecksPass;
+    }
+
+    private void registerPayloadVariables(int pairId, PayloadContext payloadContext, Map<String, String> accumulatedVars) {
+        if (payloadContext == null || payloadContext.getVariables() == null || accumulatedVars == null) {
+            return;
+        }
+        payloadContext.getVariables().forEach((key, value) -> {
+            if (key == null || key.isEmpty() || value == null) {
+                return;
+            }
+            String normalizedUpper = key.toUpperCase();
+            accumulatedVars.put(normalizedUpper, value);
+            accumulatedVars.put(key, value);
+            accumulatedVars.put("PAIR:" + pairId + ":" + normalizedUpper, value);
+            accumulatedVars.put("PAIR:" + pairId + ":" + key, value);
+        });
+    }
+
+    private HttpResponse getCachedResponse(HttpRequest request) {
+        if (responseCache == null || request == null) {
+            return null;
+        }
+        try {
+            return responseCache.get(request.method(), request.url());
+        } catch (Exception e) {
+            api.logging().raiseDebugEvent("⚠️ 从缓存获取原始响应失败: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private boolean isRequestModified(HttpRequest original, HttpRequest modified) {
+        if (original == null || modified == null) {
+            return true;
+        }
+        try {
+            byte[] originalBytes = original.toByteArray().getBytes();
+            byte[] modifiedBytes = modified.toByteArray().getBytes();
+            return !Arrays.equals(originalBytes, modifiedBytes);
+        } catch (Exception e) {
+            return true;
+        }
     }
 }

@@ -10,6 +10,8 @@ import javax.swing.border.TitledBorder;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.HashSet;
 
 /**
  * 配对管理面板
@@ -271,11 +273,24 @@ public class PairManagementPanel extends JPanel {
             }
             
             // 检查引用的配对ID是否存在
+            Set<Integer> existingIds = new HashSet<>();
             for (RuleMatchPair pair : pairs) {
-                String id = String.valueOf(pair.getId());
-                if (expr.contains(id)) {
-                    // ID存在
+                existingIds.add(pair.getId());
+            }
+            java.util.regex.Pattern idPattern = java.util.regex.Pattern.compile("(?<![A-Za-z0-9_])(\\d+)(?![A-Za-z0-9_])");
+            java.util.regex.Matcher m = idPattern.matcher(expr);
+            java.util.Set<Integer> usedIds = new java.util.HashSet<>();
+            while (m.find()) {
+                usedIds.add(Integer.parseInt(m.group(1)));
+            }
+            java.util.List<Integer> missing = new java.util.ArrayList<>();
+            for (Integer id : usedIds) {
+                if (!existingIds.contains(id)) {
+                    missing.add(id);
                 }
+            }
+            if (!missing.isEmpty()) {
+                throw new IllegalArgumentException("表达式中引用了不存在的配对ID: " + missing);
             }
             
             JOptionPane.showMessageDialog(this,

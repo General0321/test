@@ -28,6 +28,7 @@ public class XProbe implements BurpExtension {
     private TaskScheduler taskScheduler;
     private XProbeConfigManager xprobeConfigManager;
     private com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner;  // ✅ P0修复：保存引用以便关闭
+    private OriginalResponseCache responseCache;  // ✅ 保存响应缓存引用（用于清空缓存功能）
     
     // ✅ 修复：保存UI Tab引用以便清理资源
     private DashboardTab dashboardTab;
@@ -122,12 +123,12 @@ public class XProbe implements BurpExtension {
         // 外部工具配置已废弃，使用Java原生实现
         api.logging().raiseInfoEvent("✅ 使用Java原生Arjun（无需外部工具配置）");
         
-        // ✅ 创建ScannerFactory (需要RealtimeScanner和XProbeConfigManager以支持全局注入模式)
-        ScannerFactory scannerFactory = new ScannerFactory(api, realtimeScanner, xprobeConfigManager);
-        
         // ✅ 创建原始响应缓存（LRU，最多缓存2000条记录）
-        OriginalResponseCache responseCache = new OriginalResponseCache(2000);
+        this.responseCache = new OriginalResponseCache(2000);
         api.logging().raiseInfoEvent("✅ 原始响应缓存已创建（容量: 2000）");
+
+        // ✅ 创建ScannerFactory (需要RealtimeScanner和XProbeConfigManager以支持全局注入模式)
+        ScannerFactory scannerFactory = new ScannerFactory(api, realtimeScanner, xprobeConfigManager, responseCache);
         
         // ✅ 创建任务调度器（传入响应缓存）
         taskScheduler = new TaskScheduler(api, scannerFactory, logModel, xprobeConfigManager, responseCache);
@@ -142,7 +143,7 @@ public class XProbe implements BurpExtension {
         api.http().registerHttpHandler(requestHandler);
 
         // ✅ 创建并注册UI界面（传入 realtimeScanner 和 xprobeConfigManager）
-        api.userInterface().registerSuiteTab("XProbe", constructMainTab(api, logModel, configManager, requestFilter, globalFilter, realtimeScanner));
+        api.userInterface().registerSuiteTab("XProbe", constructMainTab(api, logModel, configManager, requestFilter, globalFilter, realtimeScanner, responseCache));
         
         // ✅ P0修复：注册完整的资源清理处理器
         api.extension().registerUnloadingHandler(() -> {
@@ -180,7 +181,7 @@ public class XProbe implements BurpExtension {
     }
 
     // 构造顶级选项卡的用户界面组件
-    private Component constructMainTab(MontoyaApi api, LogModel logModel, ConfigurationManager configManager, RequestFilter requestFilter, GlobalFilter globalFilter, com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner) {
+    private Component constructMainTab(MontoyaApi api, LogModel logModel, ConfigurationManager configManager, RequestFilter requestFilter, GlobalFilter globalFilter, com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner, OriginalResponseCache responseCache) {
         // 创建顶级选项卡面板
         JTabbedPane tabbedPane = new JTabbedPane();
 
@@ -191,7 +192,7 @@ public class XProbe implements BurpExtension {
         tabbedPane.addTab("📊 仪表板", this.dashboardTab.getComponent());
 
         // 2. 扫描结果 - 结果展示（传入requestFilter和realtimeScanner用于清空扫描缓存）
-        this.scanResultTab = new ScanResultTab(api, logModel, realtimeScanner);
+        this.scanResultTab = new ScanResultTab(api, logModel, realtimeScanner, responseCache);
         tabbedPane.addTab("📋 扫描结果", this.scanResultTab.getComponent());
 
         // 3. 被动扫描规则 - 核心功能

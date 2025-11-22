@@ -13,17 +13,19 @@ public class ScannerFactory {
     private final MontoyaApi api;
     private final com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner;
     private final XProbeConfigManager xprobeConfigManager;  // ✅ 改为配置管理器
+    private final com.xprobe.scanner.core.OriginalResponseCache responseCache;
     
-    public ScannerFactory(MontoyaApi api, com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner, XProbeConfigManager xprobeConfigManager) {
+    public ScannerFactory(MontoyaApi api, com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner, XProbeConfigManager xprobeConfigManager, com.xprobe.scanner.core.OriginalResponseCache responseCache) {
         this.api = api;
         this.realtimeScanner = realtimeScanner;
         this.xprobeConfigManager = xprobeConfigManager;  // ✅ 改为配置管理器
+        this.responseCache = responseCache;
         initializeScanners();
     }
     
     private void initializeScanners() {
         // ✅ 注册UniversalScanner（通用扫描器，支持灵活的配对架构）
-        registerScanner(new UniversalScanner(api, realtimeScanner, xprobeConfigManager));
+        registerScanner(new UniversalScanner(api, realtimeScanner, xprobeConfigManager, responseCache));
         
         // 注: 旧的专用扫描器（LFIScanner、SQLScanner、SSRFScanner）已移除
         // 所有扫描功能现在统一由UniversalScanner + 配对规则实现
