@@ -11,9 +11,14 @@ import com.xprobe.scanner.models.ScanTask;
 import com.xprobe.scanner.scanners.Scanner;
 import com.xprobe.scanner.scanners.ScannerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 任务调度器，负责调度和执行扫描任务
@@ -26,6 +31,16 @@ public class TaskScheduler {
     private final OriginalResponseCache responseCache;  // ✅ 原始响应缓存
     private final ExecutorService executorService;
     private static final AtomicInteger logId = new AtomicInteger(0);
+    
+    // ✅ 扫描任务监听器
+    private ScanTaskListener scanTaskListener;
+    
+    // ✅ 任务进度跟踪
+    private final Map<ScanTask, TaskProgress> taskProgressMap = new ConcurrentHashMap<>();
+    
+    // ✅ 累计历史统计数据（包括已完成的任务）
+    private volatile int cumulativeTotalSent = 0;
+    private volatile int cumulativeTotalExpected = 0;
     
     public TaskScheduler(MontoyaApi api, ScannerFactory scannerFactory, LogModel logModel, 
                         XProbeConfigManager xprobeConfigManager, OriginalResponseCache responseCache) {
@@ -123,18 +138,40 @@ public class TaskScheduler {
                 return;
             }
             
+            // ✅ 计算预计请求数量
+            int expectedRequests = 0;
+            if (scanner instanceof com.xprobe.scanner.scanners.UniversalScanner) {
+                expectedRequests = ((com.xprobe.scanner.scanners.UniversalScanner) scanner)
+                    .calculateExpectedRequestCount(task);
+            }
+            
+            // ✅ 创建任务进度跟踪
+            TaskProgress progress = new TaskProgress(task, expectedRequests);
+            taskProgressMap.put(task, progress);
+            progress.setRunning(true);
+            
+            // ✅ 通知任务开始
+            if (scanTaskListener != null) {
+                String ruleName = task.getConfiguration() != null 
+                    ? task.getConfiguration().getCustomLabel() 
+                    : task.getScanType();
+                scanTaskListener.onScanTaskStart(task, expectedRequests, ruleName);
+            }
+            
             // 执行扫描
             CompletableFuture<List<ScanResult>> futureScanResults = scanner.scan(task);
             
             // ✅ 处理扫描结果（记录所有结果，不仅仅是命中的）
             futureScanResults.thenAccept(results -> {
+                int vulnerabilityCount = 0;
                 if (results != null && !results.isEmpty()) {
-                    results.forEach(result -> {
+                    for (ScanResult result : results) {
                         // ✅ 记录所有结果（包括未命中的）
-                        logResult(task, result);
+                        logResult(task, result, progress);
                         
                         // 如果命中规则，额外记录到Burp日志
                         if (result.isVulnerable()) {
+                            vulnerabilityCount++;
                             api.logging().raiseInfoEvent(String.format(
                                 "✓ Vulnerability found: %s in parameter '%s' with payload: %s",
                                 result.getScanType(),
@@ -142,10 +179,63 @@ public class TaskScheduler {
                                 result.getPayload()
                             ));
                         }
-                    });
+                    }
                 }
+                
+                // ✅ 标记任务完成
+                progress.setCompleted(true);
+                progress.setVulnerabilityCount(vulnerabilityCount);  // ✅ 存储漏洞数量
+                
+                // ✅ 累计历史统计数据
+                synchronized (taskProgressMap) {
+                    cumulativeTotalSent += progress.getSentRequests();
+                    cumulativeTotalExpected += progress.getExpectedRequests();
+                }
+                
+                // ✅ 通知任务完成
+                if (scanTaskListener != null) {
+                    String ruleName = task.getConfiguration() != null 
+                        ? task.getConfiguration().getCustomLabel() 
+                        : task.getScanType();
+                    scanTaskListener.onScanTaskComplete(
+                        task, 
+                        progress.getSentRequests(), 
+                        vulnerabilityCount, 
+                        ruleName
+                    );
+                }
+                
+                // ✅ 清理进度跟踪（延迟清理，避免频繁创建删除）
+                // 延迟5秒后清理，确保监听器有时间获取统计数据
+                new Timer(true).schedule(new TimerTask() {
+                    @Override
+                    public void run() {
+                        taskProgressMap.remove(task);
+                    }
+                }, 5000);
+                
             }).exceptionally(ex -> {
                 api.logging().raiseErrorEvent("Error during scan: " + ex.getMessage());
+                
+                // ✅ 标记任务完成（即使失败）
+                if (progress != null) {
+                    progress.setCompleted(true);
+                    
+                    // ✅ 累计历史统计数据（失败时也要累计，确保数据一致性）
+                    synchronized (taskProgressMap) {
+                        cumulativeTotalSent += progress.getSentRequests();
+                        cumulativeTotalExpected += progress.getExpectedRequests();
+                    }
+                    
+                    // ✅ 通知任务完成（失败的情况）
+                    if (scanTaskListener != null) {
+                        String ruleName = task.getConfiguration() != null 
+                            ? task.getConfiguration().getCustomLabel() 
+                            : task.getScanType();
+                        scanTaskListener.onScanTaskComplete(task, progress.getSentRequests(), 0, ruleName);
+                    }
+                }
+                
                 return null;
             });
             
@@ -187,9 +277,141 @@ public class TaskScheduler {
     }
     
     /**
+     * 单个任务进度跟踪
+     */
+    public static class TaskProgress {
+        private final ScanTask task;
+        private final int expectedRequests;
+        private volatile int sentRequests = 0;
+        private volatile boolean running = false;
+        private volatile boolean completed = false;
+        private volatile int vulnerabilityCount = 0;  // ✅ 漏洞数量
+        private volatile String ruleName;  // ✅ 规则名称
+        
+        public TaskProgress(ScanTask task, int expectedRequests) {
+            this.task = task;
+            this.expectedRequests = expectedRequests;
+            // ✅ 初始化规则名称
+            if (task.getConfiguration() != null) {
+                this.ruleName = task.getConfiguration().getCustomLabel();
+            } else {
+                this.ruleName = task.getScanType();
+            }
+        }
+        
+        public void incrementSentRequests() {
+            sentRequests++;
+        }
+        
+        public void setRunning(boolean running) {
+            this.running = running;
+        }
+        
+        public void setCompleted(boolean completed) {
+            this.completed = completed;
+            this.running = false;
+        }
+        
+        public void setVulnerabilityCount(int count) {
+            this.vulnerabilityCount = count;
+        }
+        
+        public boolean isRunning() { return running && !completed; }
+        public boolean isCompleted() { return completed; }
+        public int getSentRequests() { return sentRequests; }
+        public int getExpectedRequests() { return expectedRequests; }
+        public ScanTask getTask() { return task; }
+        public int getVulnerabilityCount() { return vulnerabilityCount; }
+        public String getRuleName() { return ruleName; }
+    }
+    
+    /**
+     * 任务进度统计
+     */
+    public static class TaskProgressStatistics {
+        private final int scanningCount;
+        private final int waitingCount;
+        private final int totalSent;
+        private final int totalExpected;
+        
+        public TaskProgressStatistics(int scanningCount, int waitingCount, int totalSent, int totalExpected) {
+            this.scanningCount = scanningCount;
+            this.waitingCount = waitingCount;
+            this.totalSent = totalSent;
+            this.totalExpected = totalExpected;
+        }
+        
+        public int getScanningCount() { return scanningCount; }
+        public int getWaitingCount() { return waitingCount; }
+        public int getTotalSent() { return totalSent; }
+        public int getTotalExpected() { return totalExpected; }
+    }
+    
+    /**
+     * 设置扫描任务监听器
+     */
+    public void setScanTaskListener(ScanTaskListener listener) {
+        this.scanTaskListener = listener;
+    }
+    
+    /**
+     * 获取任务进度统计（包含历史累计数据）
+     */
+    public TaskProgressStatistics getProgressStatistics() {
+        int scanningCount = 0;
+        int waitingCount = 0;
+        int currentTotalSent = 0;
+        int currentTotalExpected = 0;
+        
+        synchronized (taskProgressMap) {
+            for (TaskProgress progress : taskProgressMap.values()) {
+                if (progress.isRunning()) {
+                    scanningCount++;
+                    currentTotalSent += progress.getSentRequests();
+                    currentTotalExpected += progress.getExpectedRequests();
+                } else if (!progress.isCompleted()) {
+                    // 未完成且未运行的任务算作等待中
+                    waitingCount++;
+                    // ✅ 等待中的任务也要计入预计数量
+                    currentTotalExpected += progress.getExpectedRequests();
+                }
+                // ✅ 已完成的任务已累计到 cumulativeTotalSent/cumulativeTotalExpected
+            }
+        }
+        
+        // ✅ 累计历史数据 + 当前进行中的任务数据
+        int totalSent = cumulativeTotalSent + currentTotalSent;
+        int totalExpected = cumulativeTotalExpected + currentTotalExpected;
+        
+        return new TaskProgressStatistics(scanningCount, waitingCount, totalSent, totalExpected);
+    }
+    
+    /**
+     * ✅ 获取所有任务进度列表（用于规则列表显示）
+     */
+    public List<TaskScheduler.TaskProgress> getAllTaskProgress() {
+        synchronized (taskProgressMap) {
+            return new ArrayList<>(taskProgressMap.values());
+        }
+    }
+    
+    /**
      * 记录扫描结果到日志
      */
-    private void logResult(ScanTask task, ScanResult result) {
+    private void logResult(ScanTask task, ScanResult result, TaskProgress progress) {
+        // ✅ 更新进度（每记录一个结果，表示发送了一个请求）
+        if (progress != null) {
+            progress.incrementSentRequests();
+            
+            // ✅ 通知进度更新
+            if (scanTaskListener != null && progress.isRunning()) {
+                scanTaskListener.onScanTaskProgress(
+                    task, 
+                    progress.getSentRequests(), 
+                    progress.getExpectedRequests()
+                );
+            }
+        }
         try {
             // ✅ 安全检查：确保响应对象不为null
             HttpResponse response = result.getResponse();
