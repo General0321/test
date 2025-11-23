@@ -15,6 +15,10 @@ import java.util.regex.Pattern;
  */
 public class CrossPairVariableExtractor {
     
+    // ✅ 优化：缓存Pattern，避免每次调用都编译正则表达式
+    private static final Pattern PAIR_PATTERN = Pattern.compile("\\{\\{PAIR:(\\d+):([^}]+)\\}\\}");
+    private static final Pattern VAR_PATTERN = Pattern.compile("\\{\\{VAR:([^}]+)\\}\\}");
+    
     /**
      * 从响应中提取变量
      * 
@@ -127,11 +131,16 @@ public class CrossPairVariableExtractor {
             return text;
         }
         
+        // ✅ 优化：快速检查是否包含占位符，避免不必要的Pattern匹配
+        if (!text.contains("{{")) {
+            return text;
+        }
+        
         String result = text;
         
         // 1. 优先替换 {{PAIR:id:name}} 格式的占位符
-        Pattern pairPattern = Pattern.compile("\\{\\{PAIR:(\\d+):([^}]+)\\}\\}");
-        Matcher pairMatcher = pairPattern.matcher(result);
+        // ✅ 优化：使用缓存的Pattern
+        Matcher pairMatcher = PAIR_PATTERN.matcher(result);
         StringBuffer pairSb = new StringBuffer();
         while (pairMatcher.find()) {
             String pairId = pairMatcher.group(1);
@@ -163,8 +172,8 @@ public class CrossPairVariableExtractor {
         result = pairSb.toString();
         
         // 2. 替换 {{VAR:变量名}} 格式的占位符
-        Pattern varPattern = Pattern.compile("\\{\\{VAR:([^}]+)\\}\\}");
-        Matcher varMatcher = varPattern.matcher(result);
+        // ✅ 优化：使用缓存的Pattern
+        Matcher varMatcher = VAR_PATTERN.matcher(result);
         StringBuffer varSb = new StringBuffer();
         while (varMatcher.find()) {
             String varName = varMatcher.group(1);
@@ -229,15 +238,15 @@ public class CrossPairVariableExtractor {
         }
         
         // 提取 {{PAIR:id:name}} 格式
-        Pattern pairPattern = Pattern.compile("\\{\\{PAIR:(\\d+):([^}]+)\\}\\}");
-        Matcher pairMatcher = pairPattern.matcher(text);
+        // ✅ 优化：使用缓存的Pattern
+        Matcher pairMatcher = PAIR_PATTERN.matcher(text);
         while (pairMatcher.find()) {
             varNames.add("PAIR:" + pairMatcher.group(1) + ":" + pairMatcher.group(2));
         }
         
         // 提取 {{VAR:name}} 格式
-        Pattern varPattern = Pattern.compile("\\{\\{VAR:([^}]+)\\}\\}");
-        Matcher varMatcher = varPattern.matcher(text);
+        // ✅ 优化：使用缓存的Pattern
+        Matcher varMatcher = VAR_PATTERN.matcher(text);
         while (varMatcher.find()) {
             varNames.add(varMatcher.group(1));
         }

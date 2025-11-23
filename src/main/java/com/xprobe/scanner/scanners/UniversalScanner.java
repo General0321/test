@@ -1534,9 +1534,33 @@ public class UniversalScanner extends AbstractScanner {
         
         boolean allChecksPass = true;
         
-        // 1. 检查响应体对比模式
+        // ✅ 优化：检查是否需要创建当前Pair的特征（避免重复创建）
+        // 如果同时满足响应体对比和通用跨Pair特征引用，只创建一次
+        boolean needBodyComparison = needsBodyComparison(pair);
+        boolean needCurrentFeatures = false;
+        
+        // 检查是否需要响应体对比
         ResponseComparisonConfig.BodyComparisonMode bodyMode = comparisonConfig.getBodyComparisonMode();
-        if (bodyMode != null && bodyMode != ResponseComparisonConfig.BodyComparisonMode.NONE) {
+        boolean hasBodyComparison = (bodyMode != null && bodyMode != ResponseComparisonConfig.BodyComparisonMode.NONE);
+        
+        // 检查是否需要通用跨Pair特征引用
+        boolean hasFeatureReference = (comparisonConfig.getReferencePairId() != null && 
+                                       comparisonConfig.getReferenceFeatureType() != null);
+        
+        if (hasBodyComparison || hasFeatureReference) {
+            needCurrentFeatures = true;
+        }
+        
+        // ✅ 优化：只创建一次 currentFeatures，然后复用
+        PairResponseFeatures currentFeatures = null;
+        if (needCurrentFeatures) {
+            currentFeatures = PairResponseFeatures.fromResponse(
+                pair.getId(), response, responseTime, needBodyComparison
+            );
+        }
+        
+        // 1. 检查响应体对比模式
+        if (hasBodyComparison) {
             Integer refPairId = comparisonConfig.getBodyComparisonReferencePairId();
             if (refPairId == null) {
                 api.logging().raiseErrorEvent(String.format(
@@ -1555,12 +1579,7 @@ public class UniversalScanner extends AbstractScanner {
                 return false;
             }
             
-            // 构造当前Pair的特征（临时）
-            boolean needBodyComparison = needsBodyComparison(pair);
-            PairResponseFeatures currentFeatures = PairResponseFeatures.fromResponse(
-                pair.getId(), response, responseTime, needBodyComparison
-            );
-            
+            // ✅ 使用已创建的 currentFeatures
             boolean bodyComparisonResult = ResponseComparisonEngine.compareResponseBody(
                 currentFeatures, refFeatures, comparisonConfig
             );
@@ -1576,9 +1595,7 @@ public class UniversalScanner extends AbstractScanner {
         }
         
         // 2. 检查通用跨Pair特征引用
-        if (comparisonConfig.getReferencePairId() != null && 
-            comparisonConfig.getReferenceFeatureType() != null) {
-            
+        if (hasFeatureReference) {
             Integer refPairId = comparisonConfig.getReferencePairId();
             PairResponseFeatures refFeatures = allPairFeatures.get(refPairId);
             
@@ -1590,12 +1607,7 @@ public class UniversalScanner extends AbstractScanner {
                 return false;
             }
             
-            // 构造当前Pair的特征（临时）
-            boolean needBodyComparison = needsBodyComparison(pair);
-            PairResponseFeatures currentFeatures = PairResponseFeatures.fromResponse(
-                pair.getId(), response, responseTime, needBodyComparison
-            );
-            
+            // ✅ 使用已创建的 currentFeatures
             boolean crossPairResult = ResponseComparisonEngine.evaluateCrossPairFeature(
                 currentFeatures, refFeatures, comparisonConfig
             );
