@@ -79,15 +79,25 @@ public class ScanResultTab {
                 super.changeSelection(rowIndex, columnIndex, toggle, extend);
             }
             
-            // ✅ 使用默认样式（去掉颜色高亮）
+            // ✅ 命中规则的行显示淡红色背景
             @Override
             public Component prepareRenderer(javax.swing.table.TableCellRenderer renderer, int row, int column) {
                 Component c = super.prepareRenderer(renderer, row, column);
                 
+                int modelRow = convertRowIndexToModel(row);
+                LogModel.LogEntry logEntry = logModel.get(modelRow);
+                boolean isVulnerable = logEntry != null && logEntry.isVulnerable();
+                
                 if (!isRowSelected(row)) {
-                    // 未选中行：使用默认白色背景
-                    c.setBackground(Color.WHITE);
-                    c.setForeground(Color.BLACK);
+                    if (isVulnerable) {
+                        // 命中规则：高亮显示（浅红色背景）
+                        c.setBackground(new Color(255, 230, 230));
+                        c.setForeground(new Color(200, 0, 0));
+                    } else {
+                        // 未命中：正常显示
+                        c.setBackground(Color.WHITE);
+                        c.setForeground(Color.BLACK);
+                    }
                 } else {
                     // 选中行：使用默认选中颜色
                     c.setBackground(getSelectionBackground());

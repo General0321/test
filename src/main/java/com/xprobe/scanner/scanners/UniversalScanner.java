@@ -172,24 +172,54 @@ public class UniversalScanner extends AbstractScanner {
                     pairResults.put(pair.getId(), evaluation.matched);
                     pairEvaluations.put(pair.getId(), evaluation);
                     
-                    // ✨ 保存当前Pair的响应特征（如果有响应）
+                    // ✨ 保存当前Pair的响应特征（只在需要跨Pair对比时才保存，避免性能开销）
+                    // ✅ 优化：只在配置了跨Pair对比时才保存响应特征（避免调用 response.bodyToString()）
                     if (evaluation.response != null) {
-                        // 判断是否需要保存响应体内容
-                        boolean needBodyComparison = needsBodyComparison(pair);
+                        // 检查是否有任何Pair配置了跨Pair对比（包括当前Pair和后续Pair）
+                        boolean needToSave = false;
                         
-                        PairResponseFeatures features = PairResponseFeatures.fromResponse(
-                            pair.getId(),
-                            evaluation.response,
-                            evaluation.responseTime,
-                            needBodyComparison
-                        );
-                        allPairFeatures.put(pair.getId(), features);
+                        // 1. 检查当前Pair是否配置了跨Pair对比
+                        if (pair.getComparisonConfig() != null) {
+                            needToSave = true;
+                        }
                         
-                        api.logging().raiseDebugEvent(String.format(
-                            "保存配对 [%d] 响应特征: 状态码=%d, 长度=%d, 时间=%dms",
-                            pair.getId(), features.getStatusCode(), 
-                            features.getResponseLength(), features.getResponseTime()
-                        ));
+                        // 2. 检查后续Pair是否需要引用当前Pair的特征
+                        if (!needToSave) {
+                            for (RuleMatchPair laterPair : pairs) {
+                                if (laterPair.getId() > pair.getId()) {
+                                    ResponseComparisonConfig laterConfig = laterPair.getComparisonConfig();
+                                    if (laterConfig != null) {
+                                        // 检查是否有引用当前Pair的配置
+                                        if ((laterConfig.getBodyComparisonReferencePairId() != null && 
+                                             laterConfig.getBodyComparisonReferencePairId().equals(pair.getId())) ||
+                                            (laterConfig.getReferencePairId() != null && 
+                                             laterConfig.getReferencePairId().equals(pair.getId()))) {
+                                            needToSave = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (needToSave) {
+                            // 判断是否需要保存响应体内容
+                            boolean needBodyComparison = needsBodyComparison(pair);
+                            
+                            PairResponseFeatures features = PairResponseFeatures.fromResponse(
+                                pair.getId(),
+                                evaluation.response,
+                                evaluation.responseTime,
+                                needBodyComparison
+                            );
+                            allPairFeatures.put(pair.getId(), features);
+                            
+                            api.logging().raiseDebugEvent(String.format(
+                                "保存配对 [%d] 响应特征: 状态码=%d, 长度=%d, 时间=%dms",
+                                pair.getId(), features.getStatusCode(), 
+                                features.getResponseLength(), features.getResponseTime()
+                            ));
+                        }
                     }
                     
                     // ✅ 主评估结果已经在evaluatePair中添加到allEvaluations了
@@ -348,12 +378,15 @@ public class UniversalScanner extends AbstractScanner {
                     api.logging().raiseDebugEvent("🔍 [被动检测] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
                 }
                 
-                // ✨ 新增：检查跨Pair特征对比
-                boolean crossPairMatched = evaluateCrossPairComparison(
-                    pair, response, responseTime, allPairFeatures
-                );
+                // ✨ 新增：检查跨Pair特征对比（只在配置了跨Pair对比时才调用，避免性能开销）
+                boolean crossPairMatched = true;  // 默认通过
+                if (pair.getComparisonConfig() != null) {
+                    crossPairMatched = evaluateCrossPairComparison(
+                        pair, response, responseTime, allPairFeatures
+                    );
+                }
                 
-                // ✨ 新增：链式变量提取（extractVariables）
+                // ✨ 新增：链式变量提取（extractVariables）- 只在配置了变量提取时才调用
                 if (pair.getExtractVariables() != null && !pair.getExtractVariables().isEmpty()) {
                     try {
                         java.util.Map<String, String> newVars = CrossPairVariableExtractor.extractVariables(response, pair.getExtractVariables());
@@ -602,10 +635,13 @@ public class UniversalScanner extends AbstractScanner {
                         api.logging().raiseDebugEvent("🔍 [批量注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
                     }
                     
-                    // ✨ 新增：检查跨Pair特征对比
-                    boolean crossPairMatched = evaluateCrossPairComparison(
-                        pair, response, responseTime, allPairFeatures
-                    );
+                    // ✨ 新增：检查跨Pair特征对比（只在配置了跨Pair对比时才调用，避免性能开销）
+                    boolean crossPairMatched = true;  // 默认通过
+                    if (pair.getComparisonConfig() != null) {
+                        crossPairMatched = evaluateCrossPairComparison(
+                            pair, response, responseTime, allPairFeatures
+                        );
+                    }
                     
                     // 最终匹配结果：响应匹配 AND 跨Pair对比匹配（如果配置了）
                     boolean finalMatched = responseMatched && crossPairMatched;
@@ -778,10 +814,13 @@ public class UniversalScanner extends AbstractScanner {
                             api.logging().raiseDebugEvent("🔍 [逐个注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
                         }
                         
-                        // ✨ 新增：检查跨Pair特征对比
-                        boolean crossPairMatched = evaluateCrossPairComparison(
-                            pair, response, responseTime, allPairFeatures
-                        );
+                        // ✨ 新增：检查跨Pair特征对比（只在配置了跨Pair对比时才调用，避免性能开销）
+                        boolean crossPairMatched = true;  // 默认通过
+                        if (pair.getComparisonConfig() != null) {
+                            crossPairMatched = evaluateCrossPairComparison(
+                                pair, response, responseTime, allPairFeatures
+                            );
+                        }
                         
                         // 最终匹配结果：响应匹配 AND 跨Pair对比匹配（如果配置了）
                         boolean finalMatched = responseMatched && crossPairMatched;
