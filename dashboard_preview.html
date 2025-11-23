@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XProbe 仪表盘 - 真实效果预览</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #F5F5F5;
+            padding: 20px;
+            color: #2C3E50;
+        }
+
+        .dashboard {
+            background-color: #FFFFFF;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        /* 顶部标题栏 - 增强版 */
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 15px 20px;
+            border-bottom: 2px solid #5a67d8;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .header-icon {
+            width: 32px;
+            height: 32px;
+            background-color: rgba(255,255,255,0.2);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            color: #FFFFFF;
+            font-weight: bold;
+        }
+
+        .header-title-section {
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+        }
+
+        .header-title {
+            font-size: 20px;
+            font-weight: bold;
+            color: #FFFFFF;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .header-subtitle {
+            font-size: 12px;
+            color: rgba(255,255,255,0.9);
+            font-weight: normal;
+        }
+
+        .header-status {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .status-badge {
+            background-color: rgba(255,255,255,0.2);
+            border-radius: 16px;
+            padding: 6px 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            backdrop-filter: blur(10px);
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            background-color: #27AE60;
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 6px rgba(39, 174, 96, 0.6);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        .status-text {
+            color: #FFFFFF;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .mode-badge {
+            background-color: rgba(255,255,255,0.2);
+            border-radius: 16px;
+            padding: 6px 12px;
+            backdrop-filter: blur(10px);
+        }
+
+        .mode-text {
+            color: #FFFFFF;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .mode-label {
+            color: rgba(255,255,255,0.8);
+            font-size: 11px;
+            margin-right: 4px;
+        }
+
+        /* 单行指标栏 */
+        .metrics-bar {
+            background-color: #FFFFFF;
+            padding: 10px 20px;
+            border-bottom: 1px solid #E0E0E0;
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .metric-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .metric-label {
+            color: #2C3E50;
+            font-size: 14px;
+        }
+
+        .metric-value {
+            color: #2980B9;
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        .metric-value.vulnerability {
+            color: #E74C3C;
+        }
+
+        /* 统计卡片区域 - 增强版 */
+        .stats-section {
+            padding: 15px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+
+        .stat-card {
+            background-color: #FFFFFF;
+            border: 1px solid #E0E0E0;
+            border-radius: 12px;
+            padding: 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+            position: relative;
+        }
+
+        .stat-card-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 10px 15px;
+            color: #FFFFFF;
+        }
+
+        .stat-card-header.scan-stats {
+            background: linear-gradient(135deg, #3498DB 0%, #2980B9 100%);
+        }
+
+        .stat-card-header.param-collect {
+            background: linear-gradient(135deg, #1ABC9C 0%, #16A085 100%);
+        }
+
+        .stat-card-title {
+            color: #FFFFFF;
+            font-weight: bold;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .stat-card-icon {
+            font-size: 16px;
+        }
+
+        .stat-card-body {
+            padding: 12px 15px;
+        }
+
+        .stat-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #F0F0F0;
+            transition: background-color 0.2s;
+        }
+
+        .stat-item:last-child {
+            border-bottom: none;
+        }
+
+        .stat-item:hover {
+            background-color: #F8F9FA;
+            margin: 0 -15px;
+            padding-left: 15px;
+            padding-right: 15px;
+        }
+
+        .stat-label {
+            color: #2C3E50;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .stat-label-icon {
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            background-color: #ECF0F1;
+            border-radius: 4px;
+            color: #7F8C8D;
+        }
+
+        .stat-value {
+            color: #2980B9;
+            font-weight: bold;
+            font-size: 26px;
+            font-family: 'Arial', sans-serif;
+        }
+
+        .stat-value.vulnerability {
+            color: #E74C3C;
+        }
+
+        .stat-value.small {
+            font-size: 13px;
+            color: #2980B9;
+        }
+
+        /* 整体进度条区域 */
+        .progress-section {
+            padding: 15px;
+            border-top: 1px solid #E0E0E0;
+        }
+
+        .progress-title {
+            color: #2C3E50;
+            font-weight: bold;
+            font-size: 14px;
+            margin-bottom: 12px;
+        }
+
+        .progress-card {
+            background-color: #FFFFFF;
+            border: 1px solid #E0E0E0;
+            border-radius: 12px;
+            padding: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .progress-bar-container {
+            background-color: #ECF0F1;
+            border-radius: 4px;
+            height: 8px;
+            margin: 15px 0;
+            overflow: hidden;
+        }
+
+        .progress-bar-fill {
+            background-color: #3498DB;
+            height: 100%;
+            width: 65%;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .progress-info {
+            color: #2C3E50;
+            font-size: 13px;
+            margin-bottom: 12px;
+        }
+
+        .rules-list {
+            margin-top: 15px;
+        }
+
+        .rules-list-title {
+            color: #2C3E50;
+            font-weight: bold;
+            font-size: 13px;
+            margin-bottom: 8px;
+        }
+
+        .rule-item {
+            padding: 6px 0;
+            font-size: 13px;
+        }
+
+        .rule-item.running {
+            color: #2980B9;
+        }
+
+        .rule-item.completed {
+            color: #27AE60;
+        }
+
+        .rule-item.completed.vulnerable {
+            color: #E74C3C;
+        }
+
+        .rule-checkmark {
+            color: #27AE60;
+        }
+
+        .rule-warning {
+            color: #E74C3C;
+        }
+
+        /* 活动日志区域 */
+        .log-section {
+            padding: 15px;
+            border-top: 1px solid #E0E0E0;
+        }
+
+        .log-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .log-title {
+            color: #2C3E50;
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        .clear-button {
+            background-color: #2980B9;
+            color: #FFFFFF;
+            border: none;
+            border-radius: 4px;
+            padding: 6px 12px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        .clear-button:hover {
+            background-color: #3498DB;
+        }
+
+        .log-container {
+            background-color: #FFFFFF;
+            border: 1px solid #E0E0E0;
+            border-radius: 8px;
+            padding: 12px;
+            max-height: 350px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            padding: 4px 0;
+            line-height: 1.5;
+        }
+
+        .log-timestamp {
+            color: #95A5A6;
+        }
+
+        .log-rule-name {
+            color: #2980B9;
+            font-weight: bold;
+        }
+
+        .log-interface {
+            color: #2C3E50;
+        }
+
+        .log-checkmark {
+            color: #27AE60;
+        }
+
+        .log-warning {
+            color: #E74C3C;
+        }
+
+        .log-vulnerability {
+            color: #E74C3C;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <!-- 顶部标题栏 - 增强版 -->
+        <div class="header">
+            <div class="header-left">
+                <div class="header-icon">X</div>
+                <div class="header-title-section">
+                    <div class="header-title">XProbe 仪表盘</div>
+                </div>
+            </div>
+            <div class="header-status">
+                <div class="status-badge">
+                    <span class="status-dot"></span>
+                    <span class="status-text">运行中</span>
+                </div>
+                <div class="mode-badge">
+                    <span class="mode-label">模式:</span>
+                    <span class="mode-text">仅参数名</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 单行指标栏 -->
+        <div class="metrics-bar">
+            <div class="metric-item">
+                <span class="metric-label">总请求:</span>
+                <span class="metric-value">5</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">已扫描:</span>
+                <span class="metric-value">5</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">漏洞:</span>
+                <span class="metric-value vulnerability">2</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">参数:</span>
+                <span class="metric-value">2</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">接口:</span>
+                <span class="metric-value">1</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">域名:</span>
+                <span class="metric-value">1</span>
+            </div>
+        </div>
+
+        <!-- 统计卡片区域 - 增强版 -->
+        <div class="stats-section">
+            <div class="stat-card">
+                <div class="stat-card-header scan-stats">
+                    <div class="stat-card-title">
+                        <span class="stat-card-icon">📊</span>
+                        扫描统计
+                    </div>
+                </div>
+                <div class="stat-card-body">
+                    <div class="stat-item">
+                        <span class="stat-label">
+                            <span class="stat-label-icon">📥</span>
+                            总请求数:
+                        </span>
+                        <span class="stat-value">5</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">
+                            <span class="stat-label-icon">✓</span>
+                            已扫描:
+                        </span>
+                        <span class="stat-value">5</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">
+                            <span class="stat-label-icon">⚠</span>
+                            发现漏洞:
+                        </span>
+                        <span class="stat-value vulnerability">2</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">
+                            <span class="stat-label-icon">🔄</span>
+                            扫描中:
+                        </span>
+                        <span class="stat-value">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">
+                            <span class="stat-label-icon">⏳</span>
+                            等待中:
+                        </span>
+                        <span class="stat-value">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-card-header param-collect">
+                    <div class="stat-card-title">
+                        <span class="stat-card-icon">🔍</span>
+                        参数收集
+                    </div>
+                </div>
+                <div class="stat-card-body">
+                    <div class="stat-item">
+                        <span class="stat-label">
+                            <span class="stat-label-icon">🌐</span>
+                            主域名:
+                        </span>
+                        <span class="stat-value">1</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">
+                            <span class="stat-label-icon">🏠</span>
+                            Host:
+                        </span>
+                        <span class="stat-value">1</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">
+                            <span class="stat-label-icon">🔗</span>
+                            接口:
+                        </span>
+                        <span class="stat-value">1</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">
+                            <span class="stat-label-icon">📝</span>
+                            参数:
+                        </span>
+                        <span class="stat-value">2</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">
+                            <span class="stat-label-icon">⚙️</span>
+                            模式:
+                        </span>
+                        <span class="stat-value small">仅参数名</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 整体进度条区域 -->
+        <div class="progress-section">
+            <div class="progress-title">整体扫描进度</div>
+            <div class="progress-card">
+                <div class="progress-info">
+                    已发送: 65 / 预计: 100 请求  (65%)  剩余: ~35 请求
+                </div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar-fill"></div>
+                </div>
+
+                <div class="rules-list">
+                    <div class="rules-list-title">正在执行的规则:</div>
+                    <div class="rule-item running">
+                        • 规则 "SQL注入检测" → GET /api/user?id=1 (15/50)
+                    </div>
+                    <div class="rule-item completed vulnerable">
+                        • 规则 "XSS检测" → POST /api/submit <span class="rule-checkmark">✓</span> 已完成 (1 个漏洞) <span class="rule-warning">⚠️</span>
+                    </div>
+                    <div class="rule-item completed">
+                        • 规则 "IDOR检测" → GET /api/order/123 <span class="rule-checkmark">✓</span> 已完成
+                    </div>
+                    <div class="rule-item running">
+                        • 规则 "CSRF检测" → POST /api/update (10/10)
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 活动日志区域 -->
+        <div class="log-section">
+            <div class="log-header">
+                <div class="log-title">活动日志</div>
+                <button class="clear-button">清空</button>
+            </div>
+            <div class="log-container">
+                <div class="log-entry">
+                    <span class="log-timestamp">[10:54:13]</span> XProbe 仪表盘已加载
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">[10:54:15]</span> 规则 <span class="log-rule-name">"SQL注入检测"</span> → <span class="log-interface">GET /api/user?id=1</span> (预计: 50 请求)
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">[10:54:16]</span> 规则 <span class="log-rule-name">"XSS检测"</span> → <span class="log-interface">POST /api/submit</span> (预计: 20 请求)
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">[10:54:18]</span> 规则 <span class="log-rule-name">"XSS检测"</span> → <span class="log-interface">POST /api/submit</span> <span class="log-checkmark">✓</span> 扫描完成 <span class="log-warning">⚠️</span> 发现 <span class="log-vulnerability">1 个漏洞</span>
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">[10:54:25]</span> 规则 <span class="log-rule-name">"SQL注入检测"</span> → <span class="log-interface">GET /api/user?id=1</span> <span class="log-checkmark">✓</span> 扫描完成 <span class="log-warning">⚠️</span> 发现 <span class="log-vulnerability">1 个漏洞</span>
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">[10:54:30]</span> 规则 <span class="log-rule-name">"IDOR检测"</span> → <span class="log-interface">GET /api/order/123</span> (预计: 30 请求)
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">[10:54:45]</span> 规则 <span class="log-rule-name">"IDOR检测"</span> → <span class="log-interface">GET /api/order/123</span> <span class="log-checkmark">✓</span> 扫描完成
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">[10:55:00]</span> 规则 <span class="log-rule-name">"CSRF检测"</span> → <span class="log-interface">POST /api/update</span> (预计: 10 请求)
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">[10:55:05]</span> 规则 <span class="log-rule-name">"CSRF检测"</span> → <span class="log-interface">POST /api/update</span> <span class="log-checkmark">✓</span> 扫描完成 <span class="log-warning">⚠️</span> 发现 <span class="log-vulnerability">2 个漏洞</span>
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">[10:55:10]</span> 规则 <span class="log-rule-name">"文件上传检测"</span> → <span class="log-interface">POST /api/upload</span> (预计: 15 请求)
+                </div>
+                <div class="log-entry">
+                    <span class="log-timestamp">[10:55:20]</span> 规则 <span class="log-rule-name">"文件上传检测"</span> → <span class="log-interface">POST /api/upload</span> <span class="log-checkmark">✓</span> 扫描完成
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+

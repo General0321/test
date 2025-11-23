@@ -132,6 +132,84 @@ public class UniversalScanner extends AbstractScanner {
     }
     
     /**
+     * 计算预计请求数量
+     */
+    public int calculateExpectedRequestCount(ScanTask task) {
+        Configuration config = task.getConfiguration();
+        HttpRequest originalRequest = task.getRequest();
+        
+        List<RuleMatchPair> pairs = config.getPairs();
+        if (pairs == null || pairs.isEmpty()) {
+            return 0;
+        }
+        
+        int totalExpected = 0;
+        Configuration.InjectionMode injectionMode = getGlobalInjectionMode();
+        
+        for (RuleMatchPair pair : pairs) {
+            UnifiedHttpConfig requestConfig = pair.getRequestConfig();
+            if (requestConfig == null || !UnifiedHttpEvaluator.evaluate(originalRequest, requestConfig)) {
+                continue; // 跳过不匹配的pair
+            }
+            
+            // 获取注入点（启用了注入的元素）
+            List<UnifiedHttpConfig.HttpElementConfig> injectionPoints = requestConfig.getElements()
+                .stream()
+                .filter(UnifiedHttpConfig.HttpElementConfig::isUseForInjection)
+                .collect(Collectors.toList());
+            
+            if (injectionPoints.isEmpty()) {
+                // 被动检测：没有注入点，只发送1个请求
+                totalExpected += 1;
+                continue;
+            }
+            
+            // 收集所有注入目标
+            List<InjectionTarget> allTargets = new ArrayList<>();
+            for (UnifiedHttpConfig.HttpElementConfig injectionPoint : injectionPoints) {
+                List<InjectionTarget> targets = collectInjectionTargets(originalRequest, injectionPoint);
+                allTargets.addAll(targets);
+            }
+            
+            if (allTargets.isEmpty()) {
+                continue;
+            }
+            
+            // 根据注入模式计算请求数
+            if (injectionMode == Configuration.InjectionMode.BATCH) {
+                // 批量模式：每个injectionPoint的每个payload发送1个请求
+                // ✅ 但需要检查该injectionPoint是否有匹配的targets（与实际扫描逻辑一致）
+                for (UnifiedHttpConfig.HttpElementConfig injectionPoint : injectionPoints) {
+                    // ✅ 检查该injectionPoint是否有匹配的targets
+                    List<InjectionTarget> pointTargets = allTargets.stream()
+                        .filter(t -> t.injectionPoint == injectionPoint)
+                        .collect(Collectors.toList());
+                    
+                    if (pointTargets.isEmpty()) {
+                        continue; // 没有匹配的targets，跳过（与实际扫描逻辑一致）
+                    }
+                    
+                    List<String> payloads = injectionPoint.getPayloads();
+                    if (payloads != null && !payloads.isEmpty()) {
+                        totalExpected += payloads.size();
+                    }
+                }
+            } else {
+                // 逐个模式：每个target的每个payload发送1个请求
+                for (InjectionTarget target : allTargets) {
+                    UnifiedHttpConfig.HttpElementConfig injectionPoint = target.injectionPoint;
+                    List<String> payloads = injectionPoint.getPayloads();
+                    if (payloads != null && !payloads.isEmpty()) {
+                        totalExpected += payloads.size();
+                    }
+                }
+            }
+        }
+        
+        return totalExpected;
+    }
+    
+    /**
      * 执行基于配对的扫描
      */
     @Override
