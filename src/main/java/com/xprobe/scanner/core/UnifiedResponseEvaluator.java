@@ -493,6 +493,10 @@ public class UnifiedResponseEvaluator {
         if (value == null) {
             return null;
         }
+        // ✅ 优化：如果值不包含占位符，直接返回，避免不必要的正则匹配
+        if (!value.contains("{{") && !value.contains("{")) {
+            return value;
+        }
         String result = replacePlaceholders(value, payloadContext, sharedVariables, DOUBLE_BRACE_PATTERN);
         // ✅ 修复：确保 result 不为 null 才继续处理单括号变量
         if (result != null) {

@@ -565,14 +565,10 @@ public class UniversalScanner extends AbstractScanner {
                     PayloadContext payloadContext = payloadResolver.resolvePayload(rawPayload, context);
                     registerPayloadVariables(pair.getId(), payloadContext, accumulatedVars);
                     String resolvedPayload = payloadContext.getResolvedPayload();
-                    // ✨ 链式变量替换（支持 {{VAR:name}} 和 {name}）
-                    resolvedPayload = CrossPairVariableExtractor.replaceVariables(resolvedPayload, accumulatedVars);
-                    if (accumulatedVars != null && !accumulatedVars.isEmpty()) {
-                        for (java.util.Map.Entry<String, String> ent : accumulatedVars.entrySet()) {
-                            if (ent.getKey() != null && ent.getValue() != null) {
-                                resolvedPayload = resolvedPayload.replace("{" + ent.getKey() + "}", ent.getValue());
-                            }
-                        }
+                    // ✨ 链式变量替换（支持 {{VAR:name}} 和 {{PAIR:id:name}}）
+                    // ✅ 优化：只在payload包含占位符时才进行替换
+                    if (resolvedPayload != null && resolvedPayload.contains("{{")) {
+                        resolvedPayload = CrossPairVariableExtractor.replaceVariables(resolvedPayload, accumulatedVars);
                     }
                     
                     // 执行注入（批量模式：所有匹配参数都会被注入）
@@ -581,7 +577,15 @@ public class UniversalScanner extends AbstractScanner {
                         continue;
                     }
                     
-                    boolean requestChanged = isRequestModified(originalRequest, modifiedRequest);
+                    // ✅ 优化：如果payload不为空，直接判断请求已修改，跳过序列化比较
+                    boolean requestChanged;
+                    if (resolvedPayload == null || resolvedPayload.isEmpty()) {
+                        // Payload为空，需要完整比较判断请求是否真的被修改
+                        requestChanged = isRequestModified(originalRequest, modifiedRequest);
+                    } else {
+                        // Payload不为空，请求肯定被修改了，直接返回true
+                        requestChanged = true;
+                    }
                     HttpResponse response = null;
                     long responseTime = 0;
                     if (!requestChanged) {
@@ -741,14 +745,10 @@ public class UniversalScanner extends AbstractScanner {
                         PayloadContext payloadContext = payloadResolver.resolvePayload(rawPayload, context);
                         registerPayloadVariables(pair.getId(), payloadContext, accumulatedVars);
                         String resolvedPayload = payloadContext.getResolvedPayload();
-                        // ✨ 链式变量替换（支持 {{VAR:name}}）
-                        resolvedPayload = CrossPairVariableExtractor.replaceVariables(resolvedPayload, accumulatedVars);
-                        if (accumulatedVars != null && !accumulatedVars.isEmpty()) {
-                            for (java.util.Map.Entry<String, String> ent : accumulatedVars.entrySet()) {
-                                if (ent.getKey() != null && ent.getValue() != null) {
-                                    resolvedPayload = resolvedPayload.replace("{" + ent.getKey() + "}", ent.getValue());
-                                }
-                            }
+                        // ✨ 链式变量替换（支持 {{VAR:name}} 和 {{PAIR:id:name}}）
+                        // ✅ 优化：只在payload包含占位符时才进行替换
+                        if (resolvedPayload != null && resolvedPayload.contains("{{")) {
+                            resolvedPayload = CrossPairVariableExtractor.replaceVariables(resolvedPayload, accumulatedVars);
                         }
                         
                         // 执行单个注入
@@ -759,7 +759,15 @@ public class UniversalScanner extends AbstractScanner {
                             continue;
                         }
                         
-                        boolean requestChanged = isRequestModified(originalRequest, modifiedRequest);
+                        // ✅ 优化：如果payload不为空，直接判断请求已修改，跳过序列化比较
+                        boolean requestChanged;
+                        if (resolvedPayload == null || resolvedPayload.isEmpty()) {
+                            // Payload为空，需要完整比较判断请求是否真的被修改
+                            requestChanged = isRequestModified(originalRequest, modifiedRequest);
+                        } else {
+                            // Payload不为空，请求肯定被修改了，直接返回true
+                            requestChanged = true;
+                        }
                         HttpResponse response = null;
                         long responseTime = 0;
                         if (!requestChanged) {
