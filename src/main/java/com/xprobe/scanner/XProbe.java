@@ -137,7 +137,7 @@ public class XProbe implements BurpExtension {
         realtimeScanner.setTaskScheduler(taskScheduler);
         
         // ✅ 创建请求处理器 (需要RealtimeScanner和响应缓存)
-        RequestHandler requestHandler = new RequestHandler(api, configManager, requestFilter, taskScheduler, realtimeScanner, xprobeConfigManager, responseCache);
+        RequestHandler requestHandler = new RequestHandler(api, configManager, requestFilter, taskScheduler, realtimeScanner, xprobeConfigManager, responseCache, globalFilter);
         
         // 注册HTTP处理器
         api.http().registerHttpHandler(requestHandler);

@@ -38,6 +38,9 @@ public class TaskScheduler {
     // ✅ 任务进度跟踪
     private final Map<ScanTask, TaskProgress> taskProgressMap = new ConcurrentHashMap<>();
     
+    // ✅ 任务Future跟踪（用于取消任务）
+    private final Map<ScanTask, CompletableFuture<Void>> taskFutures = new ConcurrentHashMap<>();
+    
     // ✅ 累计历史统计数据（包括已完成的任务）
     private volatile int cumulativeTotalSent = 0;
     private volatile int cumulativeTotalExpected = 0;
@@ -54,19 +57,53 @@ public class TaskScheduler {
         XProbeConfig config = xprobeConfigManager.getConfig();
         int cpuCount = Runtime.getRuntime().availableProcessors();
         
+        // ✅ 修复：确保CPU数量至少为1（防止异常情况，异常时使用默认值4）
+        if (cpuCount < 1) {
+            cpuCount = 4;
+            api.logging().raiseErrorEvent("⚠️ 检测到CPU数量异常，使用默认值4");
+        }
+        
         // 核心线程数：-1表示自动（CPU×2），否则使用配置值
         int corePoolSize = config.getScannerCoreThreads() == -1 
             ? cpuCount * 2 
             : config.getScannerCoreThreads();
+        
+        // ✅ 修复：验证核心线程数（必须 >= 1）
+        if (corePoolSize < 1) {
+            api.logging().raiseErrorEvent("⚠️ 核心线程数无效: " + corePoolSize + "，使用默认值: " + (cpuCount * 2));
+            corePoolSize = cpuCount * 2;
+        }
         
         // 最大线程数：-1表示自动（核心×2），否则使用配置值
         int maximumPoolSize = config.getScannerMaxThreads() == -1 
             ? corePoolSize * 2 
             : config.getScannerMaxThreads();
         
+        // ✅ 修复：验证最大线程数（必须 >= 核心线程数）
+        if (maximumPoolSize < corePoolSize) {
+            api.logging().raiseErrorEvent("⚠️ 最大线程数(" + maximumPoolSize + ")小于核心线程数(" + corePoolSize + ")，调整为: " + (corePoolSize * 2));
+            maximumPoolSize = corePoolSize * 2;
+        }
+        if (maximumPoolSize < 1) {
+            api.logging().raiseErrorEvent("⚠️ 最大线程数无效: " + maximumPoolSize + "，使用默认值: " + (corePoolSize * 2));
+            maximumPoolSize = corePoolSize * 2;
+        }
+        
         // 队列大小和空闲时间从配置读取
         int queueSize = config.getScannerQueueSize();
         long keepAliveTime = config.getScannerKeepAliveSeconds();
+        
+        // ✅ 修复：验证队列大小（必须 > 0）
+        if (queueSize < 1) {
+            api.logging().raiseErrorEvent("⚠️ 队列大小无效: " + queueSize + "，使用默认值: 2000");
+            queueSize = 2000;
+        }
+        
+        // ✅ 修复：验证空闲时间（必须 >= 0）
+        if (keepAliveTime < 0) {
+            api.logging().raiseErrorEvent("⚠️ 空闲时间无效: " + keepAliveTime + "，使用默认值: 120");
+            keepAliveTime = 120;
+        }
         
         BlockingQueue<Runnable> workQueue = new LinkedBlockingQueue<>(queueSize);
         
@@ -106,7 +143,16 @@ public class TaskScheduler {
         // ✅ 修复：使用 CompletableFuture.allOf 替代 parallelStream()
         // 这样可以精确控制并发数量，避免使用全局 ForkJoinPool
         List<CompletableFuture<Void>> futures = tasks.stream()
-            .map(task -> CompletableFuture.runAsync(() -> executeScanTask(task), executorService))
+            .map(task -> {
+                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> executeScanTask(task), executorService);
+                // ✅ 保存Future引用，用于取消任务
+                taskFutures.put(task, future);
+                // ✅ 任务完成后自动清理Future引用
+                future.whenComplete((result, throwable) -> {
+                    taskFutures.remove(task);
+                });
+                return future;
+            })
             .collect(java.util.stream.Collectors.toList());
         
         // ✅ 修复：使用 whenComplete 处理异常，并记录完成信息
@@ -172,6 +218,9 @@ public class TaskScheduler {
                         // 如果命中规则，额外记录到Burp日志
                         if (result.isVulnerable()) {
                             vulnerabilityCount++;
+                            // ✅ 修复：立即更新漏洞数量（用于动态调整预计数量）
+                            // 注意：这里使用 vulnerabilityCount 而不是累加，因为每次发现漏洞都会立即更新
+                            progress.setVulnerabilityCount(vulnerabilityCount);
                             api.logging().raiseInfoEvent(String.format(
                                 "✓ Vulnerability found: %s in parameter '%s' with payload: %s",
                                 result.getScanType(),
@@ -184,12 +233,19 @@ public class TaskScheduler {
                 
                 // ✅ 标记任务完成
                 progress.setCompleted(true);
-                progress.setVulnerabilityCount(vulnerabilityCount);  // ✅ 存储漏洞数量
+                progress.setVulnerabilityCount(vulnerabilityCount);  // ✅ 存储漏洞数量（最终确认）
                 
                 // ✅ 累计历史统计数据
+                // ✅ 改进：如果发现漏洞，使用实际发送数量作为预计数量（因为发现漏洞后扫描会停止）
+                // ✅ 性能优化：使用原子操作减少锁竞争（但这里需要同步，因为涉及多个变量的原子更新）
                 synchronized (taskProgressMap) {
                     cumulativeTotalSent += progress.getSentRequests();
-                    cumulativeTotalExpected += progress.getExpectedRequests();
+                    // 如果发现漏洞，预计数量 = 实际发送数量（因为发现漏洞后扫描会停止）
+                    if (vulnerabilityCount > 0) {
+                        cumulativeTotalExpected += progress.getSentRequests();
+                    } else {
+                        cumulativeTotalExpected += progress.getExpectedRequests();
+                    }
                 }
                 
                 // ✅ 通知任务完成
@@ -222,8 +278,10 @@ public class TaskScheduler {
                     progress.setCompleted(true);
                     
                     // ✅ 累计历史统计数据（失败时也要累计，确保数据一致性）
+                    // ✅ 改进：如果发现漏洞，使用实际发送数量作为预计数量（因为发现漏洞后扫描会停止）
                     synchronized (taskProgressMap) {
                         cumulativeTotalSent += progress.getSentRequests();
+                        // 失败时没有漏洞，使用原始预计数量
                         cumulativeTotalExpected += progress.getExpectedRequests();
                     }
                     
@@ -282,7 +340,7 @@ public class TaskScheduler {
     public static class TaskProgress {
         private final ScanTask task;
         private final int expectedRequests;
-        private volatile int sentRequests = 0;
+        private final AtomicInteger sentRequests = new AtomicInteger(0);  // ✅ 使用AtomicInteger确保线程安全
         private volatile boolean running = false;
         private volatile boolean completed = false;
         private volatile int vulnerabilityCount = 0;  // ✅ 漏洞数量
@@ -300,7 +358,7 @@ public class TaskScheduler {
         }
         
         public void incrementSentRequests() {
-            sentRequests++;
+            sentRequests.incrementAndGet();  // ✅ 使用原子操作确保线程安全
         }
         
         public void setRunning(boolean running) {
@@ -318,7 +376,7 @@ public class TaskScheduler {
         
         public boolean isRunning() { return running && !completed; }
         public boolean isCompleted() { return completed; }
-        public int getSentRequests() { return sentRequests; }
+        public int getSentRequests() { return sentRequests.get(); }  // ✅ 使用AtomicInteger的get方法
         public int getExpectedRequests() { return expectedRequests; }
         public ScanTask getTask() { return task; }
         public int getVulnerabilityCount() { return vulnerabilityCount; }
@@ -356,6 +414,7 @@ public class TaskScheduler {
     
     /**
      * 获取任务进度统计（包含历史累计数据）
+     * ✅ 性能优化：使用 ConcurrentHashMap 的 values() 视图，避免长时间持有锁
      */
     public TaskProgressStatistics getProgressStatistics() {
         int scanningCount = 0;
@@ -363,20 +422,31 @@ public class TaskScheduler {
         int currentTotalSent = 0;
         int currentTotalExpected = 0;
         
+        // ✅ 性能优化：使用快照避免长时间持有锁，减少锁竞争
+        // ConcurrentHashMap.values() 返回的是弱一致性视图，适合高并发场景
+        List<TaskProgress> progressSnapshot;
         synchronized (taskProgressMap) {
-            for (TaskProgress progress : taskProgressMap.values()) {
-                if (progress.isRunning()) {
-                    scanningCount++;
-                    currentTotalSent += progress.getSentRequests();
-                    currentTotalExpected += progress.getExpectedRequests();
-                } else if (!progress.isCompleted()) {
-                    // 未完成且未运行的任务算作等待中
-                    waitingCount++;
-                    // ✅ 等待中的任务也要计入预计数量
+            progressSnapshot = new ArrayList<>(taskProgressMap.values());
+        }
+        
+        // ✅ 在锁外进行遍历，减少锁持有时间
+        for (TaskProgress progress : progressSnapshot) {
+            if (progress.isRunning()) {
+                scanningCount++;
+                currentTotalSent += progress.getSentRequests();
+                // ✅ 改进：如果发现漏洞，使用实际发送数量作为预计数量（因为发现漏洞后扫描会停止）
+                if (progress.getVulnerabilityCount() > 0) {
+                    currentTotalExpected += progress.getSentRequests();
+                } else {
                     currentTotalExpected += progress.getExpectedRequests();
                 }
-                // ✅ 已完成的任务已累计到 cumulativeTotalSent/cumulativeTotalExpected
+            } else if (!progress.isCompleted()) {
+                // 未完成且未运行的任务算作等待中
+                waitingCount++;
+                // ✅ 等待中的任务也要计入预计数量（使用原始预计数量）
+                currentTotalExpected += progress.getExpectedRequests();
             }
+            // ✅ 已完成的任务已累计到 cumulativeTotalSent/cumulativeTotalExpected
         }
         
         // ✅ 累计历史数据 + 当前进行中的任务数据
@@ -491,6 +561,60 @@ public class TaskScheduler {
             api.logging().raiseErrorEvent("❌ Error logging result: " + e.getMessage());
             e.printStackTrace();
         }
+    }
+    
+    /**
+     * ✅ 一键暂停所有任务并清空任务列表
+     */
+    public void pauseAllTasksAndClear() {
+        api.logging().raiseInfoEvent("⏸️ 开始暂停所有任务并清空任务列表...");
+        
+        int cancelledCount = 0;
+        int clearedCount = 0;
+        
+        // 1. 取消所有正在执行的任务
+        synchronized (taskFutures) {
+            for (Map.Entry<ScanTask, CompletableFuture<Void>> entry : taskFutures.entrySet()) {
+                ScanTask task = entry.getKey();
+                CompletableFuture<Void> future = entry.getValue();
+                
+                if (future != null && !future.isDone()) {
+                    boolean cancelled = future.cancel(true);  // true表示中断正在执行的任务
+                    if (cancelled) {
+                        cancelledCount++;
+                        api.logging().raiseDebugEvent("✅ 已取消任务: " + 
+                            (task.getConfiguration() != null ? task.getConfiguration().getCustomLabel() : task.getScanType()));
+                    }
+                }
+            }
+            taskFutures.clear();
+        }
+        
+        // 2. 标记所有任务为已完成（停止状态）
+        synchronized (taskProgressMap) {
+            for (Map.Entry<ScanTask, TaskProgress> entry : taskProgressMap.entrySet()) {
+                TaskProgress progress = entry.getValue();
+                if (progress.isRunning()) {
+                    progress.setRunning(false);
+                    progress.setCompleted(true);
+                    clearedCount++;
+                }
+            }
+        }
+        
+        // 3. 清空任务进度映射
+        clearedCount += taskProgressMap.size();
+        taskProgressMap.clear();
+        
+        // 4. 通知监听器（通过触发任务完成事件，让监听器自己处理UI更新）
+        // 注意：这里不直接调用SwingUtilities，因为TaskScheduler不应该依赖Swing
+        // 监听器会通过事件机制自动更新UI
+        // 由于所有任务都被取消，我们不需要单独通知，UI会通过定时刷新自动更新
+        
+        api.logging().raiseInfoEvent(String.format(
+            "✅ 已暂停并清空所有任务: 取消 %d 个正在执行的任务, 清空 %d 个任务",
+            cancelledCount, clearedCount
+        ));
     }
     
     /**

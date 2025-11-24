@@ -112,6 +112,22 @@ public class UnifiedConfigTab {
         whitelistTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         blacklistTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         
+        // ✅ 初始状态：文本区域禁用（只有勾选启用后才能编辑）
+        whitelistTextArea.setEnabled(false);
+        blacklistTextArea.setEnabled(false);
+        
+        // ✅ 设置初始样式（禁用状态）
+        whitelistTextArea.setBackground(new Color(248, 248, 248));
+        blacklistTextArea.setBackground(new Color(248, 248, 248));
+        whitelistTextArea.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(200, 200, 200), 1),
+            BorderFactory.createEmptyBorder(5, 5, 5, 5)
+        ));
+        blacklistTextArea.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(200, 200, 200), 1),
+            BorderFactory.createEmptyBorder(5, 5, 5, 5)
+        ));
+        
         // 主动探测组件
         bruteforceIntervalSpinner = new JSpinner(new SpinnerNumberModel(300, 60, 3600, 60));
         minParameterCountSpinner = new JSpinner(new SpinnerNumberModel(15, 1, 100, 1));  // ✅ 默认15
@@ -218,6 +234,12 @@ public class UnifiedConfigTab {
         
         mainPanel.add(splitPane, BorderLayout.CENTER);
         
+        // ✅ 添加保存提示（简洁方式）
+        JLabel saveHintLabel = new JLabel("💡 提示：修改黑白名单后，请点击右下角的「保存所有配置」按钮使配置生效");
+        saveHintLabel.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+        saveHintLabel.setForeground(new Color(100, 100, 100));
+        saveHintLabel.setBorder(new EmptyBorder(5, 5, 5, 5));
+        
         // 添加总说明
         JTextArea helpText = new JTextArea(3, 80);
         helpText.setText("全局过滤器说明:\n" +
@@ -227,7 +249,12 @@ public class UnifiedConfigTab {
         helpText.setEditable(false);
         helpText.setBackground(panel.getBackground());
         helpText.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        mainPanel.add(helpText, BorderLayout.SOUTH);
+        
+        // 将提示和说明放在一个面板中
+        JPanel bottomPanel = new JPanel(new BorderLayout(5, 5));
+        bottomPanel.add(saveHintLabel, BorderLayout.NORTH);
+        bottomPanel.add(helpText, BorderLayout.CENTER);
+        mainPanel.add(bottomPanel, BorderLayout.SOUTH);
         
         return mainPanel;
     }
@@ -1033,8 +1060,8 @@ public class UnifiedConfigTab {
         // 按钮在右侧
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
         
-        JButton resetButton = new JButton("重置所有配置");
-        JButton saveButton = new JButton("💾 保存所有配置");
+        JButton resetButton = new JButton("重置配置");
+        JButton saveButton = new JButton("📝 保存配置");
         
         // 美化保存按钮
         saveButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 14));
@@ -1055,7 +1082,41 @@ public class UnifiedConfigTab {
     }
     
     private void setupEventListeners() {
-        // 预留：未来可添加其他事件监听器
+        // ✅ 添加黑白名单复选框监听器：只有勾选启用后才能编辑文本区域
+        whitelistEnabledCheckBox.addActionListener(e -> {
+            boolean enabled = whitelistEnabledCheckBox.isSelected();
+            whitelistTextArea.setEnabled(enabled);
+            // ✅ 根据启用状态设置不同的背景色和边框
+            updateTextAreaStyle(whitelistTextArea, enabled);
+        });
+        
+        blacklistEnabledCheckBox.addActionListener(e -> {
+            boolean enabled = blacklistEnabledCheckBox.isSelected();
+            blacklistTextArea.setEnabled(enabled);
+            // ✅ 根据启用状态设置不同的背景色和边框
+            updateTextAreaStyle(blacklistTextArea, enabled);
+        });
+    }
+    
+    /**
+     * ✅ 更新文本区域的样式（根据启用/禁用状态）
+     */
+    private void updateTextAreaStyle(JTextArea textArea, boolean enabled) {
+        if (enabled) {
+            // 启用状态：白色背景，蓝色边框
+            textArea.setBackground(Color.WHITE);
+            textArea.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(new Color(0, 120, 215), 1),
+                BorderFactory.createEmptyBorder(5, 5, 5, 5)
+            ));
+        } else {
+            // 禁用状态：浅灰色背景，灰色边框
+            textArea.setBackground(new Color(248, 248, 248));
+            textArea.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(new Color(200, 200, 200), 1),
+                BorderFactory.createEmptyBorder(5, 5, 5, 5)
+            ));
+        }
     }
     
     private void loadAllConfigurations() {
@@ -1076,6 +1137,16 @@ public class UnifiedConfigTab {
         blacklistEnabledCheckBox.setSelected(config.isBlacklistEnabled());
         whitelistTextArea.setText(String.join("\n", config.getWhitelist()));
         blacklistTextArea.setText(String.join("\n", config.getBlacklist()));
+        
+        // ✅ 根据启用状态设置文本区域的启用/禁用状态
+        boolean whitelistEnabled = config.isWhitelistEnabled();
+        boolean blacklistEnabled = config.isBlacklistEnabled();
+        whitelistTextArea.setEnabled(whitelistEnabled);
+        blacklistTextArea.setEnabled(blacklistEnabled);
+        
+        // ✅ 根据启用状态设置不同的样式
+        updateTextAreaStyle(whitelistTextArea, whitelistEnabled);
+        updateTextAreaStyle(blacklistTextArea, blacklistEnabled);
         
         // 主动探测
         bruteforceIntervalSpinner.setValue(config.getBruteforceInterval());
@@ -1224,12 +1295,12 @@ public class UnifiedConfigTab {
             // 应用到后端组件
             applyConfigToComponents(config);
             
-            // ✅ 持久化到磁盘 (使用配置管理器)
-            xprobeConfigManager.saveConfig(config);
+            // ✅ 持久化到磁盘（保存到 .ser 文件，包括黑白名单）
+            configStorage.save(config);
             
             // 显示成功提示
             showStatus("✓ 所有配置已成功保存到磁盘！", true);
-            api.logging().raiseInfoEvent("所有配置已保存到: " + xprobeConfigManager.getConfigFilePath());
+            api.logging().raiseInfoEvent("所有配置已保存到: " + configStorage.getConfigFilePath());
             
             // ✅ P1修复：高级配置变化时弹出提示
             if (advancedConfigChanged) {
