@@ -1,16 +1,19 @@
 package com.xprobe.scanner.core;
 
+import com.xprobe.scanner.utils.StaticResourceFilter;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 /**
- * 全局过滤器 - 统一管理黑白名单
+ * 全局过滤器 - 统一管理黑白名单和静态资源过滤
  */
 public class GlobalFilter {
     private boolean whitelistEnabled = false;
     private boolean blacklistEnabled = false;
+    private boolean staticResourceFilterEnabled = true;  // ✅ 默认启用静态资源过滤
     private List<String> whitelist = new ArrayList<>();
     private List<String> blacklist = new ArrayList<>();
     private List<Pattern> whitelistPatterns = new ArrayList<>();
@@ -32,8 +35,20 @@ public class GlobalFilter {
     
     /**
      * 统一的处理逻辑
+     * ✅ 检查顺序：URL有效性检查 → 静态资源过滤 → 黑白名单 → 通过
      */
     private boolean shouldProcess(String url, String type) {
+        // ✅ 0. 最优先：检查URL有效性
+        if (url == null || url.isEmpty()) {
+            return false; // URL无效，不处理
+        }
+        
+        // ✅ 1. 检查静态资源（默认启用）
+        if (staticResourceFilterEnabled && StaticResourceFilter.isStaticResource(url)) {
+            return false; // 静态资源，不处理
+        }
+        
+        // ✅ 2. 检查黑白名单（白名单优先）
         // 如果白名单启用，检查是否在白名单中
         if (whitelistEnabled && !whitelist.isEmpty()) {
             boolean inWhitelist = false;
@@ -63,9 +78,14 @@ public class GlobalFilter {
         
         // 如果黑名单启用，检查是否在黑名单中
         if (blacklistEnabled && !blacklist.isEmpty()) {
+            // ✅ 修复：确保URL不为null且不为空
+            if (url == null || url.isEmpty()) {
+                return true; // URL无效，跳过黑名单检查（已在前面检查过）
+            }
+            
             // 先检查字符串匹配
             for (String pattern : blacklist) {
-                if (url.contains(pattern)) {
+                if (pattern != null && !pattern.trim().isEmpty() && url.contains(pattern.trim())) {
                     return false; // 在黑名单中，不处理
                 }
             }
@@ -73,7 +93,7 @@ public class GlobalFilter {
             // 再使用编译好的正则表达式
             if (!blacklistPatterns.isEmpty()) {
                 for (Pattern regex : blacklistPatterns) {
-                    if (regex.matcher(url).find()) {
+                    if (regex != null && regex.matcher(url).find()) {
                         return false; // 在黑名单中，不处理
                     }
                 }
@@ -184,11 +204,13 @@ public class GlobalFilter {
     // Getters
     public boolean isWhitelistEnabled() { return whitelistEnabled; }
     public boolean isBlacklistEnabled() { return blacklistEnabled; }
+    public boolean isStaticResourceFilterEnabled() { return staticResourceFilterEnabled; }
     public List<String> getWhitelist() { return new ArrayList<>(whitelist); }
     public List<String> getBlacklist() { return new ArrayList<>(blacklist); }
     
     // Setters
     public void setWhitelistEnabled(boolean enabled) { this.whitelistEnabled = enabled; }
     public void setBlacklistEnabled(boolean enabled) { this.blacklistEnabled = enabled; }
+    public void setStaticResourceFilterEnabled(boolean enabled) { this.staticResourceFilterEnabled = enabled; }
 }
 

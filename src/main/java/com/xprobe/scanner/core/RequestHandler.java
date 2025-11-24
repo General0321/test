@@ -23,11 +23,13 @@ public class RequestHandler implements HttpHandler {
     private final com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner;
     private final XProbeConfigManager xprobeConfigManager;  // ✅ 改为配置管理器
     private final OriginalResponseCache responseCache;  // ✅ 原始响应缓存
+    private final GlobalFilter globalFilter;  // ✅ 添加GlobalFilter引用，用于检查黑白名单
     
     public RequestHandler(MontoyaApi api, ConfigurationManager configManager, 
                          RequestFilter requestFilter, TaskScheduler taskScheduler, 
                          com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner,
-                         XProbeConfigManager xprobeConfigManager, OriginalResponseCache responseCache) {
+                         XProbeConfigManager xprobeConfigManager, OriginalResponseCache responseCache,
+                         GlobalFilter globalFilter) {
         this.api = api;
         this.configManager = configManager;
         this.requestFilter = requestFilter;
@@ -35,6 +37,7 @@ public class RequestHandler implements HttpHandler {
         this.realtimeScanner = realtimeScanner;
         this.xprobeConfigManager = xprobeConfigManager;  // ✅ 改为配置管理器
         this.responseCache = responseCache;  // ✅ 保存响应缓存引用
+        this.globalFilter = globalFilter;  // ✅ 保存GlobalFilter引用
     }
     
     @Override
@@ -119,22 +122,20 @@ public class RequestHandler implements HttpHandler {
     
     /**
      * 检查请求是否应该扫描（重载：HttpRequest）
+     * ✅ 检查顺序：基本URL检查 → GlobalFilter（包含静态资源过滤和黑白名单）
      */
     private boolean shouldScanRequest(HttpRequest request) {
         try {
             String url = request.url();
             
-            // 基本URL检查（模拟RequestFilter的逻辑）
+            // 1. 基本URL检查
             if (url == null || url.isEmpty()) {
                 return false;
             }
             
-            // 检查静态资源（简化版）
-            String[] staticExtensions = {".js", ".css", ".jpg", ".png", ".gif", ".svg", ".ico", ".woff", ".ttf"};
-            for (String ext : staticExtensions) {
-                if (url.toLowerCase().endsWith(ext)) {
-                    return false;
-                }
+            // ✅ 2. 使用GlobalFilter统一检查（包含静态资源过滤和黑白名单，已在GlobalFilter内部按正确顺序处理）
+            if (globalFilter != null && !globalFilter.shouldProcessPassive(url)) {
+                return false;
             }
             
             return true;

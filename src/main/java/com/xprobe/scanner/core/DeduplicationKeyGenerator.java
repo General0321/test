@@ -67,7 +67,6 @@ public class DeduplicationKeyGenerator {
                                      String targetIdentifier,
                                      Integer pairId) {
         // 基础部分
-        String cleanPath = cleanPath(path);
         String normalizedContentType = normalizeContentType(contentType);
         String ruleId = config.getRuleId();
         
@@ -96,12 +95,16 @@ public class DeduplicationKeyGenerator {
                 
             case PATH:
                 // 路径级：每个路径只测试一次
-                return String.format("%s|%s|%s", ruleId, host, cleanPath);
+                // ✅ 修复：使用标准化路径，忽略路径中的参数值
+                String normalizedPath = normalizePathForDeduplication(path);
+                return String.format("%s|%s|%s", ruleId, host, normalizedPath);
                 
             case REQUEST:
                 // 请求级：每个完整请求只测试一次
+                // ✅ 修复：使用标准化路径，忽略路径中的参数值
+                String normalizedPathForRequest = normalizePathForDeduplication(path);
                 return String.format("%s|%s|%s|%s|%s",
-                    ruleId, method, host, cleanPath, normalizedContentType
+                    ruleId, method, host, normalizedPathForRequest, normalizedContentType
                 );
                 
             case PARAMETER_NAME_GLOBAL:
@@ -112,23 +115,29 @@ public class DeduplicationKeyGenerator {
                 
             case PARAMETER_NAME_PER_PATH:
                 // 参数名(路径级)：每个路径下的参数名分别测试
+                // ✅ 修复：使用标准化路径，忽略路径中的参数值
+                String normalizedPathForParam = normalizePathForDeduplication(path);
                 return String.format("%s|%s|%s|%s",
-                    ruleId, host, cleanPath, 
+                    ruleId, host, normalizedPathForParam, 
                     targetIdentifier != null ? targetIdentifier : "default"
                 );
                 
             case PARAMETER:
                 // 参数级：每个请求中的参数分别扫描
+                // ✅ 修复：使用标准化路径，忽略路径中的参数值
+                String normalizedPathForParameter = normalizePathForDeduplication(path);
                 return String.format("%s|%s|%s|%s|%s|%s",
-                    ruleId, method, host, cleanPath, normalizedContentType,
+                    ruleId, method, host, normalizedPathForParameter, normalizedContentType,
                     targetIdentifier != null ? targetIdentifier : "default"
                 );
                 
             case INJECTION_POINT:
                 // 注入点级：每个注入点分别扫描
+                // ✅ 修复：使用标准化路径，忽略路径中的参数值
+                String normalizedPathForInjection = normalizePathForDeduplication(path);
                 String injectionPointHash = generateInjectionPointHash(config);
                 return String.format("%s|%s|%s|%s|%s|%s",
-                    ruleId, method, host, cleanPath, normalizedContentType, injectionPointHash
+                    ruleId, method, host, normalizedPathForInjection, normalizedContentType, injectionPointHash
                 );
                 
             case NONE:
@@ -140,8 +149,10 @@ public class DeduplicationKeyGenerator {
                 
             default:
                 // 默认使用REQUEST级别
+                // ✅ 修复：使用标准化路径，忽略路径中的参数值
+                String normalizedPathForDefault = normalizePathForDeduplication(path);
                 return String.format("%s|%s|%s|%s|%s",
-                    ruleId, method, host, cleanPath, normalizedContentType
+                    ruleId, method, host, normalizedPathForDefault, normalizedContentType
                 );
         }
     }
@@ -246,13 +257,71 @@ public class DeduplicationKeyGenerator {
     }
     
     /**
-     * 清理路径（去除查询字符串）
+     * 清理路径（去除查询字符串和fragment）
+     * ✅ 修复：确保去除查询字符串（?之后）和fragment（#之后）
      */
     private static String cleanPath(String path) {
         if (path == null || path.isEmpty()) {
             return "/";
         }
-        return path.contains("?") ? path.substring(0, path.indexOf("?")) : path;
+        
+        // 先去除fragment（#之后）
+        int fragmentIndex = path.indexOf('#');
+        if (fragmentIndex != -1) {
+            path = path.substring(0, fragmentIndex);
+        }
+        
+        // 再去除查询字符串（?之后）
+        int queryIndex = path.indexOf('?');
+        if (queryIndex != -1) {
+            path = path.substring(0, queryIndex);
+        }
+        
+        // 如果路径为空，返回默认路径
+        if (path.isEmpty()) {
+            return "/";
+        }
+        
+        return path;
+    }
+    
+    /**
+     * 标准化路径（用于PATH级别去重）
+     * 提取路径的基础结构，忽略参数值
+     * ✅ 修复：确保正确处理查询字符串，只保留路径部分
+     * 例如：
+     * - /ztbox?action=zpblog&appname=pcsearch → /ztbox
+     * - /it/u=123&fm=456 → /it/u=*&fm=*
+     */
+    private static String normalizePathForDeduplication(String path) {
+        if (path == null || path.isEmpty()) {
+            return "/";
+        }
+        
+        // ✅ 修复：先去除查询字符串和fragment（确保只保留路径部分）
+        String cleanPath = cleanPath(path);
+        
+        // ✅ 修复：如果路径中包含 `=`，说明路径中嵌入了参数（如 /it/u=123&fm=456 或 /it/u=123）
+        // 标准化：将参数值替换为 *
+        // 注意：需要确保 `=` 在路径部分，而不是域名中的点（如 `example.com`）
+        if (cleanPath.contains("=")) {
+            // 检查 `=` 是否在路径部分（在最后一个 `/` 之后）
+            int equalsIndex = cleanPath.indexOf('=');
+            int lastSlashIndex = cleanPath.lastIndexOf('/');
+            
+            if (equalsIndex > lastSlashIndex) {
+                // `=` 在路径部分，使用正则表达式将参数值替换为 *
+                // 匹配模式：参数名=参数值，将参数值替换为 *
+                // 注意：`[^&]+` 会匹配一个或多个非 `&` 字符，包括到字符串结尾
+                // 例如：
+                // - `/it/u=1085880584,4000660480&fm=225` → `/it/u=*&fm=*`
+                // - `/it/u=123` → `/it/u=*`
+                String normalized = cleanPath.replaceAll("=([^&]+)", "=*");
+                return normalized;
+            }
+        }
+        
+        return cleanPath;
     }
     
     /**

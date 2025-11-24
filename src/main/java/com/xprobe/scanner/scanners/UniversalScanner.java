@@ -16,8 +16,10 @@ import com.xprobe.scanner.models.ScanTask;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import java.util.Arrays;
@@ -66,6 +68,24 @@ public class UniversalScanner extends AbstractScanner {
         }
     }
     
+    // ✅ 内部类：Payload组合（用于生成笛卡尔积）
+    private static class PayloadCombination {
+        UnifiedHttpConfig.HttpElementConfig injectionPoint;
+        List<InjectionTarget> targets;
+        String resolvedPayload;
+        PayloadContext payloadContext;
+        
+        PayloadCombination(UnifiedHttpConfig.HttpElementConfig injectionPoint, 
+                          List<InjectionTarget> targets, 
+                          String resolvedPayload,
+                          PayloadContext payloadContext) {
+            this.injectionPoint = injectionPoint;
+            this.targets = targets;
+            this.resolvedPayload = resolvedPayload;
+            this.payloadContext = payloadContext;
+        }
+    }
+    
     private final OriginalResponseCache responseCache;
 
     public UniversalScanner(MontoyaApi api, com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner, XProbeConfigManager xprobeConfigManager, OriginalResponseCache responseCache) {
@@ -94,28 +114,59 @@ public class UniversalScanner extends AbstractScanner {
         Configuration config = task.getConfiguration();
         HttpRequest request = task.getRequest();
         
-        // 1. 检查规则是否启用
+        // ✅ 1. 优先检查黑白名单（在规则启用检查之前，提高性能）
+        // 通过realtimeScanner获取GlobalFilter
+        if (realtimeScanner != null && realtimeScanner.getGlobalFilter() != null) {
+            try {
+                String url = request.url();
+                if (url == null || url.isEmpty()) {
+                    return false; // URL无效，不处理
+                }
+                if (!realtimeScanner.getGlobalFilter().shouldProcessPassive(url)) {
+                    api.logging().raiseDebugEvent("请求被黑白名单过滤: " + url);
+                    return false;
+                }
+            } catch (Exception e) {
+                api.logging().raiseDebugEvent("检查黑白名单时出错: " + e.getMessage());
+                return false; // 出错时默认不处理
+            }
+        }
+        
+        // 2. 检查规则是否启用
         if (!config.isEnabled()) {
             return false;
         }
         
-        // 2. 检查是否有配对
+        // 3. 检查是否有配对
         List<RuleMatchPair> pairs = config.getPairs();
         if (pairs == null || pairs.isEmpty()) {
             return false;
         }
         
-        // 3. 检查是否至少有一个配对的请求条件匹配
+        // 4. 检查是否至少有一个配对的请求条件匹配
+        boolean hasMatchingPair = false;
         for (RuleMatchPair pair : pairs) {
             UnifiedHttpConfig requestConfig = pair.getRequestConfig();
             if (requestConfig != null && UnifiedHttpEvaluator.evaluate(request, requestConfig)) {
-                // 匹配成功，输出一条INFO日志
-                api.logging().raiseInfoEvent("✅ 规则 [" + config.getCustomLabel() + "] 匹配，准备扫描: " + request.url());
-                return true;
+                hasMatchingPair = true;
+                break;
             }
         }
         
-        return false;
+        if (!hasMatchingPair) {
+            return false;
+        }
+        
+        // ✅ 修复：检查是否所有目标都已去重
+        // 如果所有目标都已去重，返回false，不创建任务，避免显示在进度条中
+        if (areAllTargetsDeduplicated(request, config, pairs)) {
+            api.logging().raiseDebugEvent("规则 [" + config.getCustomLabel() + "] 的所有目标都已去重，跳过任务创建: " + request.url());
+            return false;
+        }
+        
+        // 匹配成功，输出一条INFO日志
+        api.logging().raiseInfoEvent("✅ 规则 [" + config.getCustomLabel() + "] 匹配，准备扫描: " + request.url());
+        return true;
     }
     
     @Override
@@ -133,6 +184,11 @@ public class UniversalScanner extends AbstractScanner {
     
     /**
      * 计算预计请求数量
+     * ✅ 改进：考虑去重颗粒度和不同注入模式
+     * 
+     * ⚠️ 注意：预计数量反映"最多可能发送的请求数"（最坏情况）
+     * - 如果发现漏洞，扫描会立即停止，实际发送的请求数会更少
+     * - 由于无法预知哪个payload会匹配，预计数量按所有payload都测试的情况计算
      */
     public int calculateExpectedRequestCount(ScanTask task) {
         Configuration config = task.getConfiguration();
@@ -175,13 +231,22 @@ public class UniversalScanner extends AbstractScanner {
                 continue;
             }
             
+            // ✅ 改进：模拟去重逻辑，获取去重后的validTargets
+            List<InjectionTarget> validTargets = simulateDeduplication(
+                allTargets, config, originalRequest, pair.getId()
+            );
+            
+            if (validTargets.isEmpty()) {
+                continue;
+            }
+            
             // 根据注入模式计算请求数
             if (injectionMode == Configuration.InjectionMode.BATCH) {
                 // 批量模式：每个injectionPoint的每个payload发送1个请求
-                // ✅ 但需要检查该injectionPoint是否有匹配的targets（与实际扫描逻辑一致）
+                // ✅ 但需要检查该injectionPoint是否有匹配的validTargets（与实际扫描逻辑一致）
                 for (UnifiedHttpConfig.HttpElementConfig injectionPoint : injectionPoints) {
-                    // ✅ 检查该injectionPoint是否有匹配的targets
-                    List<InjectionTarget> pointTargets = allTargets.stream()
+                    // ✅ 检查该injectionPoint是否有匹配的validTargets
+                    List<InjectionTarget> pointTargets = validTargets.stream()
                         .filter(t -> t.injectionPoint == injectionPoint)
                         .collect(Collectors.toList());
                     
@@ -195,8 +260,8 @@ public class UniversalScanner extends AbstractScanner {
                     }
                 }
             } else {
-                // 逐个模式：每个target的每个payload发送1个请求
-                for (InjectionTarget target : allTargets) {
+                // 逐个模式：每个validTarget的每个payload发送1个请求
+                for (InjectionTarget target : validTargets) {
                     UnifiedHttpConfig.HttpElementConfig injectionPoint = target.injectionPoint;
                     List<String> payloads = injectionPoint.getPayloads();
                     if (payloads != null && !payloads.isEmpty()) {
@@ -207,6 +272,114 @@ public class UniversalScanner extends AbstractScanner {
         }
         
         return totalExpected;
+    }
+    
+    /**
+     * ✅ 模拟去重逻辑（用于计算预计数量）
+     * 与实际扫描时的 filterDuplicateTargets() 逻辑保持一致
+     * 
+     * @param allTargets 所有注入目标
+     * @param config 扫描配置
+     * @param originalRequest 原始请求
+     * @param pairId 配对ID
+     * @return 去重后的有效目标列表
+     */
+    private List<InjectionTarget> simulateDeduplication(List<InjectionTarget> allTargets,
+                                                        Configuration config,
+                                                        HttpRequest originalRequest,
+                                                        Integer pairId) {
+        // 获取请求上下文信息
+        String method = originalRequest.method();
+        String host = originalRequest.httpService().host();
+        String path = originalRequest.path();
+        String contentType = originalRequest.headers().stream()
+            .filter(h -> h.name().equalsIgnoreCase("Content-Type"))
+            .map(h -> h.value())
+            .findFirst()
+            .orElse(null);
+        
+        // 获取去重颗粒度
+        Configuration.DeduplicationGranularity granularity = config.getDeduplicationGranularity();
+        
+        // 如果是AUTO，自动检测
+        if (granularity == Configuration.DeduplicationGranularity.AUTO) {
+            granularity = detectGranularityForCalculation(config);
+        }
+        
+        List<InjectionTarget> validTargets = new ArrayList<>();
+        Set<String> seenKeys = new HashSet<>();
+        
+        // ✅ 特殊处理：GLOBAL/HOST/PATH/REQUEST 颗粒度，整个规则/主机/路径/请求只测试一次
+        if (granularity == Configuration.DeduplicationGranularity.GLOBAL ||
+            granularity == Configuration.DeduplicationGranularity.HOST ||
+            granularity == Configuration.DeduplicationGranularity.PATH ||
+            granularity == Configuration.DeduplicationGranularity.REQUEST) {
+            // 这些颗粒度下，只取第一个target（因为整个规则/主机/路径/请求只测试一次）
+            if (!allTargets.isEmpty()) {
+                InjectionTarget firstTarget = allTargets.get(0);
+                // 生成去重Key（用于后续标记）
+                String dedupKey = DeduplicationKeyGenerator.generateKey(
+                    method, host, path, contentType, config, firstTarget.name, pairId
+                );
+                firstTarget.dedupKey = dedupKey;
+                validTargets.add(firstTarget);
+            }
+            return validTargets;
+        }
+        
+        // ✅ 其他颗粒度：按去重Key去重
+        for (InjectionTarget target : allTargets) {
+            // 生成去重Key
+            String dedupKey = DeduplicationKeyGenerator.generateKey(
+                method, host, path, contentType, config, target.name, pairId
+            );
+            
+            // 检查这个key是否已经见过
+            if (!seenKeys.contains(dedupKey)) {
+                // 未见过，添加到有效目标列表
+                target.dedupKey = dedupKey;
+                validTargets.add(target);
+                seenKeys.add(dedupKey);
+            }
+        }
+        
+        return validTargets;
+    }
+    
+    /**
+     * ✅ 自动检测去重颗粒度（用于计算预计数量）
+     * 与 DeduplicationKeyGenerator.detectGranularity() 逻辑一致
+     */
+    private Configuration.DeduplicationGranularity detectGranularityForCalculation(Configuration config) {
+        // 检查是否有配对
+        if (config.getPairs() != null && !config.getPairs().isEmpty()) {
+            // 检查第一个配对的请求配置
+            var firstPair = config.getPairs().get(0);
+            if (firstPair.getRequestConfig() != null) {
+                var elements = firstPair.getRequestConfig().getElements();
+                
+                if (elements == null || elements.isEmpty()) {
+                    return Configuration.DeduplicationGranularity.REQUEST;
+                }
+                
+                // 检查是否有参数级别的注入
+                boolean hasParameterInjection = elements.stream()
+                    .anyMatch(e -> e.isUseForInjection() && 
+                                  (e.getType() == UnifiedHttpConfig.ElementType.PARAMETER ||
+                                   e.getType() == UnifiedHttpConfig.ElementType.HEADER ||
+                                   e.getType() == UnifiedHttpConfig.ElementType.COOKIE));
+                
+                if (hasParameterInjection) {
+                    return Configuration.DeduplicationGranularity.PARAMETER;
+                }
+                
+                // 否则使用请求级别
+                return Configuration.DeduplicationGranularity.REQUEST;
+            }
+        }
+        
+        // 默认使用请求级别
+        return Configuration.DeduplicationGranularity.REQUEST;
     }
     
     /**
@@ -224,6 +397,13 @@ public class UniversalScanner extends AbstractScanner {
             if (pairs == null || pairs.isEmpty()) {
                 api.logging().raiseDebugEvent("规则 " + config.getCustomLabel() + " 没有配置任何配对");
                 return results;
+            }
+            
+            // ✅ 修复：在扫描开始前检查是否所有目标都已去重
+            // 如果所有目标都已去重，立即返回空结果，避免创建无意义的任务进度
+            if (areAllTargetsDeduplicated(originalRequest, config, pairs)) {
+                api.logging().raiseDebugEvent("规则 " + config.getCustomLabel() + " 的所有目标都已去重，跳过扫描");
+                return results;  // 返回空结果，不创建任何ScanResult
             }
             
             // 初始化Payload解析器
@@ -329,13 +509,17 @@ public class UniversalScanner extends AbstractScanner {
                 
                 // 第一个结果作为主结果
                 PairEvaluationResult firstEval = allEvaluations.get(0);
+                // ✅ 修复：即使response为null，也要创建ScanResult（确保计数准确）
+                if (firstEval.response == null) {
+                    api.logging().raiseDebugEvent("⚠️ [扫描结果] 主结果响应为null，但仍创建ScanResult以保持计数准确");
+                }
                 ScanResult mainResult = new ScanResult.Builder()
                     .vulnerable(finalResult)  // 使用最终评估结果
                     .scanType(config.getCustomLabel())
                     .evidence(finalResult ? "检测到漏洞" : "测试请求")
                     .originalRequest(originalRequest)
                     .modifiedRequest(firstEval.modifiedRequest)
-                    .response(firstEval.response)
+                    .response(firstEval.response)  // 可能为null，但也要创建ScanResult
                     .responseTime(firstEval.responseTime)
                     .build();
                 results.add(mainResult);
@@ -349,13 +533,17 @@ public class UniversalScanner extends AbstractScanner {
                 // 其余的请求作为额外条目（标记为未命中）
                 for (int i = 1; i < allEvaluations.size(); i++) {
                     PairEvaluationResult eval = allEvaluations.get(i);
+                    // ✅ 修复：即使response为null，也要创建ScanResult（确保计数准确）
+                    if (eval.response == null) {
+                        api.logging().raiseDebugEvent("⚠️ [扫描结果] 评估结果 #" + (i + 1) + " 响应为null，但仍创建ScanResult以保持计数准确");
+                    }
                     ScanResult additionalResult = new ScanResult.Builder()
                         .vulnerable(false)  // 额外的流量条目标记为未命中
                         .scanType(config.getCustomLabel())
                         .evidence("测试请求 #" + (i + 1))
                         .originalRequest(originalRequest)
                         .modifiedRequest(eval.modifiedRequest)
-                        .response(eval.response)
+                        .response(eval.response)  // 可能为null，但也要创建ScanResult
                         .responseTime(eval.responseTime)
                         .build();
                     results.add(additionalResult);
@@ -366,6 +554,86 @@ public class UniversalScanner extends AbstractScanner {
             
             return results;
         });
+    }
+    
+    /**
+     * ✅ 检查是否所有目标都已去重（在扫描开始前检查）
+     * 如果所有目标都已去重，则不需要创建任务，直接返回空结果
+     * 
+     * @return true=所有目标都已去重（跳过扫描），false=有未去重的目标或被动检测（需要执行扫描）
+     */
+    private boolean areAllTargetsDeduplicated(HttpRequest originalRequest, Configuration config, List<RuleMatchPair> pairs) {
+        // 获取请求上下文信息
+        String method = originalRequest.method();
+        String host = originalRequest.httpService().host();
+        String path = originalRequest.path();
+        String contentType = originalRequest.headers().stream()
+            .filter(h -> h.name().equalsIgnoreCase("Content-Type"))
+            .map(h -> h.value())
+            .findFirst()
+            .orElse(null);
+        
+        // ✅ 标记是否有匹配的配对
+        boolean hasMatchingPair = false;
+        
+        // 检查每个配对
+        for (RuleMatchPair pair : pairs) {
+            UnifiedHttpConfig requestConfig = pair.getRequestConfig();
+            if (requestConfig == null) {
+                continue;
+            }
+            
+            // 检查请求是否匹配
+            if (!UnifiedHttpEvaluator.evaluate(originalRequest, requestConfig)) {
+                continue;  // 请求不匹配，跳过这个配对
+            }
+            
+            // ✅ 标记有匹配的配对
+            hasMatchingPair = true;
+            
+            // 获取注入点
+            List<UnifiedHttpConfig.HttpElementConfig> injectionPoints = requestConfig.getElements()
+                .stream()
+                .filter(UnifiedHttpConfig.HttpElementConfig::isUseForInjection)
+                .collect(Collectors.toList());
+            
+            // 如果没有注入点，执行被动检测（不需要去重检查）
+            if (injectionPoints.isEmpty()) {
+                return false;  // 有被动检测，需要执行
+            }
+            
+            // 收集所有注入目标
+            List<InjectionTarget> allTargets = new ArrayList<>();
+            for (UnifiedHttpConfig.HttpElementConfig injectionPoint : injectionPoints) {
+                List<InjectionTarget> targets = collectInjectionTargets(originalRequest, injectionPoint);
+                allTargets.addAll(targets);
+            }
+            
+            if (allTargets.isEmpty()) {
+                continue;  // 没有目标，跳过这个配对（但继续检查其他配对）
+            }
+            
+            // 检查是否有未去重的目标
+            for (InjectionTarget target : allTargets) {
+                String dedupKey = com.xprobe.scanner.core.DeduplicationKeyGenerator.generateKey(
+                    method, host, path, contentType, config, target.name, pair.getId()
+                );
+                
+                // 如果有一个目标未去重，就需要执行扫描
+                if (realtimeScanner == null || !realtimeScanner.isAlreadyProcessed(dedupKey)) {
+                    return false;  // 有未去重的目标，需要执行扫描
+                }
+            }
+        }
+        
+        // ✅ 修复：如果没有匹配的配对，返回false（不需要检查去重，因为根本没有匹配）
+        // 只有在有匹配的配对且所有目标都已去重时，才返回true
+        if (!hasMatchingPair) {
+            return false;  // 没有匹配的配对，不需要检查去重
+        }
+        
+        // 所有匹配配对的目标都已去重
+        return true;
     }
     
     /**
@@ -594,7 +862,9 @@ public class UniversalScanner extends AbstractScanner {
     }
     
     /**
-     * 批量模式评估：所有validTargets同时注入相同payload
+     * 批量模式评估：所有配置的injectionPoint组合在同一个数据包中
+     * ✅ 批量模式：对于PARAMETER/HEADER类型，所有命中的target都用同一个payload替换
+     * ✅ 生成所有payload组合（笛卡尔积），每个组合都包含所有配置的injectionPoint
      * ✅ 去重已在外部统一处理，这里只负责"怎么打"
      * @param validTargets 已经过去重过滤的有效目标列表
      * @param allEvaluations 用于保存所有评估结果的列表（包括未命中的）
@@ -615,7 +885,10 @@ public class UniversalScanner extends AbstractScanner {
         HttpRequest lastModifiedRequest = null;
         long lastResponseTime = 0;
         
-        // 批量模式：所有validTargets都会被同时注入相同的payload
+        // ✅ 收集所有injectionPoint及其payload，生成笛卡尔积
+        // 每个injectionPoint可能有多个payload，需要生成所有组合
+        List<List<PayloadCombination>> payloadCombinations = new ArrayList<>();
+        
         for (UnifiedHttpConfig.HttpElementConfig injectionPoint : injectionPoints) {
             List<String> payloads = injectionPoint.getPayloads();
             if (payloads == null || payloads.isEmpty()) {
@@ -631,137 +904,160 @@ public class UniversalScanner extends AbstractScanner {
                 continue;
             }
             
+            // ✅ 批量模式：对于PARAMETER/HEADER类型，所有target都用同一个payload
+            // 对于其他类型（Body、Method、Path等），只有一个target，批量和逐个没有区别
+            // 注意：injectPayload方法会自动处理所有匹配的target，所以这里不需要特殊处理
+            
             // 获取注入点的原始值（使用第一个有效目标的值）
             String originalValue = pointTargets.get(0).originalValue;
             
-            // 对每个payload进行测试
+            // 为这个injectionPoint的每个payload创建一个组合项
+            List<PayloadCombination> pointCombinations = new ArrayList<>();
             for (String rawPayload : payloads) {
-                try {
-                    // 解析payload变量
-                    Map<String, String> context = new HashMap<>();
-                    context.put("original", originalValue);
-                    PayloadContext payloadContext = payloadResolver.resolvePayload(rawPayload, context);
-                    registerPayloadVariables(pair.getId(), payloadContext, accumulatedVars);
-                    String resolvedPayload = payloadContext.getResolvedPayload();
-                    // ✨ 链式变量替换（支持 {{VAR:name}} 和 {{PAIR:id:name}}）
-                    // ✅ 优化：只在payload包含占位符时才进行替换
-                    if (resolvedPayload != null && resolvedPayload.contains("{{")) {
-                        resolvedPayload = CrossPairVariableExtractor.replaceVariables(resolvedPayload, accumulatedVars);
+                // 解析payload变量
+                Map<String, String> context = new HashMap<>();
+                context.put("original", originalValue);
+                PayloadContext payloadContext = payloadResolver.resolvePayload(rawPayload, context);
+                registerPayloadVariables(pair.getId(), payloadContext, accumulatedVars);
+                String resolvedPayload = payloadContext.getResolvedPayload();
+                // ✨ 链式变量替换（支持 {{VAR:name}} 和 {{PAIR:id:name}}）
+                if (resolvedPayload != null && resolvedPayload.contains("{{")) {
+                    resolvedPayload = CrossPairVariableExtractor.replaceVariables(resolvedPayload, accumulatedVars);
+                }
+                
+                // ✅ 批量模式：所有pointTargets都用同一个payload（对于PARAMETER/HEADER类型）
+                pointCombinations.add(new PayloadCombination(injectionPoint, pointTargets, resolvedPayload, payloadContext));
+            }
+            
+            if (!pointCombinations.isEmpty()) {
+                payloadCombinations.add(pointCombinations);
+            }
+        }
+        
+        // ✅ 生成所有payload组合（笛卡尔积）
+        List<List<PayloadCombination>> allCombinations = generateCartesianProduct(payloadCombinations);
+        
+        // ✅ 对每个组合，将所有injectionPoint的payload注入到同一个请求中
+        for (List<PayloadCombination> combination : allCombinations) {
+            try {
+                // ✅ 从原始请求开始，依次注入所有injectionPoint的payload
+                HttpRequest modifiedRequest = originalRequest;
+                PayloadContext combinedPayloadContext = null;  // 用于响应评估
+                
+                // 收集所有需要标记的targets
+                Set<InjectionTarget> allTargetsToMark = new HashSet<>();
+                
+                // 对组合中的每个injectionPoint，注入其payload
+                for (PayloadCombination combo : combination) {
+                    // ✅ 批量模式：使用injectPayload方法，所有匹配的target都用同一个payload
+                    HttpRequest tempRequest = injectPayload(modifiedRequest, combo.injectionPoint, combo.resolvedPayload);
+                    if (tempRequest == null) {
+                        // 如果某个injectionPoint注入失败，跳过这个组合
+                        modifiedRequest = null;
+                        break;
                     }
+                    modifiedRequest = tempRequest;
                     
-                    // 执行注入（批量模式：所有匹配参数都会被注入）
-                    HttpRequest modifiedRequest = injectPayload(originalRequest, injectionPoint, resolvedPayload);
-                    if (modifiedRequest == null) {
-                        continue;
-                    }
+                    // 保存payloadContext（使用最后一个，用于响应评估）
+                    combinedPayloadContext = combo.payloadContext;
                     
-                    // ✅ 优化：如果payload不为空，直接判断请求已修改，跳过序列化比较
-                    boolean requestChanged;
-                    if (resolvedPayload == null || resolvedPayload.isEmpty()) {
-                        // Payload为空，需要完整比较判断请求是否真的被修改
-                        requestChanged = isRequestModified(originalRequest, modifiedRequest);
-                    } else {
-                        // Payload不为空，请求肯定被修改了，直接返回true
-                        requestChanged = true;
-                    }
-                    HttpResponse response = null;
-                    long responseTime = 0;
-                    if (!requestChanged) {
-                        response = getCachedResponse(originalRequest);
-                        if (response != null) {
-                            api.logging().raiseDebugEvent("♻️ 批量模式未修改请求，复用原始响应");
-                        } else {
-                            long startTime = System.currentTimeMillis();
-                            response = api.http().sendRequest(modifiedRequest).response();
-                            responseTime = System.currentTimeMillis() - startTime;
-                        }
+                    // 收集需要标记的targets（批量模式：所有targets都标记）
+                    allTargetsToMark.addAll(combo.targets);
+                }
+                
+                if (modifiedRequest == null) {
+                    continue;
+                }
+                
+                // ✅ 检查请求是否被修改
+                boolean requestChanged = isRequestModified(originalRequest, modifiedRequest);
+                
+                // 发送请求
+                HttpResponse response = null;
+                long responseTime = 0;
+                if (!requestChanged) {
+                    response = getCachedResponse(originalRequest);
+                    if (response != null) {
+                        api.logging().raiseDebugEvent("♻️ 批量模式未修改请求，复用原始响应");
                     } else {
                         long startTime = System.currentTimeMillis();
                         response = api.http().sendRequest(modifiedRequest).response();
                         responseTime = System.currentTimeMillis() - startTime;
                     }
-                    
-                    // ✅ 立即标记所有pointTargets为已处理（遵循颗粒度）
-                    // 批量模式：这一个请求测试了所有pointTargets
-                    for (InjectionTarget target : pointTargets) {
-                        markTargetAsProcessed(target);
-                    }
-                    
-                    // ✅ 安全检查：确保响应不为null
-                    if (response == null) {
-                        api.logging().raiseErrorEvent("⚠️ 批量注入收到null响应");
-                        continue;
-                    }
-                    
-                    // ✅ 保存最后一个有效响应
-                    lastResponse = response;
-                    lastModifiedRequest = modifiedRequest;
-                    lastResponseTime = responseTime;
-                    
-                    // ✅ 将此评估添加到共享列表（确保所有请求都被记录）
-                    PairEvaluationResult evalResult = new PairEvaluationResult(false, response, modifiedRequest, responseTime);
-                    allEvaluations.add(evalResult);
-                    
-                    // ✅ 修复：响应评估逻辑移到 try 块内部
-                    // 评估响应
-                    api.logging().raiseDebugEvent("🔍 [批量注入] 开始评估响应，配对ID: " + pair.getId());
-                    // ✨ 如果响应配置为空，默认响应匹配通过（用于盲注等场景，只依赖跨Pair对比）
-                    boolean responseMatched;
-                    if (responseConfig.getElements() == null || responseConfig.getElements().isEmpty()) {
-                        responseMatched = true;  // 响应配置为空，跳过响应匹配
-                        api.logging().raiseDebugEvent("🔍 [批量注入] 响应配置为空，跳过响应匹配");
-                    } else {
-                        responseMatched = UnifiedResponseEvaluator.evaluate(
-                            response, responseConfig, payloadContext, responseTime, accumulatedVars
-                        );
-                        api.logging().raiseDebugEvent("🔍 [批量注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
-                    }
-                    
-                    // ✨ 新增：检查跨Pair特征对比（只在配置了跨Pair对比时才调用，避免性能开销）
-                    boolean crossPairMatched = true;  // 默认通过
-                    if (pair.getComparisonConfig() != null) {
-                        crossPairMatched = evaluateCrossPairComparison(
-                            pair, response, responseTime, allPairFeatures
-                        );
-                    }
-                    
-                    // 最终匹配结果：响应匹配 AND 跨Pair对比匹配（如果配置了）
-                    boolean finalMatched = responseMatched && crossPairMatched;
-                    
-                    // ✨ 新增：链式变量提取（extractVariables）- 无论是否匹配都提取
-                    if (pair.getExtractVariables() != null && !pair.getExtractVariables().isEmpty()) {
-                        try {
-                            java.util.Map<String, String> newVars = CrossPairVariableExtractor.extractVariables(response, pair.getExtractVariables());
-                            if (newVars != null && !newVars.isEmpty()) {
-                                // ✅ 修复：注册为多种格式，与 registerPayloadVariables 保持一致
-                                registerExtractedVariables(pair.getId(), newVars, accumulatedVars);
-                                api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] 批量注入提取变量: " + newVars.keySet());
-                            }
-                        } catch (Exception e) {
-                            // ✅ 修复：记录变量提取错误
-                            api.logging().raiseErrorEvent("❌ 配对 [" + pair.getId() + "] 批量注入变量提取失败: " + e.getMessage());
-                        }
-                    }
-                    
-                    if (finalMatched) {
-                        // ✅ 修复：添加 null 检查，防止 NPE
-                        String payloadDisplay = (resolvedPayload != null && resolvedPayload.length() > 0)
-                            ? resolvedPayload.substring(0, Math.min(50, resolvedPayload.length()))
-                            : "(空payload)";
-                        api.logging().raiseDebugEvent(
-                            "配对 [" + pair.getId() + "] 批量注入匹配: " + 
-                            injectionPoint.getType().getDisplayName() + 
-                            ", Payload: " + payloadDisplay
-                        );
-                        // ✅ 修复：更新已添加到allEvaluations的对象状态，并返回它
-                        evalResult.matched = true;
-                        return evalResult;
-                    }
-                    
-                } catch (Exception e) {
-                    api.logging().raiseErrorEvent("❌ 批量注入时出错: " + e.getMessage());
-                    e.printStackTrace();
+                } else {
+                    long startTime = System.currentTimeMillis();
+                    response = api.http().sendRequest(modifiedRequest).response();
+                    responseTime = System.currentTimeMillis() - startTime;
                 }
+                
+                // ✅ 立即标记所有targets为已处理（遵循颗粒度）
+                for (InjectionTarget target : allTargetsToMark) {
+                    markTargetAsProcessed(target);
+                }
+                
+                // ✅ 安全检查：确保响应不为null
+                if (response == null) {
+                    api.logging().raiseErrorEvent("⚠️ 批量注入收到null响应");
+                    PairEvaluationResult evalResult = new PairEvaluationResult(false, null, modifiedRequest, responseTime);
+                    allEvaluations.add(evalResult);
+                    continue;
+                }
+                
+                // ✅ 保存最后一个有效响应
+                lastResponse = response;
+                lastModifiedRequest = modifiedRequest;
+                lastResponseTime = responseTime;
+                
+                // ✅ 将此评估添加到共享列表（确保所有请求都被记录）
+                PairEvaluationResult evalResult = new PairEvaluationResult(false, response, modifiedRequest, responseTime);
+                allEvaluations.add(evalResult);
+                
+                // ✅ 评估响应
+                api.logging().raiseDebugEvent("🔍 [批量注入] 开始评估响应，配对ID: " + pair.getId());
+                boolean responseMatched;
+                if (responseConfig.getElements() == null || responseConfig.getElements().isEmpty()) {
+                    responseMatched = true;  // 响应配置为空，跳过响应匹配
+                    api.logging().raiseDebugEvent("🔍 [批量注入] 响应配置为空，跳过响应匹配");
+                } else {
+                    responseMatched = UnifiedResponseEvaluator.evaluate(
+                        response, responseConfig, combinedPayloadContext, responseTime, accumulatedVars
+                    );
+                    api.logging().raiseDebugEvent("🔍 [批量注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
+                }
+                
+                // ✨ 新增：检查跨Pair特征对比
+                boolean crossPairMatched = true;
+                if (pair.getComparisonConfig() != null) {
+                    crossPairMatched = evaluateCrossPairComparison(
+                        pair, response, responseTime, allPairFeatures
+                    );
+                }
+                
+                // 最终匹配结果
+                boolean finalMatched = responseMatched && crossPairMatched;
+                
+                // ✨ 链式变量提取
+                if (pair.getExtractVariables() != null && !pair.getExtractVariables().isEmpty()) {
+                    try {
+                        java.util.Map<String, String> newVars = CrossPairVariableExtractor.extractVariables(response, pair.getExtractVariables());
+                        if (newVars != null && !newVars.isEmpty()) {
+                            registerExtractedVariables(pair.getId(), newVars, accumulatedVars);
+                            api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] 批量注入提取变量: " + newVars.keySet());
+                        }
+                    } catch (Exception e) {
+                        api.logging().raiseErrorEvent("❌ 配对 [" + pair.getId() + "] 批量注入变量提取失败: " + e.getMessage());
+                    }
+                }
+                
+                if (finalMatched) {
+                    api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] 批量注入匹配成功");
+                    evalResult.matched = true;
+                    return evalResult;
+                }
+                
+            } catch (Exception e) {
+                api.logging().raiseErrorEvent("❌ 批量注入时出错: " + e.getMessage());
+                e.printStackTrace();
             }
         }
         
@@ -783,7 +1079,46 @@ public class UniversalScanner extends AbstractScanner {
     }
     
     /**
-     * 逐个模式评估：每个validTarget分别注入
+     * ✅ 生成笛卡尔积（所有payload组合）
+     * 例如：[[A1, A2], [B1, B2, B3]] -> [[A1, B1], [A1, B2], [A1, B3], [A2, B1], [A2, B2], [A2, B3]]
+     */
+    private <T> List<List<T>> generateCartesianProduct(List<List<T>> lists) {
+        if (lists == null || lists.isEmpty()) {
+            return new ArrayList<>();
+        }
+        
+        if (lists.size() == 1) {
+            // 只有一个列表，每个元素作为一个组合
+            List<List<T>> result = new ArrayList<>();
+            for (T item : lists.get(0)) {
+                List<T> combination = new ArrayList<>();
+                combination.add(item);
+                result.add(combination);
+            }
+            return result;
+        }
+        
+        // 递归生成笛卡尔积
+        List<List<T>> result = new ArrayList<>();
+        List<T> firstList = lists.get(0);
+        List<List<T>> restProduct = generateCartesianProduct(lists.subList(1, lists.size()));
+        
+        for (T item : firstList) {
+            for (List<T> restCombination : restProduct) {
+                List<T> combination = new ArrayList<>();
+                combination.add(item);
+                combination.addAll(restCombination);
+                result.add(combination);
+            }
+        }
+        
+        return result;
+    }
+    
+    /**
+     * 逐个模式评估：每个validTarget分别注入，但所有配置的injectionPoint组合在同一个数据包中
+     * ✅ 逐个模式：对于PARAMETER/HEADER类型，每个target分别用每个payload替换
+     * ✅ 生成所有payload组合（笛卡尔积），每个组合都包含所有配置的injectionPoint
      * ✅ 去重已在外部统一处理，这里只负责"怎么打"
      * @param validTargets 已经过去重过滤的有效目标列表
      * @param allEvaluations 用于保存所有评估结果的列表（包括未命中的）
@@ -803,148 +1138,215 @@ public class UniversalScanner extends AbstractScanner {
         HttpRequest lastModifiedRequest = null;
         long lastResponseTime = 0;
         
-        // 逐个模式：每个validTarget分别测试
-        for (InjectionTarget target : validTargets) {
-            UnifiedHttpConfig.HttpElementConfig injectionPoint = target.injectionPoint;
+        // ✅ 收集所有injectionPoint及其payload，生成笛卡尔积
+        // 每个injectionPoint可能有多个payload，需要生成所有组合
+        List<List<PayloadCombination>> payloadCombinations = new ArrayList<>();
+        
+        for (UnifiedHttpConfig.HttpElementConfig injectionPoint : injectionPoints) {
             List<String> payloads = injectionPoint.getPayloads();
             if (payloads == null || payloads.isEmpty()) {
                 continue;
             }
             
-            // ✅ 标记：开始测试这个target（在第一个payload发送前标记）
-            boolean targetMarked = false;
+            // 获取属于这个injectionPoint的validTargets
+            List<InjectionTarget> pointTargets = validTargets.stream()
+                .filter(t -> t.injectionPoint == injectionPoint)
+                .collect(Collectors.toList());
             
-            // 对每个payload进行测试
-            for (String rawPayload : payloads) {
-                    try {
+            if (pointTargets.isEmpty()) {
+                continue;
+            }
+            
+            // ✅ 逐个模式：对于PARAMETER/HEADER类型，每个target分别用每个payload
+            // 对于其他类型（Body、Method、Path等），只有一个target，批量和逐个没有区别
+            UnifiedHttpConfig.ElementType elementType = injectionPoint.getType();
+            boolean isIndividualType = (elementType == UnifiedHttpConfig.ElementType.PARAMETER || 
+                                       elementType == UnifiedHttpConfig.ElementType.HEADER);
+            
+            // 为这个injectionPoint的每个payload创建一个组合项
+            List<PayloadCombination> pointCombinations = new ArrayList<>();
+            
+            if (isIndividualType) {
+                // ✅ 逐个模式：PARAMETER/HEADER类型，每个target分别用每个payload
+                for (InjectionTarget target : pointTargets) {
+                    String originalValue = target.originalValue;
+                    
+                    for (String rawPayload : payloads) {
                         // 解析payload变量
                         Map<String, String> context = new HashMap<>();
-                        context.put("original", target.originalValue);
+                        context.put("original", originalValue);
                         PayloadContext payloadContext = payloadResolver.resolvePayload(rawPayload, context);
                         registerPayloadVariables(pair.getId(), payloadContext, accumulatedVars);
                         String resolvedPayload = payloadContext.getResolvedPayload();
-                        // ✨ 链式变量替换（支持 {{VAR:name}} 和 {{PAIR:id:name}}）
-                        // ✅ 优化：只在payload包含占位符时才进行替换
+                        // ✨ 链式变量替换
                         if (resolvedPayload != null && resolvedPayload.contains("{{")) {
                             resolvedPayload = CrossPairVariableExtractor.replaceVariables(resolvedPayload, accumulatedVars);
                         }
                         
-                        // 执行单个注入
-                        HttpRequest modifiedRequest = injectPayloadToSingleTarget(
-                            originalRequest, injectionPoint, resolvedPayload, target
-                        );
-                        if (modifiedRequest == null) {
-                            continue;
-                        }
-                        
-                        // ✅ 优化：如果payload不为空，直接判断请求已修改，跳过序列化比较
-                        boolean requestChanged;
-                        if (resolvedPayload == null || resolvedPayload.isEmpty()) {
-                            // Payload为空，需要完整比较判断请求是否真的被修改
-                            requestChanged = isRequestModified(originalRequest, modifiedRequest);
-                        } else {
-                            // Payload不为空，请求肯定被修改了，直接返回true
-                            requestChanged = true;
-                        }
-                        HttpResponse response = null;
-                        long responseTime = 0;
-                        if (!requestChanged) {
-                            response = getCachedResponse(originalRequest);
-                            if (response != null) {
-                                api.logging().raiseDebugEvent("♻️ 逐个模式未修改请求，复用原始响应");
-                            } else {
-                                long startTime = System.currentTimeMillis();
-                                response = api.http().sendRequest(modifiedRequest).response();
-                                responseTime = System.currentTimeMillis() - startTime;
-                            }
-                        } else {
-                            long startTime = System.currentTimeMillis();
-                            response = api.http().sendRequest(modifiedRequest).response();
-                            responseTime = System.currentTimeMillis() - startTime;
-                        }
-                        
-                        // ✅ 立即标记此target为已处理（只标记一次）
-                        // 逐个模式：一旦开始测试某个target，立即标记，防止重复打
-                        if (!targetMarked) {
-                            markTargetAsProcessed(target);
-                            targetMarked = true;
-                        }
-                        
-                        // ✅ 安全检查：确保响应不为null
-                        if (response == null) {
-                            api.logging().raiseErrorEvent("⚠️ 逐个注入收到null响应");
-                            continue;
-                        }
-                        
-                        // ✅ 保存最后一个有效响应
-                        lastResponse = response;
-                        lastModifiedRequest = modifiedRequest;
-                        lastResponseTime = responseTime;
-                        
-                        // ✅ 将此评估添加到共享列表（确保所有请求都被记录）
-                        PairEvaluationResult evalResult = new PairEvaluationResult(false, response, modifiedRequest, responseTime);
-                        allEvaluations.add(evalResult);
-                        
-                        // ✅ 修复：响应评估逻辑移到 try 块内部
-                        // 评估响应
-                        api.logging().raiseDebugEvent("🔍 [逐个注入] 开始评估响应，配对ID: " + pair.getId() + ", 目标: " + target.name);
-                        // ✨ 如果响应配置为空，默认响应匹配通过（用于盲注等场景，只依赖跨Pair对比）
-                        boolean responseMatched;
-                        if (responseConfig.getElements() == null || responseConfig.getElements().isEmpty()) {
-                            responseMatched = true;  // 响应配置为空，跳过响应匹配
-                            api.logging().raiseDebugEvent("🔍 [逐个注入] 响应配置为空，跳过响应匹配");
-                        } else {
-                            responseMatched = UnifiedResponseEvaluator.evaluate(
-                                response, responseConfig, payloadContext, responseTime, accumulatedVars
-                            );
-                            api.logging().raiseDebugEvent("🔍 [逐个注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
-                        }
-                        
-                        // ✨ 新增：检查跨Pair特征对比（只在配置了跨Pair对比时才调用，避免性能开销）
-                        boolean crossPairMatched = true;  // 默认通过
-                        if (pair.getComparisonConfig() != null) {
-                            crossPairMatched = evaluateCrossPairComparison(
-                                pair, response, responseTime, allPairFeatures
-                            );
-                        }
-                        
-                        // 最终匹配结果：响应匹配 AND 跨Pair对比匹配（如果配置了）
-                        boolean finalMatched = responseMatched && crossPairMatched;
-                        
-                        // ✨ 新增：链式变量提取（extractVariables）- 无论是否匹配都提取
-                        if (pair.getExtractVariables() != null && !pair.getExtractVariables().isEmpty()) {
-                            try {
-                                java.util.Map<String, String> newVars = CrossPairVariableExtractor.extractVariables(response, pair.getExtractVariables());
-                                if (newVars != null && !newVars.isEmpty()) {
-                                    // ✅ 修复：注册为多种格式，与 registerPayloadVariables 保持一致
-                                    registerExtractedVariables(pair.getId(), newVars, accumulatedVars);
-                                    api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] 逐个注入提取变量: " + newVars.keySet());
-                                }
-                            } catch (Exception e) {
-                                // ✅ 修复：记录变量提取错误
-                                api.logging().raiseErrorEvent("❌ 配对 [" + pair.getId() + "] 逐个注入变量提取失败: " + e.getMessage());
-                            }
-                        }
-                        
-                        if (finalMatched) {
-                            // ✅ 修复：添加 null 检查，防止 NPE
-                            String payloadDisplay = (resolvedPayload != null && resolvedPayload.length() > 0)
-                                ? resolvedPayload.substring(0, Math.min(50, resolvedPayload.length()))
-                                : "(空payload)";
-                            api.logging().raiseDebugEvent(
-                                "配对 [" + pair.getId() + "] 逐个注入匹配: " + 
-                                injectionPoint.getType().getDisplayName() + 
-                                " [" + target.name + "], Payload: " + payloadDisplay
-                            );
-                            // ✅ 修复：更新已添加到allEvaluations的对象状态，并返回它
-                            evalResult.matched = true;
-                            return evalResult;
-                        }
-                        
-                    } catch (Exception e) {
-                        api.logging().raiseErrorEvent("❌ 逐个注入时出错: " + e.getMessage());
+                        // ✅ 逐个模式：每个target单独创建一个组合
+                        pointCombinations.add(new PayloadCombination(injectionPoint, java.util.Arrays.asList(target), resolvedPayload, payloadContext));
                     }
                 }
+            } else {
+                // ✅ 其他类型（Body、Method、Path等）：只有一个target，批量和逐个没有区别
+                String originalValue = pointTargets.get(0).originalValue;
+                
+                for (String rawPayload : payloads) {
+                    // 解析payload变量
+                    Map<String, String> context = new HashMap<>();
+                    context.put("original", originalValue);
+                    PayloadContext payloadContext = payloadResolver.resolvePayload(rawPayload, context);
+                    registerPayloadVariables(pair.getId(), payloadContext, accumulatedVars);
+                    String resolvedPayload = payloadContext.getResolvedPayload();
+                    // ✨ 链式变量替换
+                    if (resolvedPayload != null && resolvedPayload.contains("{{")) {
+                        resolvedPayload = CrossPairVariableExtractor.replaceVariables(resolvedPayload, accumulatedVars);
+                    }
+                    
+                    // 其他类型：所有targets用同一个payload（实际上只有一个target）
+                    pointCombinations.add(new PayloadCombination(injectionPoint, pointTargets, resolvedPayload, payloadContext));
+                }
+            }
+            
+            if (!pointCombinations.isEmpty()) {
+                payloadCombinations.add(pointCombinations);
+            }
+        }
+        
+        // ✅ 生成所有payload组合（笛卡尔积）
+        List<List<PayloadCombination>> allCombinations = generateCartesianProduct(payloadCombinations);
+        
+        // ✅ 对每个组合，将所有injectionPoint的payload注入到同一个请求中
+        for (List<PayloadCombination> combination : allCombinations) {
+            try {
+                // ✅ 从原始请求开始，依次注入所有injectionPoint的payload
+                HttpRequest modifiedRequest = originalRequest;
+                PayloadContext combinedPayloadContext = null;  // 用于响应评估
+                
+                // 收集所有需要标记的targets
+                Set<InjectionTarget> allTargetsToMark = new HashSet<>();
+                
+                // 对组合中的每个injectionPoint，注入其payload
+                for (PayloadCombination combo : combination) {
+                    // ✅ 逐个模式：使用injectPayloadToSingleTarget方法，只注入单个target
+                    // 注意：combo.targets在逐个模式下只包含一个target
+                    if (combo.targets.size() != 1) {
+                        api.logging().raiseErrorEvent("⚠️ 逐个模式：PayloadCombination应该只包含一个target");
+                        continue;
+                    }
+                    InjectionTarget target = combo.targets.get(0);
+                    
+                    HttpRequest tempRequest = injectPayloadToSingleTarget(
+                        modifiedRequest, combo.injectionPoint, combo.resolvedPayload, target
+                    );
+                    if (tempRequest == null) {
+                        // 如果某个injectionPoint注入失败，跳过这个组合
+                        modifiedRequest = null;
+                        break;
+                    }
+                    modifiedRequest = tempRequest;
+                    
+                    // 保存payloadContext（使用最后一个，用于响应评估）
+                    combinedPayloadContext = combo.payloadContext;
+                    
+                    // 收集需要标记的targets（逐个模式：只标记当前target）
+                    allTargetsToMark.add(target);
+                }
+                
+                if (modifiedRequest == null) {
+                    continue;
+                }
+                
+                // ✅ 检查请求是否被修改
+                boolean requestChanged = isRequestModified(originalRequest, modifiedRequest);
+                
+                // 发送请求
+                HttpResponse response = null;
+                long responseTime = 0;
+                if (!requestChanged) {
+                    response = getCachedResponse(originalRequest);
+                    if (response != null) {
+                        api.logging().raiseDebugEvent("♻️ 逐个模式未修改请求，复用原始响应");
+                    } else {
+                        long startTime = System.currentTimeMillis();
+                        response = api.http().sendRequest(modifiedRequest).response();
+                        responseTime = System.currentTimeMillis() - startTime;
+                    }
+                } else {
+                    long startTime = System.currentTimeMillis();
+                    response = api.http().sendRequest(modifiedRequest).response();
+                    responseTime = System.currentTimeMillis() - startTime;
+                }
+                
+                // ✅ 立即标记所有targets为已处理（逐个模式：每个target单独标记）
+                for (InjectionTarget target : allTargetsToMark) {
+                    markTargetAsProcessed(target);
+                }
+                
+                // ✅ 安全检查：确保响应不为null
+                if (response == null) {
+                    api.logging().raiseErrorEvent("⚠️ 逐个注入收到null响应");
+                    PairEvaluationResult evalResult = new PairEvaluationResult(false, null, modifiedRequest, responseTime);
+                    allEvaluations.add(evalResult);
+                    continue;
+                }
+                
+                // ✅ 保存最后一个有效响应
+                lastResponse = response;
+                lastModifiedRequest = modifiedRequest;
+                lastResponseTime = responseTime;
+                
+                // ✅ 将此评估添加到共享列表（确保所有请求都被记录）
+                PairEvaluationResult evalResult = new PairEvaluationResult(false, response, modifiedRequest, responseTime);
+                allEvaluations.add(evalResult);
+                
+                // ✅ 评估响应
+                api.logging().raiseDebugEvent("🔍 [逐个注入] 开始评估响应，配对ID: " + pair.getId());
+                boolean responseMatched;
+                if (responseConfig.getElements() == null || responseConfig.getElements().isEmpty()) {
+                    responseMatched = true;  // 响应配置为空，跳过响应匹配
+                    api.logging().raiseDebugEvent("🔍 [逐个注入] 响应配置为空，跳过响应匹配");
+                } else {
+                    responseMatched = UnifiedResponseEvaluator.evaluate(
+                        response, responseConfig, combinedPayloadContext, responseTime, accumulatedVars
+                    );
+                    api.logging().raiseDebugEvent("🔍 [逐个注入] 响应评估结果: " + (responseMatched ? "✅ 匹配" : "❌ 不匹配"));
+                }
+                
+                // ✨ 检查跨Pair特征对比
+                boolean crossPairMatched = true;
+                if (pair.getComparisonConfig() != null) {
+                    crossPairMatched = evaluateCrossPairComparison(
+                        pair, response, responseTime, allPairFeatures
+                    );
+                }
+                
+                // 最终匹配结果
+                boolean finalMatched = responseMatched && crossPairMatched;
+                
+                // ✨ 链式变量提取
+                if (pair.getExtractVariables() != null && !pair.getExtractVariables().isEmpty()) {
+                    try {
+                        java.util.Map<String, String> newVars = CrossPairVariableExtractor.extractVariables(response, pair.getExtractVariables());
+                        if (newVars != null && !newVars.isEmpty()) {
+                            registerExtractedVariables(pair.getId(), newVars, accumulatedVars);
+                            api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] 逐个注入提取变量: " + newVars.keySet());
+                        }
+                    } catch (Exception e) {
+                        api.logging().raiseErrorEvent("❌ 配对 [" + pair.getId() + "] 逐个注入变量提取失败: " + e.getMessage());
+                    }
+                }
+                
+                if (finalMatched) {
+                    api.logging().raiseDebugEvent("配对 [" + pair.getId() + "] 逐个注入匹配成功");
+                    evalResult.matched = true;
+                    return evalResult;
+                }
+                
+            } catch (Exception e) {
+                api.logging().raiseErrorEvent("❌ 逐个注入时出错: " + e.getMessage());
+                e.printStackTrace();
+            }
         }
         
         // ✅ 即使没有匹配，也返回最后一个响应（确保请求被记录）
@@ -974,7 +1376,13 @@ public class UniversalScanner extends AbstractScanner {
         
         switch (type) {
             case PARAMETER:
+                // ✅ 修复：PARAMETER类型只处理URL参数和POST参数，不包括Cookie参数
+                // Cookie参数应该使用COOKIE类型单独处理
                 for (var param : request.parameters()) {
+                    // 排除Cookie类型的参数
+                    if (param.type() == burp.api.montoya.http.message.params.HttpParameterType.COOKIE) {
+                        continue;
+                    }
                     if (shouldMatchTarget(param.name(), element)) {
                         targets.add(new InjectionTarget(param.name(), param.value(), param.type(), element));
                     }
@@ -1245,8 +1653,13 @@ public class UniversalScanner extends AbstractScanner {
                     
                 case PARAMETER:
                     // ✅ 改进：支持通过nameMatchConfig匹配多个参数名
-                    // 遍历所有请求参数
+                    // ✅ 修复：PARAMETER类型只处理URL参数和POST参数，不包括Cookie参数
+                    // 遍历所有请求参数（排除Cookie类型）
                     for (var param : originalRequest.parameters()) {
+                        // 排除Cookie类型的参数
+                        if (param.type() == burp.api.montoya.http.message.params.HttpParameterType.COOKIE) {
+                            continue;
+                        }
                         boolean shouldInject = false;
                         
                         // 1. 如果element.name有值，优先使用name匹配
@@ -1449,14 +1862,8 @@ public class UniversalScanner extends AbstractScanner {
                     break;
                     
                 case BODY:
-                    // 注入到Body
-                    if (target == UnifiedHttpConfig.InjectionTarget.ENTIRE) {
-                        modified = modified.withBody(payload);
-                    } else {
-                        // 部分替换（简单实现：直接追加）
-                        String originalBody = modified.bodyToString();
-                        modified = modified.withBody(originalBody + payload);
-                    }
+                    // ✅ 修复：BODY类型统一为完整替换原有的body
+                    modified = modified.withBody(payload);
                     break;
             }
             

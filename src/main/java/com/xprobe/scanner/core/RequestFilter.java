@@ -73,8 +73,16 @@ public class RequestFilter {
      * 检查黑白名单
      */
     private boolean passBlackWhiteList(HttpRequestToBeSent request) {
-        String url = request.url();
-        return globalFilter.shouldProcessPassive(url);
+        try {
+            String url = request.url();
+            if (url == null || url.isEmpty()) {
+                return false; // URL无效，不处理
+            }
+            return globalFilter.shouldProcessPassive(url);
+        } catch (Exception e) {
+            api.logging().raiseDebugEvent("检查黑白名单时出错: " + e.getMessage());
+            return false; // 出错时默认不处理
+        }
     }
     
     /**

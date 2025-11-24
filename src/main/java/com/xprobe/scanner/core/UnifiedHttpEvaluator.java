@@ -192,12 +192,18 @@ public class UnifiedHttpEvaluator {
     
     /**
      * 评估参数
+     * ✅ 修复：PARAMETER类型只处理URL参数和POST参数，不包括Cookie参数
      */
     private static boolean evaluateParameter(HttpRequest request, HttpElementConfig element) {
         List<ParsedHttpParameter> parameters = request.parameters();
         
-        // 遍历所有参数
+        // 遍历所有参数（排除Cookie类型）
         for (ParsedHttpParameter param : parameters) {
+            // ✅ 修复：排除Cookie类型的参数
+            if (param.type() == HttpParameterType.COOKIE) {
+                continue;
+            }
+            
             // 检查参数名
             boolean nameMatches = matchValue(param.name(), element.getNameMatchConfig());
             if (!nameMatches) {
@@ -424,6 +430,7 @@ public class UnifiedHttpEvaluator {
     
     /**
      * 获取匹配的参数名列表（用于注入）
+     * ✅ 修复：PARAMETER类型只处理URL参数和POST参数，不包括Cookie参数
      */
     public static List<String> getMatchedParameterNames(HttpRequest request, HttpElementConfig element) {
         List<String> matchedNames = new java.util.ArrayList<>();
@@ -434,6 +441,11 @@ public class UnifiedHttpEvaluator {
         
         List<ParsedHttpParameter> parameters = request.parameters();
         for (ParsedHttpParameter param : parameters) {
+            // ✅ 修复：排除Cookie类型的参数
+            if (param.type() == HttpParameterType.COOKIE) {
+                continue;
+            }
+            
             // 检查参数名是否匹配
             if (matchValue(param.name(), element.getNameMatchConfig())) {
                 matchedNames.add(param.name());
@@ -472,8 +484,13 @@ public class UnifiedHttpEvaluator {
                 return request.path();
                 
             case PARAMETER:
+                // ✅ 修复：PARAMETER类型只处理URL参数和POST参数，不包括Cookie参数
                 if (name != null && !name.isEmpty()) {
                     for (var param : request.parameters()) {
+                        // ✅ 修复：排除Cookie类型的参数
+                        if (param.type() == HttpParameterType.COOKIE) {
+                            continue;
+                        }
                         if (param.name().equals(name)) {
                             return param.value();
                         }

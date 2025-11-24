@@ -14,6 +14,9 @@ import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.table.DefaultTableCellRenderer;
+import javax.swing.text.Style;
+import javax.swing.text.StyleConstants;
+import javax.swing.text.StyledDocument;
 import java.awt.*;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -56,7 +59,7 @@ public class DashboardTab implements ScanTaskListener {
     private JLabel collectionModeLabel;
     
     // === 活动日志 ===
-    private JTextArea activityLogArea;
+    private JTextPane activityLogArea;  // ✅ 改为JTextPane以支持富文本（标红漏洞）
     private DefaultTableModel recentFindingsModel;
     private JTable recentFindingsTable;
     
@@ -154,13 +157,11 @@ public class DashboardTab implements ScanTaskListener {
         modeLabel.setForeground(new Color(41, 128, 185));
         
         // === 活动日志（性能优化）===
-        activityLogArea = new JTextArea(10, 40);
+        activityLogArea = new JTextPane();
         activityLogArea.setEditable(false);
         // ✅ 使用支持Unicode的字体（支持emoji显示）
         activityLogArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12)); // ✅ 字体大小12px，SANS_SERIF支持emoji
-        activityLogArea.setLineWrap(false); // ✅ 不自动换行，保持左对齐
         activityLogArea.setComponentOrientation(ComponentOrientation.LEFT_TO_RIGHT); // ✅ 确保从左到右
-        activityLogArea.setWrapStyleWord(true);
         activityLogArea.setDoubleBuffered(true);  // ✅ 启用双缓冲
         
         // === 最近发现表格（性能优化）===
@@ -317,7 +318,12 @@ public class DashboardTab implements ScanTaskListener {
         // 模式徽章
         JPanel modeBadge = createModeBadge();
         modeBadge.setAlignmentY(Component.CENTER_ALIGNMENT);
+        // ✅ 暂停/清空按钮
+        JButton pauseButton = createPauseButton();
+        pauseButton.setAlignmentY(Component.CENTER_ALIGNMENT);
         
+        rightPanel.add(pauseButton);
+        rightPanel.add(Box.createHorizontalStrut(12)); // ✅ 按钮和徽章之间的间距
         rightPanel.add(statusBadge);
         rightPanel.add(Box.createHorizontalStrut(12)); // ✅ 徽章之间的间距
         rightPanel.add(modeBadge);
@@ -326,6 +332,71 @@ public class DashboardTab implements ScanTaskListener {
         header.add(rightPanel, BorderLayout.EAST);
         
         return header;
+    }
+    
+    /**
+     * ✅ 创建暂停/清空按钮
+     */
+    private JButton createPauseButton() {
+        JButton button = new JButton("⏸️ 暂停所有") {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2d = (Graphics2D) g.create();
+                g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                
+                // 半透明白色背景
+                g2d.setColor(new Color(255, 255, 255, 51)); // rgba(255,255,255,0.2)
+                g2d.fillRoundRect(0, 0, getWidth(), getHeight(), 6, 6);
+                
+                g2d.dispose();
+                super.paintComponent(g);
+            }
+        };
+        button.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        button.setForeground(Color.WHITE);
+        button.setOpaque(false);
+        button.setBorder(new EmptyBorder(6, 12, 6, 12));
+        button.setFocusPainted(false);
+        button.setContentAreaFilled(false);
+        button.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        
+        // ✅ 添加点击事件
+        button.addActionListener(e -> {
+            int confirm = JOptionPane.showConfirmDialog(
+                button,
+                "确定要暂停所有任务并清空任务列表吗？\n\n" +
+                "此操作将：\n" +
+                "• 取消所有正在执行的扫描任务\n" +
+                "• 清空所有等待中的任务\n" +
+                "• 清空任务进度列表\n\n" +
+                "注意：已完成的扫描结果不会被清除。",
+                "确认暂停",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.WARNING_MESSAGE
+            );
+            
+            if (confirm == JOptionPane.YES_OPTION) {
+                if (taskScheduler != null) {
+                    taskScheduler.pauseAllTasksAndClear();
+                    addActivityLog("⏸️ 已暂停所有任务并清空任务列表", false);
+                    
+                    // 更新UI（通过调用公共方法）
+                    SwingUtilities.invokeLater(() -> {
+                        updateNonEventDrivenStatistics(true);  // 强制更新
+                        updateRulesList();
+                    });
+                } else {
+                    JOptionPane.showMessageDialog(
+                        button,
+                        "任务调度器未初始化",
+                        "错误",
+                        JOptionPane.ERROR_MESSAGE
+                    );
+                }
+            }
+        });
+        
+        return button;
     }
     
     /**
@@ -904,6 +975,8 @@ public class DashboardTab implements ScanTaskListener {
             activityLogArea.setText("");
             currentLogLines = 0;
             addActivityLog("日志已清空");
+            // ✅ 清空后重置样式
+            activityLogArea.getStyledDocument().removeStyle("vulnerabilityStyle");
         });
         
         header.add(title, BorderLayout.WEST);
@@ -1026,7 +1099,8 @@ public class DashboardTab implements ScanTaskListener {
      * ✅ 启动定时刷新（作为兜底机制）
      * 注意：扫描进度通过事件驱动实时更新，定时刷新主要用于：
      * 1. 更新其他统计数据（logModel、parameterCollector、arjunService）
-     * 2. 作为兜底机制，确保即使事件丢失也能更新
+     * 2. 更新进度条（作为兜底机制，确保即使事件丢失也能更新）
+     * 3. 作为兜底机制，确保即使事件丢失也能更新
      */
     private void startAutoRefresh() {
         autoRefreshTimer = new Timer(true);
@@ -1037,14 +1111,21 @@ public class DashboardTab implements ScanTaskListener {
                 if (panel.isVisible() && panel.isShowing()) {
                     // ✅ P2修复：直接调用内部实现，避免嵌套invokeLater
                     SwingUtilities.invokeLater(() -> {
-                        // ✅ 只更新非事件驱动的统计数据（logModel、parameterCollector、arjunService）
-                        // 扫描进度通过事件驱动实时更新，不需要定时刷新
                         // ✅ 定时刷新时强制更新（忽略节流限制）
                         updateNonEventDrivenStatistics(true);
+                        // ✅ 同时更新进度条（作为兜底机制，确保进度条实时更新）
+                        // ✅ 性能优化：只在有活动任务时更新进度条
+                        if (taskScheduler != null) {
+                            TaskScheduler.TaskProgressStatistics stats = taskScheduler.getProgressStatistics();
+                            // 只在有正在运行或等待的任务时更新进度条（减少不必要的刷新）
+                            if (stats.getScanningCount() > 0 || stats.getWaitingCount() > 0) {
+                                updateProgress();
+                            }
+                        }
                     });
                 }
             }
-        }, 30000, 30000); // ✅ 改为30秒刷新一次（作为兜底，因为扫描进度已通过事件驱动）
+        }, 2000, 2000); // ✅ 改为2秒刷新一次（平衡性能和实时性）
     }
     
     /**
@@ -1114,6 +1195,9 @@ public class DashboardTab implements ScanTaskListener {
         
         // ✅ 注意：扫描进度（progressInfoLabel、progressBar）主要通过事件驱动实时更新
         // 但这里作为兜底机制也会更新，确保数据同步
+        if (taskScheduler != null) {
+            updateProgress();  // ✅ 更新进度条
+        }
     }
     
     // === 数据更新方法 ===
@@ -1153,7 +1237,12 @@ public class DashboardTab implements ScanTaskListener {
                     "已发送: %d / 预计: %d 请求  (%d%%)  剩余: ~%d 请求",
                     totalSent, totalExpected, percent, remaining
                 ));
-                progressBar.setValue(percent);
+                // ✅ 性能优化：只在值变化时更新和刷新（减少不必要的UI更新）
+                int currentValue = progressBar.getValue();
+                if (currentValue != percent) {
+                    progressBar.setValue(percent);
+                    progressBar.repaint();
+                }
             } else if (totalSent > 0) {
                 // ✅ 如果有历史数据但预计为0（所有任务已完成），显示历史数据
                 progressInfoLabel.setText(String.format(
@@ -1161,10 +1250,12 @@ public class DashboardTab implements ScanTaskListener {
                     totalSent, totalSent
                 ));
                 progressBar.setValue(100);
+                progressBar.repaint();  // ✅ 强制刷新进度条
             } else {
                 // ✅ 初始状态
                 progressInfoLabel.setText("已发送: 0 / 预计: 0 请求  (0%)  剩余: ~0 请求");
                 progressBar.setValue(0);
+                progressBar.repaint();  // ✅ 强制刷新进度条
             }
         } else {
             // 暂时设置为0
@@ -1176,6 +1267,7 @@ public class DashboardTab implements ScanTaskListener {
     
     /**
      * 更新进度条（从TaskScheduler获取实际的扫描进度数据，包含历史累计数据）
+     * ✅ 性能优化：只在值或文本变化时更新UI
      */
     private void updateProgress() {
         if (taskScheduler != null) {
@@ -1188,26 +1280,55 @@ public class DashboardTab implements ScanTaskListener {
                 int percent = (totalSent * 100) / totalExpected;
                 int remaining = totalExpected - totalSent;
                 
-                progressInfoLabel.setText(String.format(
+                // ✅ 性能优化：只在值或文本变化时更新UI（减少不必要的UI更新）
+                int currentValue = progressBar.getValue();
+                String currentText = progressInfoLabel.getText();
+                String newText = String.format(
                     "已发送: %d / 预计: %d 请求  (%d%%)  剩余: ~%d 请求",
                     totalSent, totalExpected, percent, remaining
-                ));
-                progressBar.setValue(percent);
+                );
+                
+                if (currentValue != percent || !currentText.equals(newText)) {
+                    progressInfoLabel.setText(newText);
+                    progressBar.setValue(percent);
+                    progressBar.repaint();
+                }
             } else if (totalSent > 0) {
                 // ✅ 如果有历史数据但预计为0（所有任务已完成），显示历史数据
-                progressInfoLabel.setText(String.format(
+                String newText = String.format(
                     "已发送: %d / 预计: %d 请求  (100%%)  剩余: ~0 请求",
                     totalSent, totalSent
-                ));
-                progressBar.setValue(100);
+                );
+                String currentText = progressInfoLabel.getText();
+                int currentValue = progressBar.getValue();
+                
+                if (currentValue != 100 || !currentText.equals(newText)) {
+                    progressInfoLabel.setText(newText);
+                    progressBar.setValue(100);
+                    progressBar.repaint();
+                }
             } else {
                 // ✅ 初始状态
-                progressInfoLabel.setText("已发送: 0 / 预计: 0 请求  (0%)  剩余: ~0 请求");
-                progressBar.setValue(0);
+                String newText = "已发送: 0 / 预计: 0 请求  (0%)  剩余: ~0 请求";
+                String currentText = progressInfoLabel.getText();
+                int currentValue = progressBar.getValue();
+                
+                if (currentValue != 0 || !currentText.equals(newText)) {
+                    progressInfoLabel.setText(newText);
+                    progressBar.setValue(0);
+                    progressBar.repaint();
+                }
             }
         } else {
-            progressInfoLabel.setText("已发送: 0 / 预计: 0 请求  (0%)  剩余: ~0 请求");
-            progressBar.setValue(0);
+            String newText = "已发送: 0 / 预计: 0 请求  (0%)  剩余: ~0 请求";
+            String currentText = progressInfoLabel.getText();
+            int currentValue = progressBar.getValue();
+            
+            if (currentValue != 0 || !currentText.equals(newText)) {
+                progressInfoLabel.setText(newText);
+                progressBar.setValue(0);
+                progressBar.repaint();
+            }
         }
     }
     
@@ -1286,7 +1407,12 @@ public class DashboardTab implements ScanTaskListener {
                         "已发送: %d / 预计: %d 请求  (%d%%)  剩余: ~%d 请求",
                         totalSent, totalExpected, percent, remaining
                     ));
+                    // ✅ 性能优化：只在值变化时更新和刷新（减少不必要的UI更新）
+                int currentValue = progressBar.getValue();
+                if (currentValue != percent) {
                     progressBar.setValue(percent);
+                    progressBar.repaint();
+                }
                 } else if (totalSent > 0) {
                     // ✅ 如果有历史数据但预计为0（所有任务已完成），显示历史数据
                     progressInfoLabel.setText(String.format(
@@ -1294,10 +1420,12 @@ public class DashboardTab implements ScanTaskListener {
                         totalSent, totalSent
                     ));
                     progressBar.setValue(100);
+                progressBar.repaint();  // ✅ 强制刷新进度条
                 } else {
                     // ✅ 初始状态
                     progressInfoLabel.setText("已发送: 0 / 预计: 0 请求  (0%)  剩余: ~0 请求");
                     progressBar.setValue(0);
+                progressBar.repaint();  // ✅ 强制刷新进度条
                 }
                 
                 // ✅ 更新扫描中/等待中数量（扫描统计卡片）
@@ -1331,7 +1459,7 @@ public class DashboardTab implements ScanTaskListener {
                     addActivityLog(String.format(
                         "规则 \"%s\" → %s [完成] [警告] 发现 %d 个漏洞",
                         ruleName, interfaceText, vulnerabilityCount
-                    ));
+                    ), true);  // ✅ 标红漏洞记录
                 } else {
                     addActivityLog(String.format(
                         "规则 \"%s\" → %s [完成] 扫描完成",
@@ -1344,7 +1472,7 @@ public class DashboardTab implements ScanTaskListener {
                     addActivityLog(String.format(
                         "规则 \"%s\" [完成] [警告] 发现 %d 个漏洞",
                         ruleName, vulnerabilityCount
-                    ));
+                    ), true);  // ✅ 标红漏洞记录
                 } else {
                     addActivityLog(String.format(
                         "规则 \"%s\" [完成] 扫描完成",
@@ -1368,7 +1496,12 @@ public class DashboardTab implements ScanTaskListener {
                         "已发送: %d / 预计: %d 请求  (%d%%)  剩余: ~%d 请求",
                         totalSent, totalExpected, percent, remaining
                     ));
+                    // ✅ 性能优化：只在值变化时更新和刷新（减少不必要的UI更新）
+                int currentValue = progressBar.getValue();
+                if (currentValue != percent) {
                     progressBar.setValue(percent);
+                    progressBar.repaint();
+                }
                 } else if (totalSent > 0) {
                     // ✅ 如果有历史数据但预计为0（所有任务已完成），显示历史数据
                     progressInfoLabel.setText(String.format(
@@ -1376,10 +1509,12 @@ public class DashboardTab implements ScanTaskListener {
                         totalSent, totalSent
                     ));
                     progressBar.setValue(100);
+                progressBar.repaint();  // ✅ 强制刷新进度条
                 } else {
                     // ✅ 初始状态
                     progressInfoLabel.setText("已发送: 0 / 预计: 0 请求  (0%)  剩余: ~0 请求");
                     progressBar.setValue(0);
+                progressBar.repaint();  // ✅ 强制刷新进度条
                 }
                 
                 // ✅ 更新扫描中/等待中数量（扫描统计卡片）
@@ -1518,20 +1653,52 @@ public class DashboardTab implements ScanTaskListener {
      * 添加活动日志
      */
     public void addActivityLog(String message) {
+        addActivityLog(message, false);
+    }
+    
+    /**
+     * 添加活动日志（支持标红漏洞）
+     * @param message 日志消息
+     * @param isVulnerability 是否为漏洞记录（标红）
+     */
+    public void addActivityLog(String message, boolean isVulnerability) {
         SwingUtilities.invokeLater(() -> {
-            // ✅ 清理消息中的控制字符和无效字符，防止乱码
-            String cleanedMessage = cleanLogMessage(message);
+            try {
+                // ✅ 清理消息中的控制字符和无效字符，防止乱码
+                String cleanedMessage = cleanLogMessage(message);
             String timestamp = timeFormat.format(new Date());
-            String logEntry = String.format("[%s] %s\n", timestamp, cleanedMessage);
-            activityLogArea.append(logEntry);
+                String logEntry = String.format("[%s] %s\n", timestamp, cleanedMessage);
+                
+                StyledDocument doc = activityLogArea.getStyledDocument();
+                int start = doc.getLength();
+                
+                // 插入日志内容
+                doc.insertString(start, logEntry, null);
+                
+                // ✅ 如果是漏洞记录，标红
+                if (isVulnerability) {
+                    Style style = activityLogArea.addStyle("vulnerabilityStyle", null);
+                    StyleConstants.setForeground(style, new Color(231, 76, 60)); // 红色
+                    StyleConstants.setBold(style, true);
+                    doc.setCharacterAttributes(start, logEntry.length(), style, false);
+                }
+                
             currentLogLines++;
             
             // 自动滚动到底部
-            activityLogArea.setCaretPosition(activityLogArea.getDocument().getLength());
+                activityLogArea.setCaretPosition(doc.getLength());
             
             // ✅ P1修复：只在每100行检查一次，性能提升100倍
             if (currentLogLines % 100 == 0 && currentLogLines > MAX_LOG_LINES) {
                 cleanupOldLogs();
+                }
+            } catch (Exception e) {
+                // 如果出错，回退到普通文本追加
+                String cleanedMessage = cleanLogMessage(message);
+                String timestamp = timeFormat.format(new Date());
+                String logEntry = String.format("[%s] %s\n", timestamp, cleanedMessage);
+                activityLogArea.setText(activityLogArea.getText() + logEntry);
+                currentLogLines++;
             }
         });
     }
@@ -1564,7 +1731,7 @@ public class DashboardTab implements ScanTaskListener {
      */
     private void cleanupOldLogs() {
         try {
-            javax.swing.text.Document doc = activityLogArea.getDocument();
+            StyledDocument doc = activityLogArea.getStyledDocument();
             String text = doc.getText(0, doc.getLength());
             String[] lines = text.split("\n");
             
@@ -1630,7 +1797,7 @@ public class DashboardTab implements ScanTaskListener {
         // ✅ 清理漏洞信息中的特殊字符，防止乱码
         String cleanType = cleanLogMessage(type);
         String cleanTarget = cleanLogMessage(target);
-        addActivityLog("发现漏洞: " + cleanType + " - " + cleanTarget);
+        addActivityLog("发现漏洞: " + cleanType + " - " + cleanTarget, true);  // ✅ 标红漏洞记录
     }
     
     /**
