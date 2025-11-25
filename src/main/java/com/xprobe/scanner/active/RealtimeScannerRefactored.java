@@ -529,13 +529,17 @@ public class RealtimeScannerRefactored {
         }
     }
     
+    public void triggerManualEndpointScan(String url) {
+        triggerManualEndpointScan(url, true);
+    }
+    
     /**
      * 对手动添加的端点进行 Arjun 扫描
      * 注意：手动添加的端点会尝试所有 method 和 contentType 组合
      * 
      * @param url 手动添加的 URL
      */
-    public void triggerManualEndpointScan(String url) {
+    public void triggerManualEndpointScan(String url, boolean runArjun) {
         try {
             api.logging().raiseInfoEvent("开始对手动添加的端点进行 Arjun 探测: " + url);
             
@@ -554,7 +558,7 @@ public class RealtimeScannerRefactored {
             
             CompletableFuture.runAsync(() -> {
                 try {
-                    performIncrementalArjunScan(true, url);
+                    performIncrementalArjunScan(true, url, runArjun);
                 } catch (Exception e) {
                     api.logging().raiseErrorEvent("手动端点 Arjun 扫描失败: " + e.getMessage());
                     e.printStackTrace();
@@ -565,21 +569,61 @@ public class RealtimeScannerRefactored {
             api.logging().raiseErrorEvent("触发手动端点 Arjun 扫描时出错: " + e.getMessage());
         }
     }
+
+    /**
+     * 仅执行接口探测（不触发Arjun）
+     * 从SiteMap读取历史流量，同步参数和接口统计
+     */
+    private void performIncrementalArjunScan() {
+        performIncrementalArjunScan(false, null, true);
+    }
+    
+    public java.util.concurrent.CompletableFuture<ParameterCollector.CollectorStatistics> triggerInterfaceDiscovery() {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                ParameterCollector.CollectorStatistics before = parameterCollector.getStatistics();
+                SiteMap siteMap = api.siteMap();
+                List<HttpRequestResponse> entries = siteMap.requestResponses();
+                int processed = 0;
+
+                for (HttpRequestResponse entry : entries) {
+                    if (entry == null || entry.request() == null) {
+                        continue;
+                    }
+
+                    if (parameterCollector.collectFromRequest(entry.request())) {
+                        processed++;
+                    }
+
+                    if (entry.response() != null) {
+                        parameterCollector.collectFromResponse(entry.request(), entry.response());
+                    }
+                }
+
+                ParameterCollector.CollectorStatistics after = parameterCollector.getStatistics();
+                int endpointDelta = after.getEndpointCount() - before.getEndpointCount();
+                int parameterDelta = after.getParameterCount() - before.getParameterCount();
+
+                api.logging().raiseInfoEvent(String.format(
+                    "接口探测完成: 处理 %d 条站点数据, 记录请求 %d 条, 新接口 %d 个, 新参数 %d 个",
+                    entries.size(),
+                    processed,
+                    Math.max(endpointDelta, 0),
+                    Math.max(parameterDelta, 0)
+                ));
+
+                return after;
+            } catch (Exception e) {
+                api.logging().raiseErrorEvent("接口探测失败: " + e.getMessage());
+                throw new RuntimeException(e);
+            }
+        });
+    }
     
     /**
      * 执行增量 Arjun 扫描（从 SiteMap/Proxy 收集的流量）
      */
-    private void performIncrementalArjunScan() {
-        performIncrementalArjunScan(false, null);
-    }
-    
-    /**
-     * 执行增量 Arjun 扫描
-     * 
-     * @param isManualEndpoint 是否为手动添加的端点
-     * @param manualUrl 手动添加的URL（如果isManualEndpoint=true）
-     */
-    private void performIncrementalArjunScan(boolean isManualEndpoint, String manualUrl) {
+    private void performIncrementalArjunScan(boolean isManualEndpoint, String manualUrl, boolean runArjun) {
         try {
             int totalScanned = 0;
             int totalSkipped = 0;
@@ -587,7 +631,7 @@ public class RealtimeScannerRefactored {
             
             if (isManualEndpoint && manualUrl != null) {
                 // 手动添加的端点：尝试所有 method 和 contentType 组合
-                totalScanned = scanManualEndpoint(manualUrl);
+                totalScanned = scanManualEndpoint(manualUrl, runArjun);
                 api.logging().raiseInfoEvent(String.format(
                     "手动端点扫描完成: 扫描 %d 个组合",
                     totalScanned
@@ -852,7 +896,7 @@ public class RealtimeScannerRefactored {
      * @param url 手动添加的 URL
      * @return 扫描的组合数量
      */
-    private int scanManualEndpoint(String url) {
+    private int scanManualEndpoint(String url, boolean runArjun) {
         try {
             URI uri = new URI(url);
             String host = uri.getHost();
@@ -892,7 +936,7 @@ public class RealtimeScannerRefactored {
                         method, host, contentType, endpoint, collectedParams
                     );
                     
-                    if (incrementalParams.isEmpty()) {
+                    if (incrementalParams.isEmpty() && runArjun) {
                         api.logging().raiseDebugEvent(String.format(
                             "跳过 %s %s (%s) %s (无新参数)",
                             method, host, contentType, endpoint
@@ -912,49 +956,65 @@ public class RealtimeScannerRefactored {
                     final String finalContentType = contentType;
                     
                     api.logging().raiseInfoEvent(String.format(
-                        "扫描手动端点: %s %s (%s) %s, 增量参数: %d",
+                        "%s手动端点: %s %s (%s) %s, 增量参数: %d",
+                        runArjun ? "扫描" : "验证",
                         method, host, contentType, endpoint, incrementalParams.size()
                     ));
                     
-                    // 异步调用 Arjun
-                    arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
-                        if (result.isSuccess()) {
-                            // ✅ 优化日志：区分找到参数和未找到参数的情况
-                            if (!result.getFoundParameters().isEmpty()) {
-                                api.logging().raiseInfoEvent(String.format(
-                                    "✅ Arjun 发现 %d 个参数: %s %s (%s) %s - %s",
-                                    result.getFoundParameters().size(),
+                    if (runArjun) {
+                        // 异步调用 Arjun
+                        arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                            if (result.isSuccess()) {
+                                if (!result.getFoundParameters().isEmpty()) {
+                                    api.logging().raiseInfoEvent(String.format(
+                                        "✅ Arjun 发现 %d 个参数: %s %s (%s) %s - %s",
+                                        result.getFoundParameters().size(),
+                                        finalMethod, host, finalContentType, endpoint, 
+                                        result.getFoundParameters()
+                                    ));
+                                    
+                                    String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                    notifyArjunResult(mainDomain, endpoint, result.getFoundParameters(), paramType);
+                                    triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                                } else {
+                                    api.logging().raiseDebugEvent(String.format(
+                                        "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
+                                        finalMethod, host, finalContentType, endpoint
+                                    ));
+                                }
+                                
+                                parameterManager.markParametersAsScanned(
                                     finalMethod, host, finalContentType, endpoint, 
-                                    result.getFoundParameters()
-                                ));
-                                
-                                // ✅ 通知UI显示结果
-                                String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
-                                notifyArjunResult(mainDomain, endpoint, result.getFoundParameters(), paramType);
-                                
-                                // ✅ 将发现的参数传递给漏洞扫描器
-                                triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                                    finalIncrementalParams
+                                );
                             } else {
-                                api.logging().raiseDebugEvent(String.format(
-                                    "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
+                                api.logging().raiseErrorEvent(
+                                    "Arjun 扫描失败: " + result.getErrorMessage()
+                                );
+                            }
+                        }).exceptionally(ex -> {
+                            api.logging().raiseErrorEvent("Arjun 异步执行失败: " + ex.getMessage());
+                            return null;
+                        });
+                    } else {
+                        try {
+                            HttpRequestResponse response = api.http().sendRequest(finalRequest);
+                            if (response != null && response.response() != null) {
+                                api.logging().raiseInfoEvent(String.format(
+                                    "接口探测完成: %s %s (%s) %s - 状态码 %d",
+                                    finalMethod, host, finalContentType, endpoint,
+                                    response.response().statusCode()
+                                ));
+                            } else {
+                                api.logging().raiseInfoEvent(String.format(
+                                    "接口探测完成: %s %s (%s) %s",
                                     finalMethod, host, finalContentType, endpoint
                                 ));
                             }
-                            
-                            // 标记参数为已扫描
-                            parameterManager.markParametersAsScanned(
-                                finalMethod, host, finalContentType, endpoint, 
-                                finalIncrementalParams
-                            );
-                        } else {
-                            api.logging().raiseErrorEvent(
-                                "Arjun 扫描失败: " + result.getErrorMessage()
-                            );
+                        } catch (Exception sendError) {
+                            api.logging().raiseErrorEvent("接口探测失败: " + sendError.getMessage());
                         }
-                    }).exceptionally(ex -> {
-                        api.logging().raiseErrorEvent("Arjun 异步执行失败: " + ex.getMessage());
-                        return null;
-                    });
+                    }
                     
                 scannedCount++;
             }
