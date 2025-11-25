@@ -88,6 +88,8 @@ public class RealtimeScannerRefactored {
     }
     private final Map<String, RandomPathBaseline> randomPathBaselineCache = new ConcurrentHashMap<>();
     private static final long RANDOM_PATH_CACHE_TTL = 300_000;  // 5分钟缓存有效期
+    // ✅ 修复：用于同步建立基准的锁映射（每个cacheKey一个锁，避免全局阻塞）
+    private final Map<String, Object> baselineLocks = new ConcurrentHashMap<>();
     
     // ✅ Arjun结果监听器（用于通知UI显示结果）
     private final List<ArjunResultListener> arjunResultListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -1070,7 +1072,7 @@ public class RealtimeScannerRefactored {
                                     endpointExists = validateEndpointWithRandomPath(
                                         url, finalRequest, originalResponse, 
                                         originalStatusCode, originalResponseBody,
-                                        finalMethod, host, finalDisplayContentType, endpoint, mainDomain
+                                        finalMethod, host, finalContentType, endpoint, mainDomain
                                     );
                                 } else if (originalStatusCode >= 500) {
                                     // 5xx服务器错误，可能是临时问题，保守处理为接口存在
@@ -1194,7 +1196,7 @@ public class RealtimeScannerRefactored {
                                 boolean endpointExists = validateEndpointWithRandomPath(
                                     url, finalRequest, originalResponse, 
                                     originalStatusCode, originalResponseBody,
-                                    finalMethod, host, finalDisplayContentType, endpoint, mainDomain
+                                    finalMethod, host, finalContentType, endpoint, mainDomain
                                 );
                                 
                                 if (!endpointExists) {
@@ -1435,10 +1437,30 @@ public class RealtimeScannerRefactored {
                                       endpoint, mainDomain);
         }
         
-        // ✅ 缓存不存在或已过期，发送2个随机路径建立基准
-        return establishBaselineAndValidate(url, originalRequest, originalResponse, originalStatusCode,
-                                           originalResponseBody, originalPath, method, host, contentType,
-                                           endpoint, mainDomain, cacheKey, currentTime);
+        // ✅ 修复：使用双重检查锁定模式，确保同一cacheKey只有一个线程在建立基准
+        // 获取或创建该cacheKey对应的锁对象
+        Object lock = baselineLocks.computeIfAbsent(cacheKey, k -> new Object());
+        
+        synchronized (lock) {
+            try {
+                // ✅ 再次检查缓存（双重检查），可能其他线程已经建立好了
+                baseline = randomPathBaselineCache.get(cacheKey);
+                if (baseline != null && (currentTime - baseline.timestamp) < RANDOM_PATH_CACHE_TTL) {
+                    // 其他线程已经建立好了基准，直接使用
+                    return validateWithBaseline(baseline, originalPath, originalStatusCode, originalResponseBody,
+                                              originalRequest, originalResponse, method, host, contentType, 
+                                              endpoint, mainDomain);
+                }
+                
+                // ✅ 缓存不存在或已过期，当前线程负责发送2个随机路径建立基准
+                return establishBaselineAndValidate(url, originalRequest, originalResponse, originalStatusCode,
+                                                   originalResponseBody, originalPath, method, host, contentType,
+                                                   endpoint, mainDomain, cacheKey, currentTime);
+            } finally {
+                // ✅ 建立完成后，清理锁（使用try-finally确保总是清理，避免内存泄漏）
+                baselineLocks.remove(cacheKey);
+            }
+        }
     }
     
     /**
