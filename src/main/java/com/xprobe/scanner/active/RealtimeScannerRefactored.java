@@ -55,6 +55,40 @@ public class RealtimeScannerRefactored {
     private final Map<String, Integer> lastParameterCount = new ConcurrentHashMap<>();
     private volatile int minParameterThreshold = 15;  // ✅ P1修复：volatile确保多线程可见性
     
+    // ✅ 随机路径基准响应缓存（按具体Host+方法+ContentType缓存，避免不同子域共享同一基准）
+    // ✅ 优化：使用双随机路径建立"不存在"的基准响应，更准确地区分泛解析、反射和真实接口
+    private static class RandomPathBaseline {
+        final String randomPath1;
+        final String randomPath2;
+        final int statusCode1;
+        final int statusCode2;
+        final String responseBody1;
+        final String responseBody2;
+        final long timestamp;
+        final boolean isWildcard;  // 是否为泛解析（两个随机路径响应相同）
+        final String baselineStatusCode;  // 基准状态码（如果两个随机路径相同）
+        final String baselineResponseBody;  // 基准响应体（如果两个随机路径相同，去除反射后）
+        
+        RandomPathBaseline(String randomPath1, String randomPath2,
+                          int statusCode1, int statusCode2,
+                          String responseBody1, String responseBody2,
+                          long timestamp, boolean isWildcard,
+                          String baselineStatusCode, String baselineResponseBody) {
+            this.randomPath1 = randomPath1;
+            this.randomPath2 = randomPath2;
+            this.statusCode1 = statusCode1;
+            this.statusCode2 = statusCode2;
+            this.responseBody1 = responseBody1;
+            this.responseBody2 = responseBody2;
+            this.timestamp = timestamp;
+            this.isWildcard = isWildcard;
+            this.baselineStatusCode = baselineStatusCode;
+            this.baselineResponseBody = baselineResponseBody;
+        }
+    }
+    private final Map<String, RandomPathBaseline> randomPathBaselineCache = new ConcurrentHashMap<>();
+    private static final long RANDOM_PATH_CACHE_TTL = 300_000;  // 5分钟缓存有效期
+    
     // ✅ Arjun结果监听器（用于通知UI显示结果）
     private final List<ArjunResultListener> arjunResultListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
     private volatile int cooldownSeconds = 300;  // ✅ P1修复：volatile确保多线程可见性
@@ -366,6 +400,8 @@ public class RealtimeScannerRefactored {
                 arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
                     if (result.isSuccess()) {
                         // ✅ 优化日志：区分找到参数和未找到参数的情况
+                        String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
+                        
                         if (!result.getFoundParameters().isEmpty()) {
                             api.logging().raiseInfoEvent(String.format(
                                 "✅ Arjun 发现 %d 个参数: %s - %s",
@@ -374,15 +410,16 @@ public class RealtimeScannerRefactored {
                             ));
                             
                             // ✅ 通知UI显示结果
-                            String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
                             notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
                             
                             triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
                         } else {
+                            // ✅ 修复：即使没有发现参数，也添加到表格中
                             api.logging().raiseDebugEvent(String.format(
                                 "Arjun 扫描完成，未发现隐藏参数: %s",
                                 epKey
                             ));
+                            notifyArjunResult(mainDomain, epKey.endpoint, new HashSet<>(), paramType);
                         }
                         parameterManager.markParametersAsScanned(
                             epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
@@ -732,6 +769,8 @@ public class RealtimeScannerRefactored {
                         arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
                             if (result.isSuccess()) {
                                 // ✅ 优化日志：区分找到参数和未找到参数的情况
+                                String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
+                                
                                 if (!result.getFoundParameters().isEmpty()) {
                                     api.logging().raiseInfoEvent(String.format(
                                         "✅ Arjun 发现 %d 个参数: %s - %s",
@@ -740,16 +779,17 @@ public class RealtimeScannerRefactored {
                                     ));
                                     
                                     // ✅ 通知UI显示结果
-                                    String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
                                     notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
                                     
                                     // ✅ 将发现的参数传递给漏洞扫描器
                                     triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
                                 } else {
+                                    // ✅ 修复：即使没有发现参数，也添加到表格中
                                     api.logging().raiseDebugEvent(String.format(
                                         "Arjun 扫描完成，未发现隐藏参数: %s",
                                         epKey
                                     ));
+                                    notifyArjunResult(mainDomain, epKey.endpoint, new HashSet<>(), paramType);
                                 }
                                 
                                 // 标记参数为已扫描
@@ -858,6 +898,8 @@ public class RealtimeScannerRefactored {
                     arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
                         if (result.isSuccess()) {
                             // ✅ 优化日志：区分找到参数和未找到参数的情况
+                            String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
+                            
                             if (!result.getFoundParameters().isEmpty()) {
                                 api.logging().raiseInfoEvent(String.format(
                                     "✅ Arjun 发现 %d 个参数: %s - %s",
@@ -866,16 +908,17 @@ public class RealtimeScannerRefactored {
                                 ));
                                 
                                 // ✅ 通知UI显示结果
-                                String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
                                 notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
                                 
                                 // ✅ 将发现的参数传递给漏洞扫描器
                                 triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
                             } else {
+                                // ✅ 修复：即使没有发现参数，也添加到表格中
                                 api.logging().raiseDebugEvent(String.format(
                                     "Arjun 扫描完成，未发现隐藏参数: %s",
                                     epKey
                                 ));
+                                notifyArjunResult(mainDomain, epKey.endpoint, new HashSet<>(), paramType);
                             }
                             
                             parameterManager.markParametersAsScanned(
@@ -995,9 +1038,6 @@ public class RealtimeScannerRefactored {
                         // ✅ 如果需要先探测接口，先进行接口探测
                         if (interfaceDiscoveryFirst) {
                             try {
-                                // 生成随机路径（UUID，确保唯一性）
-                                String randomPath = "/xprobe_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
-                                
                                 // 1. 先发送原始路径请求
                                 // ✅ 修复：检查HTTP服务是否可用
                                 if (api.http() == null) {
@@ -1026,10 +1066,11 @@ public class RealtimeScannerRefactored {
                                 boolean endpointExists = false;
                                 if (originalStatusCode != 404 && originalStatusCode != -1) {
                                     // ✅ 统一处理：2xx、3xx、其他4xx都需要验证
+                                    // ✅ 优化：使用缓存的随机路径响应，避免重复发送请求
                                     endpointExists = validateEndpointWithRandomPath(
-                                        url, randomPath, finalRequest, originalResponse, 
+                                        url, finalRequest, originalResponse, 
                                         originalStatusCode, originalResponseBody,
-                                        finalMethod, host, finalDisplayContentType, endpoint
+                                        finalMethod, host, finalDisplayContentType, endpoint, mainDomain
                                     );
                                 } else if (originalStatusCode >= 500) {
                                     // 5xx服务器错误，可能是临时问题，保守处理为接口存在
@@ -1072,6 +1113,8 @@ public class RealtimeScannerRefactored {
                         // 如果interfaceDiscoveryFirst=false，直接进行参数探测（不先探测接口）
                         arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
                             if (result.isSuccess()) {
+                                String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                
                                 if (!result.getFoundParameters().isEmpty()) {
                                     api.logging().raiseInfoEvent(String.format(
                                         "✅ Arjun 发现 %d 个参数: %s %s (%s) %s - %s",
@@ -1080,14 +1123,15 @@ public class RealtimeScannerRefactored {
                                         result.getFoundParameters()
                                     ));
                                     
-                                    String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
                                     notifyArjunResult(mainDomain, endpoint, result.getFoundParameters(), paramType);
                                     triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
                                 } else {
+                                    // ✅ 修复：即使没有发现参数，也添加到表格中
                                     api.logging().raiseDebugEvent(String.format(
                                         "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
                                         finalMethod, host, finalContentType, endpoint
                                     ));
+                                    notifyArjunResult(mainDomain, endpoint, new HashSet<>(), paramType);
                                 }
                                 
                                 parameterManager.markParametersAsScanned(
@@ -1106,10 +1150,8 @@ public class RealtimeScannerRefactored {
                     } else {
                         // ✅ 接口探测：使用随机路径对比验证接口是否存在
                         // 目的：避免泛解析、反射等导致的误判
+                        // ✅ 优化：随机路径由validateEndpointWithRandomPath内部缓存管理，每种类型只发送一次
                         try {
-                            // 生成随机路径（UUID，确保唯一性）
-                            String randomPath = "/xprobe_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
-                            
                             // 1. 先发送原始路径请求
                             // ✅ 修复：检查HTTP服务是否可用
                             if (api.http() == null) {
@@ -1148,10 +1190,11 @@ public class RealtimeScannerRefactored {
                             // 2. ✅ 如果原始路径返回非404（包括其他4xx、2xx、3xx），需要和随机路径的响应码和响应体对比
                             if (originalStatusCode != 404 && originalStatusCode != -1) {
                                 // ✅ 统一处理：2xx、3xx、其他4xx都需要验证
+                                // ✅ 优化：使用缓存的随机路径响应，避免重复发送请求
                                 boolean endpointExists = validateEndpointWithRandomPath(
-                                    url, randomPath, finalRequest, originalResponse, 
+                                    url, finalRequest, originalResponse, 
                                     originalStatusCode, originalResponseBody,
-                                    finalMethod, host, finalDisplayContentType, endpoint
+                                    finalMethod, host, finalDisplayContentType, endpoint, mainDomain
                                 );
                                 
                                 if (!endpointExists) {
@@ -1346,10 +1389,18 @@ public class RealtimeScannerRefactored {
     }
     
     /**
-     * ✅ 验证接口是否存在（通过随机路径对比）
+     * ✅ 验证接口是否存在（通过双随机路径对比建立基准）
+     * ✅ 优化：使用双随机路径建立"不存在"的基准响应，更准确地区分泛解析、反射和真实接口
+     * 
+     * 逻辑：
+     * 1. 首次建立基准：发送2个随机路径，对比响应确定"不存在"的响应特征
+     * 2. 后续接口判断：与基准响应对比，而非与单个随机路径对比
+     * 3. 基准类型：
+     *    - 两个随机路径都返回404 → 基准：404（真实接口应返回非404）
+     *    - 两个随机路径响应相同（去除反射后）→ 基准：泛解析响应
+     *    - 两个随机路径响应不同 → 可能是反射或其他，需要进一步判断
      * 
      * @param url 原始URL
-     * @param randomPath 随机路径
      * @param originalRequest 原始请求
      * @param originalResponse 原始响应
      * @param originalStatusCode 原始状态码
@@ -1358,178 +1409,265 @@ public class RealtimeScannerRefactored {
      * @param host 主机名
      * @param contentType Content-Type（原始请求的Content-Type）
      * @param endpoint 端点路径
+     * @param mainDomain 主域名（用于缓存key）
      * @return true表示接口存在，false表示接口不存在
      */
     private boolean validateEndpointWithRandomPath(
-            String url, String randomPath, HttpRequest originalRequest, 
+            String url, HttpRequest originalRequest, 
             HttpRequestResponse originalResponse, int originalStatusCode, 
             String originalResponseBody, String method, String host, 
-            String contentType, String endpoint) {
-        
-        // ✅ 只对比相同类型的随机路径请求
-        // 如果原始请求是GET，只对比GET的随机路径
-        // 如果原始请求是POST form-urlencoded，只对比POST form-urlencoded的随机路径
-        // 如果原始请求是POST JSON，只对比POST JSON的随机路径
-        String randomMethod = method;
-        String randomContentType = contentType;
+            String contentType, String endpoint, String mainDomain) {
         
         // ✅ 提取原始路径（用于去除反射）
         String originalPath = extractPathFromUrl(url);
         
-        // ✅ 发送相同类型的随机路径请求
-        HttpRequest randomPathRequest = buildRequestWithRandomPath(url, randomMethod, randomContentType, randomPath);
-        if (randomPathRequest == null) {
-            // 如果构建失败，保守处理，认为接口存在
-            api.logging().raiseDebugEvent(String.format(
-                "接口探测: %s %s (%s) %s - 无法构建随机路径请求，保守处理为接口存在",
-                method, host, contentType != null ? contentType : "N/A", endpoint
-            ));
-            if (originalResponse != null) {
-                parameterCollector.collectFromRequest(originalRequest);
-                if (originalResponse.response() != null) {
-                    parameterCollector.collectFromResponse(originalRequest, originalResponse.response());
-                }
+        // ✅ 生成缓存key：使用具体Host（含子域）+方法+ContentType，避免不同子域复用基线
+        String domainKey = (host != null && !host.isEmpty()) ? host : mainDomain;
+        String cacheKey = domainKey + "|" + method + "|" + (contentType != null ? contentType : "null");
+        
+        long currentTime = System.currentTimeMillis();
+        
+        // ✅ 检查缓存，如果存在且未过期，使用基准判断
+        RandomPathBaseline baseline = randomPathBaselineCache.get(cacheKey);
+        if (baseline != null && (currentTime - baseline.timestamp) < RANDOM_PATH_CACHE_TTL) {
+            return validateWithBaseline(baseline, originalPath, originalStatusCode, originalResponseBody,
+                                      originalRequest, originalResponse, method, host, contentType, 
+                                      endpoint, mainDomain);
+        }
+        
+        // ✅ 缓存不存在或已过期，发送2个随机路径建立基准
+        return establishBaselineAndValidate(url, originalRequest, originalResponse, originalStatusCode,
+                                           originalResponseBody, originalPath, method, host, contentType,
+                                           endpoint, mainDomain, cacheKey, currentTime);
+    }
+    
+    /**
+     * ✅ 使用已建立的基准判断接口是否存在
+     */
+    private boolean validateWithBaseline(RandomPathBaseline baseline, String originalPath,
+                                       int originalStatusCode, String originalResponseBody,
+                                       HttpRequest originalRequest, HttpRequestResponse originalResponse,
+                                       String method, String host, String contentType, String endpoint,
+                                       String mainDomain) {
+        // ✅ 场景1：基准是两个随机路径都返回404
+        if (baseline.statusCode1 == 404 && baseline.statusCode2 == 404) {
+            // 如果原始路径也返回404，说明接口不存在
+            if (originalStatusCode == 404) {
+                api.logging().raiseDebugEvent(String.format(
+                    "接口不存在: %s %s (%s) %s - 状态码 404 (基准：两个随机路径都返回404，使用缓存)",
+                    method, host, contentType != null ? contentType : "N/A", endpoint
+                ));
+                notifyInterfaceResult(mainDomain, endpoint, method, contentType, false);
+                return false;
             }
+            // 如果原始路径返回非404，说明接口存在
+            api.logging().raiseInfoEvent(String.format(
+                "✅ 接口存在: %s %s (%s) %s - 状态码 %d (基准：两个随机路径都返回404，使用缓存)",
+                method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
+            ));
+            collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
             return true;
         }
         
-        // ✅ 修复：检查HTTP服务是否可用
+        // ✅ 场景2：基准是泛解析（两个随机路径响应相同）
+        if (baseline.isWildcard && baseline.baselineStatusCode != null && baseline.baselineResponseBody != null) {
+            // 去除反射后对比
+            String cleanedOriginalBody = removeReflectedPath(originalResponseBody, originalPath, baseline.randomPath1);
+            String cleanedBaselineBody = baseline.baselineResponseBody;
+            
+            // 对比状态码和响应体
+            if (originalStatusCode == Integer.parseInt(baseline.baselineStatusCode) &&
+                cleanedOriginalBody != null && cleanedBaselineBody != null &&
+                cleanedOriginalBody.equals(cleanedBaselineBody)) {
+                // 与基准响应相同，说明接口不存在（泛解析）
+                api.logging().raiseDebugEvent(String.format(
+                    "接口不存在: %s %s (%s) %s - 状态码 %d，与基准响应相同 (泛解析，使用缓存)",
+                    method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
+                ));
+                notifyInterfaceResult(mainDomain, endpoint, method, contentType, false);
+                return false;
+            } else {
+                // 与基准响应不同，说明接口存在
+                api.logging().raiseInfoEvent(String.format(
+                    "✅ 接口存在: %s %s (%s) %s - 状态码 %d (与基准响应不同，验证通过，使用缓存)",
+                    method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
+                ));
+                collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+                return true;
+            }
+        }
+        
+        // ✅ 场景3：两个随机路径响应不同（可能是反射或其他复杂情况）
+        // 这种情况下，需要与两个随机路径都对比，如果与任一不同，认为接口存在
+        String cleanedOriginalBody = removeReflectedPath(originalResponseBody, originalPath, baseline.randomPath1);
+        String cleanedBaseline1 = removeReflectedPath(baseline.responseBody1, baseline.randomPath1, baseline.randomPath2);
+        String cleanedBaseline2 = removeReflectedPath(baseline.responseBody2, baseline.randomPath2, baseline.randomPath1);
+        
+        // 如果原始响应与两个随机路径响应都不同，认为接口存在
+        boolean differentFromBaseline1 = !cleanedOriginalBody.equals(cleanedBaseline1) || 
+                                        originalStatusCode != baseline.statusCode1;
+        boolean differentFromBaseline2 = !cleanedOriginalBody.equals(cleanedBaseline2) || 
+                                        originalStatusCode != baseline.statusCode2;
+        
+        if (differentFromBaseline1 && differentFromBaseline2) {
+            api.logging().raiseInfoEvent(String.format(
+                "✅ 接口存在: %s %s (%s) %s - 状态码 %d (与两个随机路径响应都不同，验证通过，使用缓存)",
+                method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
+            ));
+            collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+            return true;
+        } else {
+            // 与至少一个随机路径响应相同，保守处理为接口不存在
+            api.logging().raiseDebugEvent(String.format(
+                "接口不存在: %s %s (%s) %s - 状态码 %d (与随机路径响应相同，使用缓存)",
+                method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
+            ));
+            notifyInterfaceResult(mainDomain, endpoint, method, contentType, false);
+            return false;
+        }
+    }
+    
+    /**
+     * ✅ 建立基准并验证接口是否存在
+     */
+    private boolean establishBaselineAndValidate(String url, HttpRequest originalRequest,
+                                                HttpRequestResponse originalResponse, int originalStatusCode,
+                                                String originalResponseBody, String originalPath,
+                                                String method, String host, String contentType,
+                                                String endpoint, String mainDomain, String cacheKey,
+                                                long currentTime) {
+        // ✅ 生成2个随机路径
+        String randomPath1 = "/xprobe_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        String randomPath2 = "/xprobe_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        
+        // ✅ 检查HTTP服务是否可用
         if (api.http() == null) {
             api.logging().raiseErrorEvent("HTTP服务不可用，无法发送随机路径请求");
             // 保守处理，认为接口存在
-            if (originalResponse != null) {
-                parameterCollector.collectFromRequest(originalRequest);
-                if (originalResponse.response() != null) {
-                    parameterCollector.collectFromResponse(originalRequest, originalResponse.response());
-                }
-            }
+            collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
             return true;
         }
         
         try {
-            HttpRequestResponse randomResponse = api.http().sendRequest(randomPathRequest);
-            if (randomResponse != null && randomResponse.response() != null) {
-                int randomStatusCode = randomResponse.response().statusCode();
+            // ✅ 发送第一个随机路径请求
+            HttpRequest randomPathRequest1 = buildRequestWithRandomPath(url, method, contentType, randomPath1);
+            if (randomPathRequest1 == null) {
+                api.logging().raiseDebugEvent("无法构建第一个随机路径请求，保守处理为接口存在");
+                collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+                return true;
+            }
+            
+            HttpRequestResponse randomResponse1 = api.http().sendRequest(randomPathRequest1);
+            if (randomResponse1 == null || randomResponse1.response() == null) {
+                api.logging().raiseDebugEvent("第一个随机路径请求无响应，保守处理为接口存在");
+                collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+                return true;
+            }
+            
+            int randomStatusCode1 = randomResponse1.response().statusCode();
+            String randomResponseBody1 = randomResponse1.response().bodyToString();
+            
+            // ✅ 发送第二个随机路径请求
+            HttpRequest randomPathRequest2 = buildRequestWithRandomPath(url, method, contentType, randomPath2);
+            if (randomPathRequest2 == null) {
+                api.logging().raiseDebugEvent("无法构建第二个随机路径请求，保守处理为接口存在");
+                collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+                return true;
+            }
+            
+            HttpRequestResponse randomResponse2 = api.http().sendRequest(randomPathRequest2);
+            if (randomResponse2 == null || randomResponse2.response() == null) {
+                api.logging().raiseDebugEvent("第二个随机路径请求无响应，保守处理为接口存在");
+                collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+                return true;
+            }
+            
+            int randomStatusCode2 = randomResponse2.response().statusCode();
+            String randomResponseBody2 = randomResponse2.response().bodyToString();
+            
+            // ✅ 建立基准
+            boolean isWildcard = false;
+            String baselineStatusCode = null;
+            String baselineResponseBody = null;
+            
+            // ✅ 场景1：两个随机路径都返回404
+            if (randomStatusCode1 == 404 && randomStatusCode2 == 404) {
+                // 基准：404（真实接口应返回非404）
+                baselineStatusCode = "404";
+                baselineResponseBody = null;
+                isWildcard = false;
+            }
+            // ✅ 场景2：两个随机路径响应相同（去除反射后）→ 泛解析
+            else if (randomStatusCode1 == randomStatusCode2 && randomStatusCode1 >= 200 && randomStatusCode1 < 500) {
+                String cleanedBody1 = removeReflectedPath(randomResponseBody1, randomPath1, randomPath2);
+                String cleanedBody2 = removeReflectedPath(randomResponseBody2, randomPath2, randomPath1);
                 
-                // ✅ 如果随机路径返回404，说明原始路径可能真实存在
-                if (randomStatusCode == 404) {
-                    // 找到不同的响应（随机路径返回404），说明接口存在
-                    api.logging().raiseInfoEvent(String.format(
-                        "✅ 接口存在: %s %s (%s) %s - 状态码 %d (随机路径返回404，验证通过)",
-                        method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
-                    ));
-                    
-                    // 将接口信息收集到ParameterCollector
-                    if (originalResponse != null) {
-                        parameterCollector.collectFromRequest(originalRequest);
-                        if (originalResponse.response() != null) {
-                            parameterCollector.collectFromResponse(originalRequest, originalResponse.response());
-                        }
-                    }
-                    
-                    // ✅ 通知UI接口探测结果
-                    if (activeProbeTab != null) {
-                        try {
-                            URI uri = new URI(url);
-                            String mainDomain = extractMainDomain(uri.getHost());
-                            activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, method, contentType, true, System.currentTimeMillis());
-                        } catch (Exception e) {
-                            // 忽略错误
-                        }
-                    }
-                    
-                    return true;
-                }
-                
-                // ✅ 如果随机路径也返回非404，需要对比响应码和响应体
-                // 对于原始路径是4xx的情况，随机路径也可能返回4xx，所以范围是200-499
-                if (randomStatusCode >= 200 && randomStatusCode < 500) {
-                    String randomResponseBody = randomResponse.response().bodyToString();
-                    
-                    // ✅ 去除路径反射后再对比响应体
-                    // 如果路径出现在响应包中，去掉反射的路径字符后再对比
-                    String cleanedOriginalBody = removeReflectedPath(originalResponseBody, originalPath, randomPath);
-                    String cleanedRandomBody = removeReflectedPath(randomResponseBody, originalPath, randomPath);
-                    
-                    // ✅ 对比响应码和响应体
-                    if (originalStatusCode == randomStatusCode && 
-                        cleanedOriginalBody != null && cleanedRandomBody != null &&
-                        cleanedOriginalBody.equals(cleanedRandomBody)) {
-                        // 响应码和响应体都一样，说明接口不存在（可能是泛解析）
-                        api.logging().raiseDebugEvent(String.format(
-                            "接口不存在: %s %s (%s) %s - 状态码 %d，随机路径响应相同 (可能是泛解析)",
-                            method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
-                        ));
-                        
-                        // ✅ 通知UI接口探测结果
-                        if (activeProbeTab != null) {
-                            try {
-                                URI uri = new URI(url);
-                                String mainDomain = extractMainDomain(uri.getHost());
-                                activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, method, contentType, false, System.currentTimeMillis());
-                            } catch (Exception e) {
-                                // 忽略错误
-                            }
-                        }
-                        
-                        return false;
-                    } else {
-                        // 响应不同，说明接口可能存在
-                        api.logging().raiseInfoEvent(String.format(
-                            "✅ 接口存在: %s %s (%s) %s - 状态码 %d (随机路径响应不同，验证通过)",
-                            method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
-                        ));
-                        
-                        // 将接口信息收集到ParameterCollector
-                        if (originalResponse != null) {
-                            parameterCollector.collectFromRequest(originalRequest);
-                            if (originalResponse.response() != null) {
-                                parameterCollector.collectFromResponse(originalRequest, originalResponse.response());
-                            }
-                        }
-                        
-                        // ✅ 通知UI接口探测结果
-                        if (activeProbeTab != null) {
-                            try {
-                                URI uri = new URI(url);
-                                String mainDomain = extractMainDomain(uri.getHost());
-                                activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, method, contentType, true, System.currentTimeMillis());
-                            } catch (Exception e) {
-                                // 忽略错误
-                            }
-                        }
-                        
-                        return true;
-                    }
+                if (cleanedBody1 != null && cleanedBody2 != null && cleanedBody1.equals(cleanedBody2)) {
+                    // 两个随机路径响应相同，建立泛解析基准
+                    isWildcard = true;
+                    baselineStatusCode = String.valueOf(randomStatusCode1);
+                    baselineResponseBody = cleanedBody1;
                 }
             }
-        } catch (Exception e) {
-            // 如果随机路径请求失败，保守处理，认为接口存在
-            api.logging().raiseDebugEvent(String.format(
-                "接口探测: %s %s (%s) %s - 随机路径请求失败: %s，保守处理为接口存在",
-                method, host, contentType != null ? contentType : "N/A", endpoint, e.getMessage()
+            // ✅ 场景3：两个随机路径响应不同（可能是反射或其他）
+            // 这种情况下，isWildcard=false，baselineStatusCode和baselineResponseBody为null
+            
+            // ✅ 缓存基准
+            RandomPathBaseline baseline = new RandomPathBaseline(
+                randomPath1, randomPath2,
+                randomStatusCode1, randomStatusCode2,
+                randomResponseBody1, randomResponseBody2,
+                currentTime, isWildcard,
+                baselineStatusCode, baselineResponseBody
+            );
+            randomPathBaselineCache.put(cacheKey, baseline);
+            
+            api.logging().raiseInfoEvent(String.format(
+                "✅ 建立随机路径基准: %s %s (%s) - 类型: %s",
+                method, host != null ? host : mainDomain, contentType != null ? contentType : "N/A",
+                isWildcard ? "泛解析" : (randomStatusCode1 == 404 && randomStatusCode2 == 404 ? "404基准" : "复杂场景")
             ));
-            if (originalResponse != null) {
-                parameterCollector.collectFromRequest(originalRequest);
-                if (originalResponse.response() != null) {
-                    parameterCollector.collectFromResponse(originalRequest, originalResponse.response());
-                }
-            }
+            
+            // ✅ 使用新建立的基准判断当前接口
+            return validateWithBaseline(baseline, originalPath, originalStatusCode, originalResponseBody,
+                                      originalRequest, originalResponse, method, host, contentType,
+                                      endpoint, mainDomain);
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("建立随机路径基准失败: " + e.getMessage());
+            // 保守处理，认为接口存在
+            collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
             return true;
         }
-        
-        // ✅ 如果没有收到响应或响应状态码不在预期范围内，保守处理为接口存在
-        api.logging().raiseDebugEvent(String.format(
-            "接口探测: %s %s (%s) %s - 随机路径响应异常，保守处理为接口存在",
-            method, host, contentType != null ? contentType : "N/A", endpoint
-        ));
+    }
+    
+    /**
+     * ✅ 收集参数并通知UI接口探测结果
+     */
+    private void collectAndNotify(HttpRequest originalRequest, HttpRequestResponse originalResponse,
+                                  String mainDomain, String endpoint, String method, String contentType,
+                                  boolean exists) {
         if (originalResponse != null) {
             parameterCollector.collectFromRequest(originalRequest);
             if (originalResponse.response() != null) {
                 parameterCollector.collectFromResponse(originalRequest, originalResponse.response());
             }
         }
-        return true;
+        notifyInterfaceResult(mainDomain, endpoint, method, contentType, exists);
+    }
+    
+    /**
+     * ✅ 通知UI接口探测结果
+     */
+    private void notifyInterfaceResult(String mainDomain, String endpoint, String method,
+                                      String contentType, boolean exists) {
+        if (activeProbeTab != null) {
+            try {
+                activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, method, contentType, exists, System.currentTimeMillis());
+            } catch (Exception e) {
+                // 忽略错误
+            }
+        }
     }
     
     /**

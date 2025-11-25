@@ -697,9 +697,9 @@ public class ActiveProbeTab {
                     }
                 });
             } else {
-                // ✅ 直接进行Arjun参数探测（先探测接口）
+                // ✅ 直接进行Arjun参数探测（不先探测接口）
                 if (manualSource) {
-                    processManualTargets(manualTargets, true, true);
+                    processManualTargets(manualTargets, true, false);
                 } else {
                     arjunTask.run();
                 }
@@ -1352,15 +1352,21 @@ public class ActiveProbeTab {
         String timeStr = sdf.format(new java.util.Date(timestamp));
         
         // 参数列表（逗号分隔）
-        String paramsStr = String.join(", ", foundParameters);
+        String paramsStr = foundParameters.isEmpty() ? "" : String.join(", ", foundParameters);
         
         // 参数数量
         int paramCount = foundParameters.size();
-        String displayParams = paramCount <= 5 ? paramsStr : 
-                              paramsStr.substring(0, Math.min(50, paramsStr.length())) + "... (共" + paramCount + "个)";
+        String displayParams;
+        if (paramCount == 0) {
+            displayParams = "-";  // 没有发现参数
+        } else if (paramCount <= 5) {
+            displayParams = paramsStr;
+        } else {
+            displayParams = paramsStr.substring(0, Math.min(50, paramsStr.length())) + "... (共" + paramCount + "个)";
+        }
         
         // 验证状态
-        String verifyStatus = "✅ 已验证";
+        String verifyStatus = paramCount > 0 ? "✅ 已验证" : "⚠️ 未发现参数";
         
         // ✅ 添加到表格：探测类型, 目标域名, 接口, 发现参数, 参数类型, 验证状态, 探测时间
         arjunResultTableModel.addRow(new Object[]{
@@ -1373,7 +1379,7 @@ public class ActiveProbeTab {
             timeStr
         });
         
-        // ✅ 更新统计：只统计参数探测的结果
+        // ✅ 更新统计：只统计参数探测的结果（包括未发现参数的）
         int paramScanCount = 0;
         for (int i = 0; i < arjunResultTableModel.getRowCount(); i++) {
             Object type = arjunResultTableModel.getValueAt(i, 0);
@@ -1384,10 +1390,17 @@ public class ActiveProbeTab {
         arjunResultsLabel.setText("发现参数: " + paramScanCount);
         
         // 日志
-        api.logging().raiseInfoEvent(String.format(
-            "✨ Arjun发现参数: %s%s - 参数: %s (类型: %s)",
-            mainDomain, endpoint, paramsStr, parameterType
-        ));
+        if (paramCount > 0) {
+            api.logging().raiseInfoEvent(String.format(
+                "✨ Arjun发现参数: %s%s - 参数: %s (类型: %s)",
+                mainDomain, endpoint, paramsStr, parameterType
+            ));
+        } else {
+            api.logging().raiseDebugEvent(String.format(
+                "Arjun扫描完成: %s%s - 未发现参数 (类型: %s)",
+                mainDomain, endpoint, parameterType
+            ));
+        }
     }
     
     /**
