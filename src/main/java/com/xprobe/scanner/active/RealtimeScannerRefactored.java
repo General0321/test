@@ -19,6 +19,7 @@ import com.xprobe.scanner.utils.BoundedCache;
 import java.net.URI;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.regex.Pattern;
 
 /**
  * 实时扫描器（重构版） - 使用 ParameterCollector 和 ParameterManager
@@ -45,6 +46,9 @@ public class RealtimeScannerRefactored {
     
     // ✅ TaskScheduler引用（用于Arjun发现参数后触发漏洞扫描）
     private TaskScheduler taskScheduler;
+    
+    // ✅ ActiveProbeTab引用（用于接口探测结果回调）
+    private com.xprobe.scanner.ui.ActiveProbeTab activeProbeTab;
     
     // ✅ 智能触发机制（按主域名）
     private final Map<String, Long> lastArjunTriggerTime = new ConcurrentHashMap<>();
@@ -97,6 +101,13 @@ public class RealtimeScannerRefactored {
      */
     public void setTaskScheduler(TaskScheduler taskScheduler) {
         this.taskScheduler = taskScheduler;
+    }
+    
+    /**
+     * ✅ 设置ActiveProbeTab引用（用于接口探测结果回调）
+     */
+    public void setActiveProbeTab(com.xprobe.scanner.ui.ActiveProbeTab activeProbeTab) {
+        this.activeProbeTab = activeProbeTab;
     }
     
     // ========== 被动收集参数 ==========
@@ -538,8 +549,10 @@ public class RealtimeScannerRefactored {
      * 注意：手动添加的端点会尝试所有 method 和 contentType 组合
      * 
      * @param url 手动添加的 URL
+     * @param runArjun 是否执行Arjun参数探测
+     * @param interfaceDiscoveryFirst 是否先探测接口再参数探测（仅当runArjun=true时有效）
      */
-    public void triggerManualEndpointScan(String url, boolean runArjun) {
+    public void triggerManualEndpointScan(String url, boolean runArjun, boolean interfaceDiscoveryFirst) {
         try {
             api.logging().raiseInfoEvent("开始对手动添加的端点进行 Arjun 探测: " + url);
             
@@ -558,7 +571,7 @@ public class RealtimeScannerRefactored {
             
             CompletableFuture.runAsync(() -> {
                 try {
-                    performIncrementalArjunScan(true, url, runArjun);
+                    performIncrementalArjunScan(true, url, runArjun, interfaceDiscoveryFirst);
                 } catch (Exception e) {
                     api.logging().raiseErrorEvent("手动端点 Arjun 扫描失败: " + e.getMessage());
                     e.printStackTrace();
@@ -569,13 +582,23 @@ public class RealtimeScannerRefactored {
             api.logging().raiseErrorEvent("触发手动端点 Arjun 扫描时出错: " + e.getMessage());
         }
     }
+    
+    /**
+     * 对手动添加的端点进行 Arjun 扫描（兼容旧接口，默认不先探测接口）
+     * 
+     * @param url 手动添加的 URL
+     * @param runArjun 是否执行Arjun参数探测
+     */
+    public void triggerManualEndpointScan(String url, boolean runArjun) {
+        triggerManualEndpointScan(url, runArjun, false);
+    }
 
     /**
      * 仅执行接口探测（不触发Arjun）
      * 从SiteMap读取历史流量，同步参数和接口统计
      */
     private void performIncrementalArjunScan() {
-        performIncrementalArjunScan(false, null, true);
+        performIncrementalArjunScan(false, null, true, false);
     }
     
     public java.util.concurrent.CompletableFuture<ParameterCollector.CollectorStatistics> triggerInterfaceDiscovery() {
@@ -623,7 +646,7 @@ public class RealtimeScannerRefactored {
     /**
      * 执行增量 Arjun 扫描（从 SiteMap/Proxy 收集的流量）
      */
-    private void performIncrementalArjunScan(boolean isManualEndpoint, String manualUrl, boolean runArjun) {
+    private void performIncrementalArjunScan(boolean isManualEndpoint, String manualUrl, boolean runArjun, boolean interfaceDiscoveryFirst) {
         try {
             int totalScanned = 0;
             int totalSkipped = 0;
@@ -631,7 +654,7 @@ public class RealtimeScannerRefactored {
             
             if (isManualEndpoint && manualUrl != null) {
                 // 手动添加的端点：尝试所有 method 和 contentType 组合
-                totalScanned = scanManualEndpoint(manualUrl, runArjun);
+                totalScanned = scanManualEndpoint(manualUrl, runArjun, interfaceDiscoveryFirst);
                 api.logging().raiseInfoEvent(String.format(
                     "手动端点扫描完成: 扫描 %d 个组合",
                     totalScanned
@@ -896,7 +919,7 @@ public class RealtimeScannerRefactored {
      * @param url 手动添加的 URL
      * @return 扫描的组合数量
      */
-    private int scanManualEndpoint(String url, boolean runArjun) {
+    private int scanManualEndpoint(String url, boolean runArjun, boolean interfaceDiscoveryFirst) {
         try {
             URI uri = new URI(url);
             String host = uri.getHost();
@@ -915,9 +938,9 @@ public class RealtimeScannerRefactored {
             // 定义最常见的 HTTP 方法和 Content-Type 组合
             // 只测试最常见的3种组合，覆盖大多数场景
             String[][] combinations = {
-                {"GET", "application/x-www-form-urlencoded"},   // 普通GET请求
-                {"POST", "application/x-www-form-urlencoded"},  // 表单提交
-                {"POST", "application/json"}                    // JSON API
+                {"GET", "application/x-www-form-urlencoded"},                                    // GET请求（无Content-Type）
+                {"POST", "application/x-www-form-urlencoded"},     // POST表单提交
+                {"POST", "application/json"}                      // POST JSON API
             };
             
             int scannedCount = 0;
@@ -931,15 +954,20 @@ public class RealtimeScannerRefactored {
             for (String[] combo : combinations) {
                 String method = combo[0];
                 String contentType = combo[1];
-                    // 计算增量参数
-                    Set<String> incrementalParams = parameterManager.getIncrementalParameters(
-                        method, host, contentType, endpoint, collectedParams
-                    );
+                
+                // ✅ 修复：对于GET请求，使用null作为contentType（因为GET不需要Content-Type）
+                String contentTypeForKey = ("GET".equalsIgnoreCase(method)) ? null : contentType;
+                
+                // 计算增量参数
+                Set<String> incrementalParams = parameterManager.getIncrementalParameters(
+                    method, host, contentTypeForKey, endpoint, collectedParams
+                );
                     
                     if (incrementalParams.isEmpty() && runArjun) {
+                        String displayContentType = contentTypeForKey != null ? contentTypeForKey : "N/A";
                         api.logging().raiseDebugEvent(String.format(
                             "跳过 %s %s (%s) %s (无新参数)",
-                            method, host, contentType, endpoint
+                            method, host, displayContentType, endpoint
                         ));
                         continue;
                     }
@@ -953,16 +981,95 @@ public class RealtimeScannerRefactored {
                     final HttpRequest finalRequest = request;
                     final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
                     final String finalMethod = method;
-                    final String finalContentType = contentType;
+                    final String finalContentType = contentTypeForKey;  // ✅ 使用修正后的contentType
+                    final String finalDisplayContentType = contentTypeForKey != null ? contentTypeForKey : "N/A";
                     
                     api.logging().raiseInfoEvent(String.format(
                         "%s手动端点: %s %s (%s) %s, 增量参数: %d",
                         runArjun ? "扫描" : "验证",
-                        method, host, contentType, endpoint, incrementalParams.size()
+                        method, host, finalDisplayContentType, endpoint, incrementalParams.size()
                     ));
                     
+                    // ✅ 如果runArjun=true，根据interfaceDiscoveryFirst决定是否先探测接口
                     if (runArjun) {
-                        // 异步调用 Arjun
+                        // ✅ 如果需要先探测接口，先进行接口探测
+                        if (interfaceDiscoveryFirst) {
+                            try {
+                                // 生成随机路径（UUID，确保唯一性）
+                                String randomPath = "/xprobe_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+                                
+                                // 1. 先发送原始路径请求
+                                // ✅ 修复：检查HTTP服务是否可用
+                                if (api.http() == null) {
+                                    api.logging().raiseErrorEvent("HTTP服务不可用，无法发送接口探测请求");
+                                    continue;
+                                }
+                                
+                                HttpRequestResponse originalResponse = api.http().sendRequest(finalRequest);
+                                int originalStatusCode = -1;
+                                String originalResponseBody = null;
+                                if (originalResponse != null && originalResponse.response() != null) {
+                                    originalStatusCode = originalResponse.response().statusCode();
+                                    originalResponseBody = originalResponse.response().bodyToString();
+                                }
+                                
+                                // ✅ 如果原始路径返回404，直接断定不存在，跳过Arjun扫描
+                                if (originalStatusCode == 404) {
+                                    api.logging().raiseDebugEvent(String.format(
+                                        "接口不存在: %s %s (%s) %s - 状态码 404，跳过Arjun扫描",
+                                        finalMethod, host, finalDisplayContentType, endpoint
+                                    ));
+                                    continue;  // 跳过此接口
+                                }
+                                
+                                // 2. ✅ 如果原始路径返回非404，需要和随机路径的响应码和响应体对比
+                                boolean endpointExists = false;
+                                if (originalStatusCode != 404 && originalStatusCode != -1) {
+                                    // ✅ 统一处理：2xx、3xx、其他4xx都需要验证
+                                    endpointExists = validateEndpointWithRandomPath(
+                                        url, randomPath, finalRequest, originalResponse, 
+                                        originalStatusCode, originalResponseBody,
+                                        finalMethod, host, finalDisplayContentType, endpoint
+                                    );
+                                } else if (originalStatusCode >= 500) {
+                                    // 5xx服务器错误，可能是临时问题，保守处理为接口存在
+                                    api.logging().raiseInfoEvent(String.format(
+                                        "接口探测: %s %s (%s) %s - 状态码 %d (服务器错误)，继续Arjun扫描",
+                                        finalMethod, host, finalDisplayContentType, endpoint, originalStatusCode
+                                    ));
+                                    endpointExists = true;
+                                } else if (originalStatusCode == -1) {
+                                    // 原始请求无响应，跳过
+                                    api.logging().raiseDebugEvent(String.format(
+                                        "接口探测: %s %s (%s) %s - 无响应，跳过Arjun扫描",
+                                        finalMethod, host, finalDisplayContentType, endpoint
+                                    ));
+                                    continue;
+                                }
+                                
+                                // ✅ 如果接口不存在，跳过Arjun扫描
+                                if (!endpointExists) {
+                                    continue;  // 接口不存在，跳过
+                                }
+                                
+                                // ✅ 接口存在，继续进行Arjun参数探测
+                                api.logging().raiseInfoEvent(String.format(
+                                    "接口验证通过，开始Arjun参数探测: %s %s (%s) %s",
+                                    finalMethod, host, finalDisplayContentType, endpoint
+                                ));
+                                
+                            } catch (Exception sendError) {
+                                // 接口探测失败，保守处理，继续Arjun扫描
+                                api.logging().raiseDebugEvent(String.format(
+                                    "接口探测失败: %s，继续Arjun扫描: %s",
+                                    sendError.getMessage(), endpoint
+                                ));
+                            }
+                        }
+                        
+                        // ✅ 进行Arjun参数探测
+                        // 如果interfaceDiscoveryFirst=true，此时接口已验证存在
+                        // 如果interfaceDiscoveryFirst=false，直接进行参数探测（不先探测接口）
                         arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
                             if (result.isSuccess()) {
                                 if (!result.getFoundParameters().isEmpty()) {
@@ -997,20 +1104,99 @@ public class RealtimeScannerRefactored {
                             return null;
                         });
                     } else {
+                        // ✅ 接口探测：使用随机路径对比验证接口是否存在
+                        // 目的：避免泛解析、反射等导致的误判
                         try {
-                            HttpRequestResponse response = api.http().sendRequest(finalRequest);
-                            if (response != null && response.response() != null) {
-                                api.logging().raiseInfoEvent(String.format(
-                                    "接口探测完成: %s %s (%s) %s - 状态码 %d",
-                                    finalMethod, host, finalContentType, endpoint,
-                                    response.response().statusCode()
+                            // 生成随机路径（UUID，确保唯一性）
+                            String randomPath = "/xprobe_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+                            
+                            // 1. 先发送原始路径请求
+                            // ✅ 修复：检查HTTP服务是否可用
+                            if (api.http() == null) {
+                                api.logging().raiseErrorEvent("HTTP服务不可用，无法发送接口探测请求");
+                                continue;
+                            }
+                            
+                            HttpRequestResponse originalResponse = api.http().sendRequest(finalRequest);
+                            int originalStatusCode = -1;
+                            String originalResponseBody = null;
+                            if (originalResponse != null && originalResponse.response() != null) {
+                                originalStatusCode = originalResponse.response().statusCode();
+                                originalResponseBody = originalResponse.response().bodyToString();
+                            }
+                            
+                            // ✅ 如果原始路径返回404，直接断定不存在
+                            if (originalStatusCode == 404) {
+                                api.logging().raiseDebugEvent(String.format(
+                                    "接口不存在: %s %s (%s) %s - 状态码 404",
+                                    finalMethod, host, finalDisplayContentType, endpoint
                                 ));
-                            } else {
+                                
+                                // ✅ 通知UI接口探测结果（仅当runArjun=false时，即纯接口探测模式）
+                                if (!runArjun && activeProbeTab != null) {
+                                    try {
+                                        // ✅ 修复：使用已定义的mainDomain变量，不重复声明
+                                        activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, finalMethod, finalContentType, false, System.currentTimeMillis());
+                                    } catch (Exception e) {
+                                        // 忽略错误
+                                    }
+                                }
+                                
+                                continue;  // 跳过此接口
+                            }
+                            
+                            // 2. ✅ 如果原始路径返回非404（包括其他4xx、2xx、3xx），需要和随机路径的响应码和响应体对比
+                            if (originalStatusCode != 404 && originalStatusCode != -1) {
+                                // ✅ 统一处理：2xx、3xx、其他4xx都需要验证
+                                boolean endpointExists = validateEndpointWithRandomPath(
+                                    url, randomPath, finalRequest, originalResponse, 
+                                    originalStatusCode, originalResponseBody,
+                                    finalMethod, host, finalDisplayContentType, endpoint
+                                );
+                                
+                                if (!endpointExists) {
+                                    // ✅ 通知UI接口探测结果（仅当runArjun=false时，即纯接口探测模式）
+                                    if (!runArjun && activeProbeTab != null) {
+                                        try {
+                                            // ✅ 修复：使用已定义的mainDomain变量，不重复声明
+                                            activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, finalMethod, finalContentType, false, System.currentTimeMillis());
+                                        } catch (Exception e) {
+                                            // 忽略错误
+                                        }
+                                    }
+                                    continue;  // 接口不存在，跳过
+                                }
+                                
+                                // ✅ 通知UI接口探测结果（仅当runArjun=false时，即纯接口探测模式）
+                                if (!runArjun && activeProbeTab != null) {
+                                    try {
+                                        // ✅ 修复：使用已定义的mainDomain变量，不重复声明
+                                        activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, finalMethod, finalContentType, true, System.currentTimeMillis());
+                                    } catch (Exception e) {
+                                        // 忽略错误
+                                    }
+                                }
+                            } else if (originalStatusCode >= 500) {
+                                // 5xx服务器错误，可能是临时问题
                                 api.logging().raiseInfoEvent(String.format(
-                                    "接口探测完成: %s %s (%s) %s",
-                                    finalMethod, host, finalContentType, endpoint
+                                    "接口探测: %s %s (%s) %s - 状态码 %d (服务器错误)",
+                                    finalMethod, host, finalDisplayContentType, endpoint, originalStatusCode
+                                ));
+                                // 继续处理，但标记为不确定
+                                if (originalResponse != null) {
+                                    parameterCollector.collectFromRequest(finalRequest);
+                                    if (originalResponse.response() != null) {
+                                        parameterCollector.collectFromResponse(finalRequest, originalResponse.response());
+                                    }
+                                }
+                            } else if (originalStatusCode == -1) {
+                                // 原始请求无响应
+                                api.logging().raiseDebugEvent(String.format(
+                                    "接口探测: %s %s (%s) %s - 无响应",
+                                    finalMethod, host, finalDisplayContentType, endpoint
                                 ));
                             }
+                            
                         } catch (Exception sendError) {
                             api.logging().raiseErrorEvent("接口探测失败: " + sendError.getMessage());
                         }
@@ -1029,17 +1215,87 @@ public class RealtimeScannerRefactored {
     
     /**
      * 构建请求（用于手动添加的端点）
+     * ✅ 修复：正确处理GET、POST、POST+JSON三种请求类型
      */
     private HttpRequest buildRequest(String url, String method, String contentType) {
         try {
-            // 构建基础请求
-            String requestLine = method + " " + url + " HTTP/1.1";
-            String headers = "Host: " + new URI(url).getHost() + "\r\n" +
-                           "Content-Type: " + contentType + "\r\n" +
-                           "User-Agent: Mozilla/5.0\r\n";
+            URI uri = new URI(url);
+            String host = uri.getHost();
+            String scheme = uri.getScheme();
+            int port = uri.getPort();
+            String path = uri.getPath();
+            if (path.isEmpty()) {
+                path = "/";
+            }
+            String query = uri.getQuery();
+            String fullPath = query != null ? path + "?" + query : path;
             
-            String requestStr = requestLine + "\r\n" + headers + "\r\n";
-            HttpRequest request = HttpRequest.httpRequest(requestStr);
+            // ✅ 修复：构建HttpService（包含host、port、scheme信息）
+            burp.api.montoya.http.HttpService httpService;
+            if (port == -1) {
+                // 默认端口
+                int defaultPort = "https".equalsIgnoreCase(scheme) ? 443 : 80;
+                httpService = burp.api.montoya.http.HttpService.httpService(host, defaultPort, scheme.equalsIgnoreCase("https"));
+            } else {
+                httpService = burp.api.montoya.http.HttpService.httpService(host, port, scheme.equalsIgnoreCase("https"));
+            }
+            
+            // 构建请求行
+            String requestLine = method + " " + fullPath + " HTTP/1.1";
+            
+            // 构建请求头
+            StringBuilder headers = new StringBuilder();
+            headers.append("Host: ").append(host);
+            if (port != -1 && !(("https".equalsIgnoreCase(scheme) && port == 443) || ("http".equalsIgnoreCase(scheme) && port == 80))) {
+                headers.append(":").append(port);
+            }
+            headers.append("\r\n");
+            headers.append("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n");
+            headers.append("Accept: */*\r\n");
+            
+            // 构建请求体
+            String body = null;
+            
+            if ("GET".equalsIgnoreCase(method)) {
+                // GET请求：不需要Content-Type和Body
+                // 参数在URL的query string中（如果有）
+            } else if ("POST".equalsIgnoreCase(method)) {
+                // POST请求：需要Content-Type和Body
+                if (contentType != null) {
+                    headers.append("Content-Type: ").append(contentType).append("\r\n");
+                    
+                    if ("application/x-www-form-urlencoded".equals(contentType)) {
+                        // 表单提交：空的body（或者可以添加一个测试参数）
+                        body = "";
+                        headers.append("Content-Length: 0\r\n");
+                    } else if ("application/json".equals(contentType)) {
+                        // JSON API：空的JSON对象
+                        body = "{}";
+                        headers.append("Content-Length: ").append(body.length()).append("\r\n");
+                    } else {
+                        // 其他Content-Type：空body
+                        body = "";
+                        headers.append("Content-Length: 0\r\n");
+                    }
+                } else {
+                    // 如果没有指定Content-Type，默认使用form-urlencoded
+                    headers.append("Content-Type: application/x-www-form-urlencoded\r\n");
+                    body = "";
+                    headers.append("Content-Length: 0\r\n");
+                }
+            }
+            
+            // 构建完整请求
+            StringBuilder requestStr = new StringBuilder();
+            requestStr.append(requestLine).append("\r\n");
+            requestStr.append(headers);
+            requestStr.append("\r\n");
+            if (body != null) {
+                requestStr.append(body);
+            }
+            
+            // ✅ 修复：使用HttpService构建请求，确保包含服务信息
+            HttpRequest request = HttpRequest.httpRequest(httpService, requestStr.toString());
             
             return request;
             
@@ -1047,6 +1303,299 @@ public class RealtimeScannerRefactored {
             api.logging().raiseErrorEvent("构建请求失败: " + e.getMessage());
             return null;
         }
+    }
+    
+    /**
+     * ✅ 构建带随机路径的请求（用于验证接口是否存在）
+     * 使用随机路径对比原始路径，判断接口是否真实存在
+     */
+    private HttpRequest buildRequestWithRandomPath(String originalUrl, String method, String contentType, String randomPath) {
+        try {
+            URI originalUri = new URI(originalUrl);
+            String host = originalUri.getHost();
+            String scheme = originalUri.getScheme();
+            int port = originalUri.getPort();
+            
+            // 构建随机路径URL
+            String randomUrl;
+            if (port != -1) {
+                randomUrl = scheme + "://" + host + ":" + port + randomPath;
+            } else {
+                randomUrl = scheme + "://" + host + randomPath;
+            }
+            
+            // 使用相同的method和contentType构建请求
+            return buildRequest(randomUrl, method, contentType);
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("构建随机路径请求失败: " + e.getMessage());
+            return null;
+        }
+    }
+    
+    /**
+     * 获取请求的Content-Type
+     */
+    private String getContentType(HttpRequest request) {
+        for (var header : request.headers()) {
+            if ("Content-Type".equalsIgnoreCase(header.name())) {
+                return header.value();
+            }
+        }
+        return null;
+    }
+    
+    /**
+     * ✅ 验证接口是否存在（通过随机路径对比）
+     * 
+     * @param url 原始URL
+     * @param randomPath 随机路径
+     * @param originalRequest 原始请求
+     * @param originalResponse 原始响应
+     * @param originalStatusCode 原始状态码
+     * @param originalResponseBody 原始响应体
+     * @param method HTTP方法（原始请求的方法）
+     * @param host 主机名
+     * @param contentType Content-Type（原始请求的Content-Type）
+     * @param endpoint 端点路径
+     * @return true表示接口存在，false表示接口不存在
+     */
+    private boolean validateEndpointWithRandomPath(
+            String url, String randomPath, HttpRequest originalRequest, 
+            HttpRequestResponse originalResponse, int originalStatusCode, 
+            String originalResponseBody, String method, String host, 
+            String contentType, String endpoint) {
+        
+        // ✅ 只对比相同类型的随机路径请求
+        // 如果原始请求是GET，只对比GET的随机路径
+        // 如果原始请求是POST form-urlencoded，只对比POST form-urlencoded的随机路径
+        // 如果原始请求是POST JSON，只对比POST JSON的随机路径
+        String randomMethod = method;
+        String randomContentType = contentType;
+        
+        // ✅ 提取原始路径（用于去除反射）
+        String originalPath = extractPathFromUrl(url);
+        
+        // ✅ 发送相同类型的随机路径请求
+        HttpRequest randomPathRequest = buildRequestWithRandomPath(url, randomMethod, randomContentType, randomPath);
+        if (randomPathRequest == null) {
+            // 如果构建失败，保守处理，认为接口存在
+            api.logging().raiseDebugEvent(String.format(
+                "接口探测: %s %s (%s) %s - 无法构建随机路径请求，保守处理为接口存在",
+                method, host, contentType != null ? contentType : "N/A", endpoint
+            ));
+            if (originalResponse != null) {
+                parameterCollector.collectFromRequest(originalRequest);
+                if (originalResponse.response() != null) {
+                    parameterCollector.collectFromResponse(originalRequest, originalResponse.response());
+                }
+            }
+            return true;
+        }
+        
+        // ✅ 修复：检查HTTP服务是否可用
+        if (api.http() == null) {
+            api.logging().raiseErrorEvent("HTTP服务不可用，无法发送随机路径请求");
+            // 保守处理，认为接口存在
+            if (originalResponse != null) {
+                parameterCollector.collectFromRequest(originalRequest);
+                if (originalResponse.response() != null) {
+                    parameterCollector.collectFromResponse(originalRequest, originalResponse.response());
+                }
+            }
+            return true;
+        }
+        
+        try {
+            HttpRequestResponse randomResponse = api.http().sendRequest(randomPathRequest);
+            if (randomResponse != null && randomResponse.response() != null) {
+                int randomStatusCode = randomResponse.response().statusCode();
+                
+                // ✅ 如果随机路径返回404，说明原始路径可能真实存在
+                if (randomStatusCode == 404) {
+                    // 找到不同的响应（随机路径返回404），说明接口存在
+                    api.logging().raiseInfoEvent(String.format(
+                        "✅ 接口存在: %s %s (%s) %s - 状态码 %d (随机路径返回404，验证通过)",
+                        method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
+                    ));
+                    
+                    // 将接口信息收集到ParameterCollector
+                    if (originalResponse != null) {
+                        parameterCollector.collectFromRequest(originalRequest);
+                        if (originalResponse.response() != null) {
+                            parameterCollector.collectFromResponse(originalRequest, originalResponse.response());
+                        }
+                    }
+                    
+                    // ✅ 通知UI接口探测结果
+                    if (activeProbeTab != null) {
+                        try {
+                            URI uri = new URI(url);
+                            String mainDomain = extractMainDomain(uri.getHost());
+                            activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, method, contentType, true, System.currentTimeMillis());
+                        } catch (Exception e) {
+                            // 忽略错误
+                        }
+                    }
+                    
+                    return true;
+                }
+                
+                // ✅ 如果随机路径也返回非404，需要对比响应码和响应体
+                // 对于原始路径是4xx的情况，随机路径也可能返回4xx，所以范围是200-499
+                if (randomStatusCode >= 200 && randomStatusCode < 500) {
+                    String randomResponseBody = randomResponse.response().bodyToString();
+                    
+                    // ✅ 去除路径反射后再对比响应体
+                    // 如果路径出现在响应包中，去掉反射的路径字符后再对比
+                    String cleanedOriginalBody = removeReflectedPath(originalResponseBody, originalPath, randomPath);
+                    String cleanedRandomBody = removeReflectedPath(randomResponseBody, originalPath, randomPath);
+                    
+                    // ✅ 对比响应码和响应体
+                    if (originalStatusCode == randomStatusCode && 
+                        cleanedOriginalBody != null && cleanedRandomBody != null &&
+                        cleanedOriginalBody.equals(cleanedRandomBody)) {
+                        // 响应码和响应体都一样，说明接口不存在（可能是泛解析）
+                        api.logging().raiseDebugEvent(String.format(
+                            "接口不存在: %s %s (%s) %s - 状态码 %d，随机路径响应相同 (可能是泛解析)",
+                            method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
+                        ));
+                        
+                        // ✅ 通知UI接口探测结果
+                        if (activeProbeTab != null) {
+                            try {
+                                URI uri = new URI(url);
+                                String mainDomain = extractMainDomain(uri.getHost());
+                                activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, method, contentType, false, System.currentTimeMillis());
+                            } catch (Exception e) {
+                                // 忽略错误
+                            }
+                        }
+                        
+                        return false;
+                    } else {
+                        // 响应不同，说明接口可能存在
+                        api.logging().raiseInfoEvent(String.format(
+                            "✅ 接口存在: %s %s (%s) %s - 状态码 %d (随机路径响应不同，验证通过)",
+                            method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
+                        ));
+                        
+                        // 将接口信息收集到ParameterCollector
+                        if (originalResponse != null) {
+                            parameterCollector.collectFromRequest(originalRequest);
+                            if (originalResponse.response() != null) {
+                                parameterCollector.collectFromResponse(originalRequest, originalResponse.response());
+                            }
+                        }
+                        
+                        // ✅ 通知UI接口探测结果
+                        if (activeProbeTab != null) {
+                            try {
+                                URI uri = new URI(url);
+                                String mainDomain = extractMainDomain(uri.getHost());
+                                activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, method, contentType, true, System.currentTimeMillis());
+                            } catch (Exception e) {
+                                // 忽略错误
+                            }
+                        }
+                        
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // 如果随机路径请求失败，保守处理，认为接口存在
+            api.logging().raiseDebugEvent(String.format(
+                "接口探测: %s %s (%s) %s - 随机路径请求失败: %s，保守处理为接口存在",
+                method, host, contentType != null ? contentType : "N/A", endpoint, e.getMessage()
+            ));
+            if (originalResponse != null) {
+                parameterCollector.collectFromRequest(originalRequest);
+                if (originalResponse.response() != null) {
+                    parameterCollector.collectFromResponse(originalRequest, originalResponse.response());
+                }
+            }
+            return true;
+        }
+        
+        // ✅ 如果没有收到响应或响应状态码不在预期范围内，保守处理为接口存在
+        api.logging().raiseDebugEvent(String.format(
+            "接口探测: %s %s (%s) %s - 随机路径响应异常，保守处理为接口存在",
+            method, host, contentType != null ? contentType : "N/A", endpoint
+        ));
+        if (originalResponse != null) {
+            parameterCollector.collectFromRequest(originalRequest);
+            if (originalResponse.response() != null) {
+                parameterCollector.collectFromResponse(originalRequest, originalResponse.response());
+            }
+        }
+        return true;
+    }
+    
+    /**
+     * ✅ 从URL中提取路径部分（用于接口探测时的反射去除）
+     * 例如：https://example.com/api/user/info?id=123 -> /api/user/info
+     */
+    private String extractPathFromUrl(String url) {
+        try {
+            URI uri = new URI(url);
+            String path = uri.getPath();
+            if (path == null || path.isEmpty()) {
+                path = "/";
+            }
+            return path;
+        } catch (Exception e) {
+            // 如果解析失败，尝试简单提取
+            try {
+                int pathStart = url.indexOf("://");
+                if (pathStart != -1) {
+                    pathStart = url.indexOf("/", pathStart + 3);
+                    if (pathStart != -1) {
+                        int queryStart = url.indexOf("?", pathStart);
+                        if (queryStart != -1) {
+                            return url.substring(pathStart, queryStart);
+                        } else {
+                            return url.substring(pathStart);
+                        }
+                    }
+                }
+            } catch (Exception e2) {
+                // 忽略错误
+            }
+            return "/";
+        }
+    }
+    
+    /**
+     * ✅ 从响应体中移除反射的路径字符
+     * 避免路径反射导致的误判（如果路径出现在响应中，需要移除后再对比）
+     * 
+     * @param responseBody 响应体
+     * @param originalPath 原始路径（如 /api/user/info）
+     * @param randomPath 随机路径（如 /xprobe_abc123def456）
+     * @return 去除路径反射后的响应体
+     */
+    private String removeReflectedPath(String responseBody, String originalPath, String randomPath) {
+        if (responseBody == null) {
+            return "";
+        }
+        
+        String cleaned = responseBody;
+        
+        // 去除原始路径的反射
+        if (originalPath != null && originalPath.length() > 1) {  // 路径长度大于1（至少是"/"）
+            // 转义特殊字符，使用正则表达式替换
+            String escaped = Pattern.quote(originalPath);
+            cleaned = cleaned.replaceAll(escaped, "");
+        }
+        
+        // 去除随机路径的反射
+        if (randomPath != null && randomPath.length() > 1) {
+            String escaped = Pattern.quote(randomPath);
+            cleaned = cleaned.replaceAll(escaped, "");
+        }
+        
+        return cleaned;
     }
     
     /**
@@ -1465,18 +2014,6 @@ public class RealtimeScannerRefactored {
             // 降级：返回原始请求
             return originalRequest;
         }
-    }
-    
-    /**
-     * 获取Content-Type
-     */
-    private String getContentType(HttpRequest request) {
-        for (var header : request.headers()) {
-            if ("Content-Type".equalsIgnoreCase(header.name())) {
-                return header.value();
-            }
-        }
-        return null;
     }
     
     // ========== 扫描控制方法 ==========

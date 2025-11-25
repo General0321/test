@@ -91,6 +91,7 @@ public class ActiveProbeTab {
         setupLayout();
         setupEventListeners();
         registerArjunResultListener(realtimeScanner);  // ✅ 注册Arjun结果监听器
+        realtimeScanner.setActiveProbeTab(this);  // ✅ 设置ActiveProbeTab引用，用于接口探测结果回调
         startAutoRefresh();
     }
 
@@ -128,9 +129,9 @@ public class ActiveProbeTab {
             }
         });
 
-        // Arjun探测结果表格
+        // ✅ Arjun探测结果表格（包含接口探测和参数探测结果）
         arjunResultTableModel = new DefaultTableModel(
-            new Object[]{"目标域名", "接口", "发现参数", "参数类型", "验证状态", "探测时间"}, 0) {
+            new Object[]{"探测类型", "目标域名", "接口", "发现参数", "参数类型", "验证状态", "探测时间"}, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
                 return false;
@@ -417,18 +418,19 @@ public class ActiveProbeTab {
         statsPanel.setLayout(new BoxLayout(statsPanel, BoxLayout.Y_AXIS));
         statsPanel.setBorder(new EmptyBorder(10, 10, 10, 10));
         statsPanel.setBackground(new Color(250, 250, 250));
-        statsPanel.setPreferredSize(new Dimension(160, 0));
+        // ✅ 紧凑布局：减小宽度和间距
+        statsPanel.setPreferredSize(new Dimension(140, 0));
         
         statsPanel.add(createStatCard(totalDomainsLabel, new Color(200, 240, 255)));
-        statsPanel.add(Box.createVerticalStrut(10));
+        statsPanel.add(Box.createVerticalStrut(6));  // 减小间距
         statsPanel.add(createStatCard(totalEndpointsLabel, new Color(210, 250, 230)));
-        statsPanel.add(Box.createVerticalStrut(10));
+        statsPanel.add(Box.createVerticalStrut(6));
         statsPanel.add(createStatCard(totalParametersLabel, new Color(255, 248, 210)));
-        statsPanel.add(Box.createVerticalStrut(10));
+        statsPanel.add(Box.createVerticalStrut(6));
         statsPanel.add(createStatCard(totalKeywordsLabel, new Color(255, 234, 210)));
-        statsPanel.add(Box.createVerticalStrut(15));
+        statsPanel.add(Box.createVerticalStrut(8));  // 减小间距
         statsPanel.add(createStatCard(arjunScansLabel, new Color(232, 210, 255)));
-        statsPanel.add(Box.createVerticalStrut(10));
+        statsPanel.add(Box.createVerticalStrut(6));
         statsPanel.add(createStatCard(arjunResultsLabel, new Color(255, 220, 220)));
         statsPanel.add(Box.createVerticalGlue());
         return statsPanel;
@@ -436,13 +438,15 @@ public class ActiveProbeTab {
     
     private JPanel createStatCard(JLabel label, Color background) {
         JPanel card = new JPanel(new BorderLayout());
-        card.setMaximumSize(new Dimension(160, 55));
+        // ✅ 紧凑布局：减小卡片高度和内边距
+        card.setMaximumSize(new Dimension(140, 45));
         card.setBackground(background);
         card.setBorder(BorderFactory.createCompoundBorder(
             BorderFactory.createLineBorder(background.darker()),
-            new EmptyBorder(10, 8, 10, 8)
+            new EmptyBorder(6, 6, 6, 6)  // 减小内边距
         ));
         label.setHorizontalAlignment(SwingConstants.CENTER);
+        label.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));  // 稍微减小字体
         card.add(label, BorderLayout.CENTER);
         return card;
     }
@@ -625,8 +629,15 @@ public class ActiveProbeTab {
                     }
                 }
                 
-                // 更新Arjun统计
-                arjunResultsLabel.setText("发现参数: " + arjunResultTableModel.getRowCount());
+                // ✅ 更新Arjun统计：只统计参数探测的结果
+                int paramScanCount = 0;
+                for (int i = 0; i < arjunResultTableModel.getRowCount(); i++) {
+                    Object type = arjunResultTableModel.getValueAt(i, 0);
+                    if ("参数探测".equals(type)) {
+                        paramScanCount++;
+                    }
+                }
+                arjunResultsLabel.setText("发现参数: " + paramScanCount);
                 
             } catch (Exception ex) {
                 api.logging().raiseDebugEvent("刷新数据失败: " + ex.getMessage());
@@ -639,7 +650,12 @@ public class ActiveProbeTab {
      */
     private void startArjunScan() {
         try {
+            // ✅ 修复：根据接口来源选择决定数据源
             boolean manualSource = sourceManualRadio.isSelected();
+            boolean autoSource = sourceAutoRadio.isSelected();
+            
+            // ✅ 修复："无"选项表示使用已有采集数据，不需要提示
+            
             List<String> manualTargets = manualSource ? promptManualTargets() : Collections.emptyList();
             if (manualSource && (manualTargets == null || manualTargets.isEmpty())) {
                 return;
@@ -650,12 +666,13 @@ public class ActiveProbeTab {
                 return;
             }
             
-            Runnable arjunTask = () -> executeArjunScan(manualSource, manualTargets);
+            Runnable arjunTask = () -> executeArjunScan(manualSource, manualTargets, autoSource);
             
             if (runInterfaceFirst) {
+                // ✅ 先进行接口探测，接口探测完成后再进行Arjun参数探测
                 CompletableFuture<Void> interfaceFuture = manualSource
-                    ? processManualTargets(manualTargets, false)
-                    : runAutoInterfaceDiscovery();
+                    ? processManualTargets(manualTargets, false, false)
+                    : (autoSource ? runAutoInterfaceDiscovery() : CompletableFuture.completedFuture(null));
                 
                 interfaceFuture.whenComplete((unused, throwable) -> {
                     if (throwable != null) {
@@ -663,12 +680,29 @@ public class ActiveProbeTab {
                             statusLabel.setText("❌ 接口探测失败，已取消参数探测");
                             statusLabel.setForeground(new Color(231, 76, 60));
                         });
-            } else {
-                        arjunTask.run();
+                    } else {
+                        // ✅ 接口探测完成，进行Arjun参数探测（不先探测接口，因为已经探测过了）
+                        if (manualSource) {
+                            processManualTargets(manualTargets, true, false).whenComplete((unused2, throwable2) -> {
+                                SwingUtilities.invokeLater(() -> {
+                                    if (throwable2 != null) {
+                                        statusLabel.setText("❌ Arjun 探测失败");
+                                        statusLabel.setForeground(new Color(231, 76, 60));
+                                    }
+                                });
+                            });
+                        } else {
+                            arjunTask.run();
+                        }
                     }
                 });
             } else {
-                arjunTask.run();
+                // ✅ 直接进行Arjun参数探测（先探测接口）
+                if (manualSource) {
+                    processManualTargets(manualTargets, true, true);
+                } else {
+                    arjunTask.run();
+                }
             }
         } catch (Exception e) {
             JOptionPane.showMessageDialog(panel, 
@@ -679,6 +713,17 @@ public class ActiveProbeTab {
     
     private void startInterfaceDiscovery() {
         try {
+            // ✅ 修复：根据接口来源选择决定数据源
+            // "无"选项表示使用已有采集数据，不需要执行接口探测
+            if (sourceNoneRadio.isSelected()) {
+                JOptionPane.showMessageDialog(panel,
+                    "接口来源选择为\"无\"，将使用已有采集数据。\n" +
+                    "如需执行接口探测，请先选择\"手动添加\"或\"自动采集\"。",
+                    "提示",
+                    JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+            
             interfaceScanButton.setEnabled(false);
             statusLabel.setText("🔍 正在执行接口探测...");
             statusLabel.setForeground(new Color(52, 152, 219));
@@ -696,8 +741,16 @@ public class ActiveProbeTab {
                     return;
                 }
                 task = processManualTargets(manualTargets, false);
-                    } else {
+            } else if (sourceAutoRadio.isSelected()) {
                 task = runAutoInterfaceDiscovery();
+            } else {
+                // sourceNoneRadio被选中，不应该执行到这里，但为了安全还是处理
+                interfaceScanButton.setEnabled(true);
+                progressBar.setIndeterminate(false);
+                progressBar.setValue(0);
+                statusLabel.setText("ℹ️ 接口来源未指定");
+                statusLabel.setForeground(Color.GRAY);
+                return;
             }
             
             task.whenComplete((unused, throwable) -> SwingUtilities.invokeLater(() -> {
@@ -772,6 +825,10 @@ public class ActiveProbeTab {
     }
     
     private CompletableFuture<Void> processManualTargets(List<String> urls, boolean runArjun) {
+        return processManualTargets(urls, runArjun, false);
+    }
+    
+    private CompletableFuture<Void> processManualTargets(List<String> urls, boolean runArjun, boolean interfaceDiscoveryFirst) {
         if (urls == null || urls.isEmpty()) {
             return CompletableFuture.completedFuture(null);
         }
@@ -779,9 +836,9 @@ public class ActiveProbeTab {
         return CompletableFuture.runAsync(() -> {
             for (String url : urls) {
                 if (runArjun) {
-                    activeScanner.getRealtimeScanner().triggerManualEndpointScan(url);
+                    activeScanner.getRealtimeScanner().triggerManualEndpointScan(url, true, interfaceDiscoveryFirst);
                 } else {
-                    activeScanner.getRealtimeScanner().triggerManualEndpointScan(url, false);
+                    activeScanner.getRealtimeScanner().triggerManualEndpointScan(url, false, false);
                 }
             }
         });
@@ -807,15 +864,21 @@ public class ActiveProbeTab {
         return null;
     }
     
-    private void executeArjunScan(boolean manualSource, List<String> manualTargets) {
+    private void executeArjunScan(boolean manualSource, List<String> manualTargets, boolean autoSource) {
         arjunScanButton.setEnabled(false);
         statusLabel.setText("✨ 正在执行 Arjun 参数探测...");
         statusLabel.setForeground(new Color(155, 89, 182));
         progressBar.setIndeterminate(true);
         
-        CompletableFuture<Void> arjunTask = manualSource
-            ? processManualTargets(manualTargets, true)
-            : runAutoArjunScan();
+        CompletableFuture<Void> arjunTask;
+        if (manualSource) {
+            arjunTask = processManualTargets(manualTargets, true);
+        } else if (autoSource) {
+            arjunTask = runAutoArjunScan();
+        } else {
+            // sourceNoneRadio被选中，使用已有采集数据
+            arjunTask = runArjunScanFromCollectedData();
+        }
         
         arjunTask.whenComplete((unused, throwable) -> SwingUtilities.invokeLater(() -> {
             arjunScanButton.setEnabled(true);
@@ -849,6 +912,17 @@ public class ActiveProbeTab {
                 api.logging().raiseInfoEvent("从SiteMap历史流量触发Arjun探测");
                 activeScanner.getRealtimeScanner().triggerManualArjunScan();
             }
+        });
+    }
+    
+    /**
+     * ✅ 从已有采集数据触发Arjun探测（接口来源选择"无"时使用）
+     */
+    private CompletableFuture<Void> runArjunScanFromCollectedData() {
+        return CompletableFuture.runAsync(() -> {
+            api.logging().raiseInfoEvent("从已有采集数据触发Arjun探测");
+            // 使用手动模式从SiteMap触发（因为已有数据在SiteMap中）
+            activeScanner.getRealtimeScanner().triggerManualArjunScan();
         });
     }
 
@@ -967,6 +1041,7 @@ public class ActiveProbeTab {
             interfaceScanButton.setEnabled(true);
             realtimeModeRadio.setEnabled(true);
             manualModeRadio.setEnabled(true);
+            sourceNoneRadio.setEnabled(true);
             sourceManualRadio.setEnabled(true);
             sourceAutoRadio.setEnabled(true);
         } else {
@@ -982,13 +1057,16 @@ public class ActiveProbeTab {
             statusLabel.setForeground(Color.GRAY);
             api.logging().logToOutput("⚫ 主动探测已禁用（被动参数收集持续进行）");
             
-            // 禁用控制组件
+            // 禁用控制组件（但保留查看/清空按钮可用）
             arjunScanButton.setEnabled(false);
             interfaceScanButton.setEnabled(false);
             realtimeModeRadio.setEnabled(false);
             manualModeRadio.setEnabled(false);
+            sourceNoneRadio.setEnabled(false);
             sourceManualRadio.setEnabled(false);
             sourceAutoRadio.setEnabled(false);
+            // ✅ 修复：刷新、清空、查看详情等按钮应该始终可用（只是查看/清空数据）
+            // refreshDataButton, clearResultsButton, viewDetailsButton, clearCacheButton 保持可用
         }
     }
     
@@ -1107,21 +1185,103 @@ public class ActiveProbeTab {
                 }
             }
             
-            // 显示对话框
+            // ✅ 优化：创建自定义对话框，方便复制
+            JDialog dialog = new JDialog((Frame) SwingUtilities.getWindowAncestor(panel), 
+                "域名详细信息 - " + mainDomain, true);
+            dialog.setLayout(new BorderLayout(10, 10));
+            
+            // 创建文本区域（可选择和复制）
             JTextArea textArea = new JTextArea(details.toString());
-            textArea.setEditable(false);
+            textArea.setEditable(false);  // 不可编辑，但可选择
             textArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
             textArea.setCaretPosition(0);
+            // ✅ 文本区域默认可以选择，用户可以通过Ctrl+A全选或鼠标选择
             
             JScrollPane scrollPane = new JScrollPane(textArea);
-            scrollPane.setPreferredSize(new Dimension(700, 500));
+            scrollPane.setPreferredSize(new Dimension(750, 550));
+            scrollPane.setBorder(BorderFactory.createTitledBorder("详细信息（可全选复制）"));
             
-            JOptionPane.showMessageDialog(
-                panel,
-                scrollPane,
-                "域名详细信息 - " + mainDomain,
-                JOptionPane.INFORMATION_MESSAGE
-            );
+            // ✅ 创建按钮面板
+            JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 10));
+            
+            // ✅ 复制全部按钮
+            JButton copyAllButton = new JButton("📋 复制全部");
+            copyAllButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+            copyAllButton.setBackground(new Color(52, 152, 219));
+            copyAllButton.setForeground(Color.WHITE);
+            copyAllButton.setOpaque(true);
+            copyAllButton.addActionListener(e -> {
+                textArea.selectAll();
+                textArea.copy();
+                JOptionPane.showMessageDialog(dialog, 
+                    "✅ 已复制到剪贴板", 
+                    "提示", 
+                    JOptionPane.INFORMATION_MESSAGE);
+            });
+            
+            // ✅ 复制参数列表按钮
+            JButton copyParamsButton = new JButton("📋 复制参数");
+            copyParamsButton.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+            copyParamsButton.setBackground(new Color(155, 89, 182));
+            copyParamsButton.setForeground(Color.WHITE);
+            copyParamsButton.setOpaque(true);
+            copyParamsButton.addActionListener(e -> {
+                String paramsText = String.join("\n", parameters);
+                java.awt.datatransfer.StringSelection selection = new java.awt.datatransfer.StringSelection(paramsText);
+                java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
+                JOptionPane.showMessageDialog(dialog, 
+                    "✅ 参数列表已复制到剪贴板 (" + parameters.size() + "个)", 
+                    "提示", 
+                    JOptionPane.INFORMATION_MESSAGE);
+            });
+            
+            // ✅ 复制接口列表按钮
+            JButton copyEndpointsButton = new JButton("📋 复制接口");
+            copyEndpointsButton.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+            copyEndpointsButton.setBackground(new Color(26, 188, 156));
+            copyEndpointsButton.setForeground(Color.WHITE);
+            copyEndpointsButton.setOpaque(true);
+            copyEndpointsButton.addActionListener(e -> {
+                String endpointsText = String.join("\n", endpoints);
+                java.awt.datatransfer.StringSelection selection = new java.awt.datatransfer.StringSelection(endpointsText);
+                java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
+                JOptionPane.showMessageDialog(dialog, 
+                    "✅ 接口列表已复制到剪贴板 (" + endpoints.size() + "个)", 
+                    "提示", 
+                    JOptionPane.INFORMATION_MESSAGE);
+            });
+            
+            // ✅ 关闭按钮
+            JButton closeButton = new JButton("关闭");
+            closeButton.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+            closeButton.addActionListener(e -> dialog.dispose());
+            
+            buttonPanel.add(copyParamsButton);
+            buttonPanel.add(copyEndpointsButton);
+            buttonPanel.add(copyAllButton);
+            buttonPanel.add(closeButton);
+            
+            // 添加到对话框
+            dialog.add(scrollPane, BorderLayout.CENTER);
+            dialog.add(buttonPanel, BorderLayout.SOUTH);
+            
+            // 设置对话框属性
+            dialog.pack();
+            dialog.setLocationRelativeTo(panel);
+            dialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
+            
+            // ✅ 添加快捷键：Ctrl+A 全选，Ctrl+C 复制
+            textArea.getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_A, java.awt.event.InputEvent.CTRL_DOWN_MASK), 
+                "selectAll");
+            textArea.getActionMap().put("selectAll", new javax.swing.AbstractAction() {
+                @Override
+                public void actionPerformed(java.awt.event.ActionEvent e) {
+                    textArea.selectAll();
+                }
+            });
+            
+            dialog.setVisible(true);
             
         } catch (Exception ex) {
             api.logging().raiseErrorEvent("显示域名详情失败: " + ex.getMessage());
@@ -1153,6 +1313,36 @@ public class ActiveProbeTab {
     }
     
     /**
+     * ✅ 添加接口探测结果到表格
+     */
+    public void addInterfaceDiscoveryResult(String mainDomain, String endpoint, String method, 
+                                           String contentType, boolean exists, long timestamp) {
+        SwingUtilities.invokeLater(() -> {
+            // 格式化时间
+            java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("HH:mm:ss");
+            String timeStr = sdf.format(new java.util.Date(timestamp));
+            
+            // 格式化接口信息
+            String displayContentType = contentType != null ? contentType : "N/A";
+            String interfaceInfo = String.format("%s %s (%s)", method, endpoint, displayContentType);
+            
+            // 验证状态
+            String verifyStatus = exists ? "✅ 接口存在" : "❌ 接口不存在";
+            
+            // 添加到表格：探测类型, 目标域名, 接口, 发现参数, 参数类型, 验证状态, 探测时间
+            arjunResultTableModel.addRow(new Object[]{
+                "接口探测",  // 探测类型
+                mainDomain,
+                interfaceInfo,
+                "-",  // 发现参数（接口探测无参数）
+                "-",  // 参数类型（接口探测无参数类型）
+                verifyStatus,
+                timeStr
+            });
+        });
+    }
+    
+    /**
      * 将Arjun结果添加到表格
      */
     private void addArjunResultToTable(String mainDomain, String endpoint, Set<String> foundParameters, 
@@ -1172,8 +1362,9 @@ public class ActiveProbeTab {
         // 验证状态
         String verifyStatus = "✅ 已验证";
         
-        // 添加到表格：目标域名, 接口, 发现参数, 参数类型, 验证状态, 探测时间
+        // ✅ 添加到表格：探测类型, 目标域名, 接口, 发现参数, 参数类型, 验证状态, 探测时间
         arjunResultTableModel.addRow(new Object[]{
+            "参数探测",  // 探测类型
             mainDomain,
             endpoint,
             displayParams,
@@ -1182,8 +1373,15 @@ public class ActiveProbeTab {
             timeStr
         });
         
-        // 更新统计
-        arjunResultsLabel.setText("发现参数: " + arjunResultTableModel.getRowCount());
+        // ✅ 更新统计：只统计参数探测的结果
+        int paramScanCount = 0;
+        for (int i = 0; i < arjunResultTableModel.getRowCount(); i++) {
+            Object type = arjunResultTableModel.getValueAt(i, 0);
+            if ("参数探测".equals(type)) {
+                paramScanCount++;
+            }
+        }
+        arjunResultsLabel.setText("发现参数: " + paramScanCount);
         
         // 日志
         api.logging().raiseInfoEvent(String.format(

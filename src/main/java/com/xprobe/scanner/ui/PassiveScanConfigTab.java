@@ -361,7 +361,9 @@ public class PassiveScanConfigTab {
                 
                 details.append("═══════════════════════════════════════\n");
                 details.append("规则名称: ").append(ruleName).append("\n");
-                details.append("规则ID: ").append(config.getRuleId() != null ? config.getRuleId().substring(0, 8) + "..." : "N/A").append("\n");
+                details.append("规则ID: ").append(config.getRuleId() != null && config.getRuleId().length() >= 8 
+                    ? config.getRuleId().substring(0, 8) + "..." 
+                    : (config.getRuleId() != null ? config.getRuleId() : "N/A")).append("\n");
                 details.append("启用状态: ").append(config.isEnabled() ? "✓ 启用" : "✗ 禁用").append("\n");
                 if (config.getDescription() != null && !config.getDescription().isEmpty()) {
                     details.append("描述: ").append(config.getDescription()).append("\n");
@@ -376,7 +378,7 @@ public class PassiveScanConfigTab {
                     for (var pair : config.getPairs()) {
                         details.append("配对 ").append(pairIndex++).append(": ")
                                .append(pair.getLabel() != null ? pair.getLabel() : "未命名")
-                               .append(pair.isEnabled() ? " ✓" : " ✗").append("\n");
+                               .append("\n");
                         
                         // 请求配置摘要
                         if (pair.getRequestConfig() != null) {

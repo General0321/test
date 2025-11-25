@@ -29,6 +29,9 @@ public class ResponseElementDetailDialog extends JDialog {
     // Collaborator组件
     private JCheckBox dnsCheck, httpCheck, httpsCheck, smtpCheck;
     
+    // ✅ 状态码模式选择（用于判断保存文本还是数值配置）
+    private JComboBox<String> statusCodeModeCombo;
+    
     public ResponseElementDetailDialog(Window owner, ResponseElementConfig element) {
         super(owner, "响应元素配置", ModalityType.APPLICATION_MODAL);
         this.element = element;
@@ -52,9 +55,13 @@ public class ResponseElementDetailDialog extends JDialog {
         // 中间配置面板
         // ✅ 修复：对于文本配置，使用特殊布局，将变量面板放在滚动面板外
         ElementType type = element.getType();
-        if (type == ElementType.STATUS_CODE || type == ElementType.RESPONSE_HEADERS || type == ElementType.RESPONSE_BODY) {
+        if (type == ElementType.RESPONSE_HEADERS || type == ElementType.RESPONSE_BODY) {
             // 文本配置：创建包含变量面板的完整面板
             JPanel mainPanel = createTextConfigPanelWithVariables();
+            add(mainPanel, BorderLayout.CENTER);
+        } else if (type == ElementType.STATUS_CODE) {
+            // ✅ 状态码：支持文本匹配和数值比较两种模式
+            JPanel mainPanel = createStatusCodeConfigPanel();
             add(mainPanel, BorderLayout.CENTER);
         } else {
             // 其他配置：直接使用滚动面板
@@ -84,6 +91,63 @@ public class ResponseElementDetailDialog extends JDialog {
         // 变量面板放在滚动面板下方，始终可见
         JPanel variablePanel = createVariableInsertPanel();
         mainPanel.add(variablePanel, BorderLayout.SOUTH);
+        
+        return mainPanel;
+    }
+    
+    /**
+     * ✅ 创建状态码配置面板（支持文本匹配和数值比较两种模式）
+     */
+    private JPanel createStatusCodeConfigPanel() {
+        JPanel mainPanel = new JPanel(new BorderLayout(10, 10));
+        mainPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        
+        // 模式选择
+        JPanel modePanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        modePanel.add(new JLabel("匹配模式:"));
+        statusCodeModeCombo = new JComboBox<>(new String[]{"文本匹配", "数值比较"});
+        
+        // 根据当前配置选择模式
+        MatchConfig config = element.getMatchConfig();
+        if (config != null && config.getMatchType() == MatchType.NUMERIC_COMPARISON) {
+            statusCodeModeCombo.setSelectedItem("数值比较");
+        } else {
+            statusCodeModeCombo.setSelectedItem("文本匹配");
+        }
+        
+        modePanel.add(statusCodeModeCombo);
+        mainPanel.add(modePanel, BorderLayout.NORTH);
+        
+        // 内容面板（根据模式切换）
+        JPanel contentPanel = new JPanel(new CardLayout());
+        
+        // 文本匹配面板
+        JPanel textPanel = createTextConfigPanel();
+        contentPanel.add(textPanel, "text");
+        
+        // 数值比较面板
+        JPanel numericPanel = createNumericConfigPanel();
+        contentPanel.add(numericPanel, "numeric");
+        
+        // 根据模式显示对应面板
+        statusCodeModeCombo.addActionListener(e -> {
+            String mode = (String) statusCodeModeCombo.getSelectedItem();
+            CardLayout layout = (CardLayout) contentPanel.getLayout();
+            if ("数值比较".equals(mode)) {
+                layout.show(contentPanel, "numeric");
+            } else {
+                layout.show(contentPanel, "text");
+            }
+        });
+        
+        // 初始显示
+        if (config != null && config.getMatchType() == MatchType.NUMERIC_COMPARISON) {
+            ((CardLayout) contentPanel.getLayout()).show(contentPanel, "numeric");
+        } else {
+            ((CardLayout) contentPanel.getLayout()).show(contentPanel, "text");
+        }
+        
+        mainPanel.add(contentPanel, BorderLayout.CENTER);
         
         return mainPanel;
     }
@@ -237,9 +301,21 @@ public class ResponseElementDetailDialog extends JDialog {
         // 单个数值输入
         gbc.gridx = 0;
         gbc.gridy = 1;
-        String valueLabel = element.getType() == ElementType.RESPONSE_TIME 
-            ? "时间阈值 (ms):" 
-            : "长度阈值 (bytes):";
+        String valueLabel;
+        switch (element.getType()) {
+            case RESPONSE_TIME:
+                valueLabel = "时间阈值 (ms):";
+                break;
+            case RESPONSE_LENGTH:
+                valueLabel = "长度阈值 (bytes):";
+                break;
+            case STATUS_CODE:
+                valueLabel = "状态码阈值:";
+                break;
+            default:
+                valueLabel = "数值阈值:";
+                break;
+        }
         panel.add(new JLabel(valueLabel), gbc);
         
         gbc.gridx = 1;
@@ -283,9 +359,21 @@ public class ResponseElementDetailDialog extends JDialog {
         gbc.gridx = 0;
         gbc.gridy = 3;
         gbc.gridwidth = 2;
-        String hint = element.getType() == ElementType.RESPONSE_TIME
-            ? "示例: 响应时间 > 5000ms 表示延迟大于5秒"
-            : "示例: 响应长度 > 1000 表示响应体大于1000字节";
+        String hint;
+        switch (element.getType()) {
+            case RESPONSE_TIME:
+                hint = "示例: 响应时间 > 5000ms 表示延迟大于5秒，BETWEEN 1000-2000 表示在1-2秒范围内";
+                break;
+            case RESPONSE_LENGTH:
+                hint = "示例: 响应长度 > 1000 表示响应体大于1000字节，BETWEEN 500-1000 表示在500-1000字节范围内";
+                break;
+            case STATUS_CODE:
+                hint = "示例: 状态码 = 200 表示成功，BETWEEN 400-499 表示4xx错误，> 500 表示服务器错误";
+                break;
+            default:
+                hint = "示例: 使用 >, <, =, BETWEEN 等操作符进行比较";
+                break;
+        }
         panel.add(new JLabel(hint), gbc);
         
         return panel;
@@ -373,6 +461,37 @@ public class ResponseElementDetailDialog extends JDialog {
         ElementType type = element.getType();
         
         switch (type) {
+            case STATUS_CODE:
+                // ✅ 状态码：根据匹配类型加载对应配置
+                if (config.getMatchType() == MatchType.NUMERIC_COMPARISON) {
+                    // 数值比较模式
+                    if (operatorCombo != null) {
+                        operatorCombo.setSelectedItem(config.getComparisonOperator());
+                        updateNumericInputVisibility();  // 更新UI显示
+                    }
+                    if (numericSpinner != null) {
+                        numericSpinner.setValue(config.getNumericValue());
+                    }
+                    if (numericSpinnerMin != null) {
+                        numericSpinnerMin.setValue(config.getNumericValueMin());
+                    }
+                    if (numericSpinnerMax != null) {
+                        numericSpinnerMax.setValue(config.getNumericValueMax());
+                    }
+                } else {
+                    // 文本匹配模式
+                    if (matchTypeCombo != null) {
+                        matchTypeCombo.setSelectedItem(config.getMatchType());
+                    }
+                    if (caseSensitiveCheck != null) {
+                        caseSensitiveCheck.setSelected(config.isCaseSensitive());
+                    }
+                    if (valuesArea != null && config.getValues() != null) {
+                        valuesArea.setText(String.join("\n", config.getValues()));
+                    }
+                }
+                break;
+                
             case RESPONSE_TIME:
             case RESPONSE_LENGTH:
                 if (operatorCombo != null) {
@@ -442,6 +561,55 @@ public class ResponseElementDetailDialog extends JDialog {
         
         try {
             switch (type) {
+                case STATUS_CODE:
+                    // ✅ 状态码：根据模式保存对应配置
+                    String mode = statusCodeModeCombo != null ? (String) statusCodeModeCombo.getSelectedItem() : "文本匹配";
+                    if ("数值比较".equals(mode)) {
+                        // 数值比较模式
+                        config.setMatchType(MatchType.NUMERIC_COMPARISON);
+                        ComparisonOperator operator = (ComparisonOperator) operatorCombo.getSelectedItem();
+                        config.setComparisonOperator(operator);
+                        
+                        // 根据操作符类型保存不同的值
+                        if (operator == ComparisonOperator.BETWEEN || operator == ComparisonOperator.NOT_BETWEEN) {
+                            // 保存范围值
+                            config.setNumericValueMin(((Number) numericSpinnerMin.getValue()).longValue());
+                            config.setNumericValueMax(((Number) numericSpinnerMax.getValue()).longValue());
+                            
+                            // 验证范围
+                            if (config.getNumericValueMin() > config.getNumericValueMax()) {
+                                JOptionPane.showMessageDialog(this,
+                                    "最小值不能大于最大值",
+                                    "验证失败",
+                                    JOptionPane.WARNING_MESSAGE);
+                                return false;
+                            }
+                        } else {
+                            // 保存单个值
+                            config.setNumericValue(((Number) numericSpinner.getValue()).longValue());
+                        }
+                    } else {
+                        // 文本匹配模式
+                        config.setMatchType((MatchType) matchTypeCombo.getSelectedItem());
+                        config.setCaseSensitive(caseSensitiveCheck.isSelected());
+                        
+                        String text = valuesArea.getText().trim();
+                        if (text.isEmpty()) {
+                            JOptionPane.showMessageDialog(this,
+                                "请输入至少一个匹配值",
+                                "验证失败",
+                                JOptionPane.WARNING_MESSAGE);
+                            return false;
+                        }
+                        
+                        config.getValues().clear();
+                        Arrays.stream(text.split("\n"))
+                            .map(String::trim)
+                            .filter(s -> !s.isEmpty())
+                            .forEach(config::addValue);
+                    }
+                    break;
+                    
                 case RESPONSE_TIME:
                 case RESPONSE_LENGTH:
                     config.setMatchType(MatchType.NUMERIC_COMPARISON);
