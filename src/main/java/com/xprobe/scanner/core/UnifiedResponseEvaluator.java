@@ -94,12 +94,19 @@ public class UnifiedResponseEvaluator {
     
     /**
      * 评估状态码
+     * ✅ 修复：支持数值比较和文本匹配两种模式
      */
     private static boolean evaluateStatusCode(HttpResponse response, MatchConfig config,
                                               PayloadContext payloadContext,
                                               Map<String, String> sharedVariables) {
         if (response == null) return false;
         
+        // ✅ 修复：如果配置了数值比较，使用数值比较
+        if (config.getMatchType() == MatchType.NUMERIC_COMPARISON) {
+            return compareNumeric(response.statusCode(), config);
+        }
+        
+        // 否则使用文本匹配
         String statusCode = String.valueOf(response.statusCode());
         return matchTextValues(statusCode, config, payloadContext, sharedVariables);
     }
@@ -159,24 +166,42 @@ public class UnifiedResponseEvaluator {
     
     /**
      * 评估响应时间
+     * ✅ 修复：确保使用数值比较模式
      */
     private static boolean evaluateTime(long responseTime, MatchConfig config) {
-        return compareNumeric(responseTime, config);
+        // ✅ 修复：如果配置了数值比较，使用数值比较；否则默认使用数值比较
+        if (config.getMatchType() == MatchType.NUMERIC_COMPARISON || 
+            config.getMatchType() == null) {
+            return compareNumeric(responseTime, config);
+        }
+        
+        // 如果配置了文本匹配（虽然不常见），也支持
+        String timeStr = String.valueOf(responseTime);
+        return matchTextValues(timeStr, config, null, null);
     }
     
     /**
      * 评估响应长度
+     * ✅ 修复：确保使用数值比较模式
      */
     private static boolean evaluateLength(HttpResponse response, MatchConfig config) {
         if (response == null) return false;
         
         // ✅ 安全检查：确保body不为null
-        if (response.body() == null) {
-            return compareNumeric(0, config);
+        long length = 0;
+        if (response.body() != null) {
+            length = response.body().length();
         }
         
-        long length = response.body().length();
-        return compareNumeric(length, config);
+        // ✅ 修复：如果配置了数值比较，使用数值比较；否则默认使用数值比较
+        if (config.getMatchType() == MatchType.NUMERIC_COMPARISON || 
+            config.getMatchType() == null) {
+            return compareNumeric(length, config);
+        }
+        
+        // 如果配置了文本匹配（虽然不常见），也支持
+        String lengthStr = String.valueOf(length);
+        return matchTextValues(lengthStr, config, null, null);
     }
     
     /**
@@ -380,12 +405,20 @@ public class UnifiedResponseEvaluator {
                 // 在范围内：min <= actual <= max
                 long min = config.getNumericValueMin();
                 long max = config.getNumericValueMax();
+                // ✅ 修复：验证范围有效性
+                if (min > max) {
+                    return false;  // 无效范围
+                }
                 return actual >= min && actual <= max;
                 
             case NOT_BETWEEN:
                 // 不在范围内：actual < min OR actual > max
                 long min2 = config.getNumericValueMin();
                 long max2 = config.getNumericValueMax();
+                // ✅ 修复：验证范围有效性
+                if (min2 > max2) {
+                    return true;  // 无效范围，认为不在范围内
+                }
                 return actual < min2 || actual > max2;
                 
             default:

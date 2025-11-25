@@ -214,7 +214,6 @@ public class PairBasedRuleConfigDialog extends JDialog {
                         RuleMatchPair pair = new RuleMatchPair();
                         pair.setId(1);
                         pair.setLabel("配对 1");
-                        pair.setEnabled(true);
                         pair.setRequestConfig(requestConfig);
                         pair.setResponseConfig(responseConfig);
                         
@@ -966,7 +965,6 @@ public class PairBasedRuleConfigDialog extends JDialog {
             RuleMatchPair pair = new RuleMatchPair();
             pair.setId(1);
             pair.setLabel("配对 1");
-            pair.setEnabled(true);
             pair.setRequestConfig(requestConfig);
             pair.setResponseConfig(responseConfig);
             

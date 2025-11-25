@@ -326,6 +326,11 @@ public class UnifiedHttpEvaluator {
             return true;
         }
         
+        // ✅ 修复：null安全检查
+        if (actualValue == null) {
+            actualValue = "";
+        }
+        
         MatchType matchType = matchConfig.getMatchType();
         List<String> expectedValues = matchConfig.getValues();
         boolean caseSensitive = matchConfig.isCaseSensitive();

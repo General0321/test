@@ -17,10 +17,14 @@ import com.xprobe.scanner.models.ScanTask;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.Arrays;
 import com.xprobe.scanner.core.CrossPairVariableExtractor;
@@ -420,7 +424,13 @@ public class UniversalScanner extends AbstractScanner {
             // ✨ 新增：跨Pair变量表（链式变量传递）
             Map<String, String> accumulatedVars = new HashMap<>();
             
-            for (RuleMatchPair pair : pairs) {
+            // ✅ 修复：对pairs进行拓扑排序（从变量使用自动推断依赖关系）
+            List<RuleMatchPair> sortedPairs = topologicalSortPairs(pairs);
+            
+            for (RuleMatchPair pair : sortedPairs) {
+                // ✅ 检查依赖的Pair是否已执行（依赖关系已通过拓扑排序保证，这里只需要检查变量是否可用）
+                // 如果使用了变量但变量未提取，会在变量替换时处理（保持占位符或使用空值）
+                
                 try {
                     // ✅ 所有Pair都基于同一个拦截到的请求
                     // ✅ 传递allEvaluations列表和allPairFeatures，让评估方法能够记录所有请求并引用前面的特征
@@ -499,8 +509,8 @@ public class UniversalScanner extends AbstractScanner {
             api.logging().raiseDebugEvent("🔍 [最终评估] 配对结果: " + pairResults);
             api.logging().raiseDebugEvent("🔍 [最终评估] 配对表达式: " + (config.getPairExpression() != null && !config.getPairExpression().isEmpty() ? config.getPairExpression() : "默认(AND)"));
             
-            // 根据配对表达式评估最终结果
-            boolean finalResult = evaluatePairExpression(config.getPairExpression(), pairResults);
+            // ✅ 修复：根据配对表达式评估最终结果（考虑optional字段）
+            boolean finalResult = evaluatePairExpression(config.getPairExpression(), pairResults, sortedPairs);
             api.logging().raiseDebugEvent("🔍 [最终评估] 最终结果: " + (finalResult ? "✅ 漏洞" : "❌ 未命中"));
             
             // ✅ 为所有发送的请求创建结果条目
@@ -1877,15 +1887,24 @@ public class UniversalScanner extends AbstractScanner {
     
     /**
      * 评估配对表达式
+     * ✅ 修复：支持未引用的pair ID处理
+     * 注意：optional逻辑已移除，通过表达式（AND/OR）控制即可
      */
-    private boolean evaluatePairExpression(String expression, Map<Integer, Boolean> pairResults) {
+    private boolean evaluatePairExpression(String expression, Map<Integer, Boolean> pairResults, List<RuleMatchPair> pairs) {
         if (pairResults.isEmpty()) {
+            return false;
+        }
+        
+        // 直接使用所有pair结果（不再过滤optional）
+        Map<Integer, Boolean> filteredResults = new HashMap<>(pairResults);
+        
+        if (filteredResults.isEmpty()) {
             return false;
         }
         
         // 如果表达式为空，默认使用AND逻辑
         if (expression == null || expression.trim().isEmpty()) {
-            return pairResults.values().stream().allMatch(b -> b);
+            return filteredResults.values().stream().allMatch(b -> b);
         }
         
         try {
@@ -1893,10 +1912,34 @@ public class UniversalScanner extends AbstractScanner {
             String expr = expression;
             
             // 替换配对ID为其结果值
-            for (Map.Entry<Integer, Boolean> entry : pairResults.entrySet()) {
+            for (Map.Entry<Integer, Boolean> entry : filteredResults.entrySet()) {
                 String id = String.valueOf(entry.getKey());
                 String value = entry.getValue() ? "true" : "false";
                 expr = expr.replaceAll("\\b" + id + "\\b", value);
+            }
+            
+            // ✅ 修复：检查表达式中是否还有未替换的pair ID（可能是被禁用或删除的pair）
+            // 将未匹配的ID替换为false（表示该pair未执行或失败）
+            Pattern idPattern = Pattern.compile("\\b\\d+\\b");
+            Matcher matcher = idPattern.matcher(expr);
+            Set<String> unmatchedIds = new HashSet<>();
+            while (matcher.find()) {
+                String idStr = matcher.group();
+                try {
+                    int id = Integer.parseInt(idStr);
+                    // 如果这个ID不在filteredResults中，说明是未引用的pair ID
+                    if (!filteredResults.containsKey(id)) {
+                        unmatchedIds.add(idStr);
+                    }
+                } catch (NumberFormatException e) {
+                    // 忽略非数字
+                }
+            }
+            
+            // 将未匹配的ID替换为false
+            for (String unmatchedId : unmatchedIds) {
+                api.logging().raiseDebugEvent("配对表达式引用了未执行的配对ID: " + unmatchedId + "，替换为false");
+                expr = expr.replaceAll("\\b" + unmatchedId + "\\b", "false");
             }
             
             // 评估布尔表达式
@@ -1905,7 +1948,7 @@ public class UniversalScanner extends AbstractScanner {
         } catch (Exception e) {
             api.logging().raiseErrorEvent("评估配对表达式时出错: " + e.getMessage());
             // 默认使用AND逻辑
-            return pairResults.values().stream().allMatch(b -> b);
+            return filteredResults.values().stream().allMatch(b -> b);
         }
     }
     
@@ -2124,10 +2167,21 @@ public class UniversalScanner extends AbstractScanner {
             boolean timeOk = ResponseComparisonEngine.verifyTimeDelayWithReference(
                 responseTime, comparisonConfig, refFeatures
             );
+            
+            // ✅ 修复：支持显示倍数范围
+            String multiplierInfo;
+            Double minMultiplier = comparisonConfig.getRelativeTimeMultiplierMin();
+            Double maxMultiplier = comparisonConfig.getRelativeTimeMultiplierMax();
+            if (minMultiplier != null && maxMultiplier != null) {
+                multiplierInfo = String.format("%.2f-%.2f倍", minMultiplier, maxMultiplier);
+            } else {
+                Double multiplier = comparisonConfig.getRelativeTimeMultiplier();
+                multiplierInfo = String.format("%.2f倍", multiplier != null ? multiplier : 1.0);
+            }
+            
             api.logging().raiseDebugEvent(String.format(
-                "配对 [%d] 相对时间对比结果: %s (引用Pair [%d], 倍数=%.2f)",
-                pair.getId(), timeOk ? "✅ 通过" : "❌ 失败", refPairId,
-                comparisonConfig.getRelativeTimeMultiplier() != null ? comparisonConfig.getRelativeTimeMultiplier() : 1.0
+                "配对 [%d] 相对时间对比结果: %s (引用Pair [%d], %s)",
+                pair.getId(), timeOk ? "✅ 通过" : "❌ 失败", refPairId, multiplierInfo
             ));
             allChecksPass = allChecksPass && timeOk;
         }
@@ -2195,5 +2249,208 @@ public class UniversalScanner extends AbstractScanner {
         } catch (Exception e) {
             return true;
         }
+    }
+    
+    /**
+     * ✅ 拓扑排序Pair列表（从变量使用自动推断依赖关系）
+     * 
+     * 自动从变量使用推断依赖关系：
+     * - 如果 Pair 2 使用了 {{PAIR:1:name}}，则 Pair 2 依赖 Pair 1
+     * - 如果 Pair 2 使用了 {{VAR:name}}，且 Pair 1 提取了这个变量，则 Pair 2 依赖 Pair 1
+     * 
+     * 使用Kahn算法进行拓扑排序，确保依赖的Pair先执行
+     * 
+     * @param pairs 原始Pair列表
+     * @return 排序后的Pair列表（依赖的Pair在前）
+     */
+    private List<RuleMatchPair> topologicalSortPairs(List<RuleMatchPair> pairs) {
+        if (pairs == null || pairs.isEmpty()) {
+            return new ArrayList<>();
+        }
+        
+        // 构建依赖图
+        Map<Integer, RuleMatchPair> pairMap = new HashMap<>();
+        Map<Integer, List<Integer>> dependencyGraph = new HashMap<>();  // pairId -> 依赖它的pair列表
+        Map<Integer, Integer> inDegree = new HashMap<>();  // pairId -> 入度
+        
+        // 构建变量提取映射：变量名 -> 提取它的Pair ID列表
+        Map<String, List<Integer>> variableToPairs = new HashMap<>();
+        
+        for (RuleMatchPair pair : pairs) {
+            pairMap.put(pair.getId(), pair);
+            inDegree.put(pair.getId(), 0);
+            dependencyGraph.put(pair.getId(), new ArrayList<>());
+            
+            // 记录每个Pair提取的变量
+            if (pair.getExtractVariables() != null && !pair.getExtractVariables().isEmpty()) {
+                for (String varName : pair.getExtractVariables().keySet()) {
+                    variableToPairs.computeIfAbsent(varName, k -> new ArrayList<>()).add(pair.getId());
+                    // 也支持大小写不敏感的匹配
+                    variableToPairs.computeIfAbsent(varName.toUpperCase(), k -> new ArrayList<>()).add(pair.getId());
+                    variableToPairs.computeIfAbsent(varName.toLowerCase(), k -> new ArrayList<>()).add(pair.getId());
+                }
+            }
+        }
+        
+        // 从变量使用推断依赖关系
+        for (RuleMatchPair pair : pairs) {
+            Set<Integer> dependencies = new HashSet<>();
+            
+            // 检查请求配置中的所有文本（payloads、匹配值等）
+            UnifiedHttpConfig requestConfig = pair.getRequestConfig();
+            if (requestConfig != null) {
+                for (UnifiedHttpConfig.HttpElementConfig element : requestConfig.getElements()) {
+                    // 检查payloads
+                    if (element.getPayloads() != null) {
+                        for (String payload : element.getPayloads()) {
+                            if (payload != null) {
+                                dependencies.addAll(extractDependenciesFromText(payload, pairMap, variableToPairs));
+                            }
+                        }
+                    }
+                    
+                    // 检查匹配值
+                    if (element.getNameMatchConfig() != null && element.getNameMatchConfig().getValues() != null) {
+                        for (String value : element.getNameMatchConfig().getValues()) {
+                            if (value != null) {
+                                dependencies.addAll(extractDependenciesFromText(value, pairMap, variableToPairs));
+                            }
+                        }
+                    }
+                    
+                    if (element.getValueMatchConfig() != null && element.getValueMatchConfig().getValues() != null) {
+                        for (String value : element.getValueMatchConfig().getValues()) {
+                            if (value != null) {
+                                dependencies.addAll(extractDependenciesFromText(value, pairMap, variableToPairs));
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // 建立依赖关系
+            for (Integer depId : dependencies) {
+                if (pairMap.containsKey(depId) && depId < pair.getId()) {
+                    // depId 被 pair.getId() 依赖
+                    dependencyGraph.get(depId).add(pair.getId());
+                    inDegree.put(pair.getId(), inDegree.get(pair.getId()) + 1);
+                    api.logging().raiseDebugEvent(
+                        "自动推断：配对 [" + pair.getId() + "] 依赖配对 [" + depId + "]（从变量使用推断）"
+                    );
+                }
+            }
+        }
+        
+        // Kahn算法：拓扑排序
+        List<RuleMatchPair> sorted = new ArrayList<>();
+        Queue<Integer> queue = new LinkedList<>();
+        
+        // 找到所有入度为0的节点（没有依赖的Pair）
+        for (Map.Entry<Integer, Integer> entry : inDegree.entrySet()) {
+            if (entry.getValue() == 0) {
+                queue.offer(entry.getKey());
+            }
+        }
+        
+        while (!queue.isEmpty()) {
+            Integer currentId = queue.poll();
+            RuleMatchPair currentPair = pairMap.get(currentId);
+            if (currentPair != null) {
+                sorted.add(currentPair);
+            }
+            
+            // 减少依赖当前节点的节点的入度
+            List<Integer> dependents = dependencyGraph.get(currentId);
+            if (dependents != null) {
+                for (Integer dependentId : dependents) {
+                    int newInDegree = inDegree.get(dependentId) - 1;
+                    inDegree.put(dependentId, newInDegree);
+                    if (newInDegree == 0) {
+                        queue.offer(dependentId);
+                    }
+                }
+            }
+        }
+        
+        // 检查是否有循环依赖
+        if (sorted.size() < pairs.size()) {
+            // 有节点未被排序，说明存在循环依赖
+            Set<Integer> sortedIds = sorted.stream()
+                .map(RuleMatchPair::getId)
+                .collect(Collectors.toSet());
+            
+            List<Integer> cyclePairs = pairs.stream()
+                .map(RuleMatchPair::getId)
+                .filter(id -> !sortedIds.contains(id))
+                .collect(Collectors.toList());
+            
+            api.logging().raiseErrorEvent(
+                "检测到循环依赖，涉及配对: " + cyclePairs + "，将按原始顺序执行"
+            );
+            
+            // 将未排序的Pair按原始顺序添加到末尾
+            for (RuleMatchPair pair : pairs) {
+                if (!sortedIds.contains(pair.getId())) {
+                    sorted.add(pair);
+                }
+            }
+        }
+        
+        return sorted;
+    }
+    
+    /**
+     * 从文本中提取依赖的Pair ID
+     * 
+     * @param text 文本内容（可能包含 {{PAIR:id:name}} 或 {{VAR:name}}）
+     * @param pairMap Pair映射
+     * @param variableToPairs 变量名到Pair ID列表的映射
+     * @return 依赖的Pair ID集合
+     */
+    private Set<Integer> extractDependenciesFromText(String text, 
+                                                     Map<Integer, RuleMatchPair> pairMap,
+                                                     Map<String, List<Integer>> variableToPairs) {
+        Set<Integer> dependencies = new HashSet<>();
+        
+        if (text == null || !text.contains("{{")) {
+            return dependencies;
+        }
+        
+        // 提取 {{PAIR:id:name}} 格式的依赖
+        Pattern pairPattern = Pattern.compile("\\{\\{PAIR:(\\d+):[^}]+\\}\\}");
+        Matcher pairMatcher = pairPattern.matcher(text);
+        while (pairMatcher.find()) {
+            try {
+                int pairId = Integer.parseInt(pairMatcher.group(1));
+                if (pairMap.containsKey(pairId)) {
+                    dependencies.add(pairId);
+                }
+            } catch (NumberFormatException e) {
+                // 忽略无效的ID
+            }
+        }
+        
+        // 提取 {{VAR:name}} 格式的依赖
+        Pattern varPattern = Pattern.compile("\\{\\{VAR:([^}]+)\\}\\}");
+        Matcher varMatcher = varPattern.matcher(text);
+        while (varMatcher.find()) {
+            String varName = varMatcher.group(1);
+            // 查找提取这个变量的所有Pair
+            List<Integer> pairsWithVar = variableToPairs.get(varName);
+            if (pairsWithVar != null) {
+                dependencies.addAll(pairsWithVar);
+            }
+            // 也尝试大小写不敏感的匹配
+            List<Integer> pairsWithVarUpper = variableToPairs.get(varName.toUpperCase());
+            if (pairsWithVarUpper != null) {
+                dependencies.addAll(pairsWithVarUpper);
+            }
+            List<Integer> pairsWithVarLower = variableToPairs.get(varName.toLowerCase());
+            if (pairsWithVarLower != null) {
+                dependencies.addAll(pairsWithVarLower);
+            }
+        }
+        
+        return dependencies;
     }
 }

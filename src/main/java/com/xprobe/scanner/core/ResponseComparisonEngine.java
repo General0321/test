@@ -274,26 +274,63 @@ public class ResponseComparisonEngine {
             return false;
         }
         
-        long expectedTime;
-        
         // 根据时间比较模式确定期望时间
         if (config.getTimeComparisonMode() == ResponseComparisonConfig.TimeComparisonMode.RELATIVE_TO_PAIR) {
-            // 相对模式：基于引用Pair的时间 × 倍数
+            // 相对模式：基于引用Pair的时间 × 倍数（支持范围）
             if (referenceFeatures == null) {
                 return false;
             }
             long referenceTime = referenceFeatures.getResponseTime();
-            double multiplier = config.getRelativeTimeMultiplier() != null ? 
-                               config.getRelativeTimeMultiplier() : 1.0;
-            expectedTime = (long) (referenceTime * multiplier);
+            
+            // ✅ 支持倍数范围模式
+            Double minMultiplier = config.getRelativeTimeMultiplierMin();
+            Double maxMultiplier = config.getRelativeTimeMultiplierMax();
+            
+            if (minMultiplier != null && maxMultiplier != null) {
+                // ✅ 验证：确保倍数范围有效
+                if (minMultiplier <= 0 || maxMultiplier <= 0 || minMultiplier >= maxMultiplier) {
+                    return false;
+                }
+                
+                // 范围模式：检查实际时间是否在 [referenceTime * minMultiplier, referenceTime * maxMultiplier] 范围内
+                long minExpectedTime = (long) (referenceTime * minMultiplier);
+                long maxExpectedTime = (long) (referenceTime * maxMultiplier);
+                
+                // ✅ 验证：确保期望时间有效
+                if (minExpectedTime <= 0 || maxExpectedTime <= 0 || minExpectedTime >= maxExpectedTime) {
+                    return false;
+                }
+                
+                // 应用容差百分比
+                int tolerancePercent = config.getTimeTolerancePercent();
+                // 对最小和最大期望时间分别应用容差
+                long minTolerance = (minExpectedTime * tolerancePercent) / 100;
+                long maxTolerance = (maxExpectedTime * tolerancePercent) / 100;
+                
+                // ✅ 修复：确保容差不会导致minAcceptable小于0
+                long minAcceptable = Math.max(0, minExpectedTime - minTolerance);
+                long maxAcceptable = maxExpectedTime + maxTolerance;
+                
+                boolean inRange = actualTime >= minAcceptable && actualTime <= maxAcceptable;
+                
+                return inRange;
+            } else {
+                // 单倍数模式：使用relativeTimeMultiplier（向后兼容）
+                double multiplier = config.getRelativeTimeMultiplier() != null ? 
+                                   config.getRelativeTimeMultiplier() : 1.0;
+                long expectedTime = (long) (referenceTime * multiplier);
+                
+                // 使用标准时间验证逻辑
+                return verifyTimeDelay(actualTime, expectedTime, config.getTimeTolerancePercent());
+            }
             
         } else {
             // 绝对模式：使用timeBaseline
-            expectedTime = config.getTimeBaseline() != null ? config.getTimeBaseline() : 0;
+            long expectedTime = config.getTimeBaseline() != null ? config.getTimeBaseline() : 0;
+            
+            // 使用标准时间验证逻辑
+            return verifyTimeDelay(actualTime, expectedTime, config.getTimeTolerancePercent());
         }
-        
-        // 使用标准时间验证逻辑
-        return verifyTimeDelay(actualTime, expectedTime, config.getTimeTolerancePercent());
     }
     
     /**
@@ -594,6 +631,15 @@ public class ResponseComparisonEngine {
      * ✨ 通用值比较方法（静态版本）
      */
     private static boolean compareValues(Object val1, Object val2, String operator) {
+        // ✅ 修复：添加null检查
+        if (val1 == null || val2 == null) {
+            // 如果任一值为null，只有NOT_EQUALS在两者都为null时返回false，其他情况返回false
+            if ("NOT_EQUALS".equalsIgnoreCase(operator)) {
+                return val1 != val2;  // null != null 返回false，null != non-null 返回true
+            }
+            return false;
+        }
+        
         try {
             switch (operator.toUpperCase()) {
                 case "EQUALS":

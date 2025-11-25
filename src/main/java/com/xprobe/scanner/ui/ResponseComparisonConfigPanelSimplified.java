@@ -20,6 +20,11 @@ public class ResponseComparisonConfigPanelSimplified extends JPanel {
     private JTextField thresholdField;
     private JCheckBox ignoreDynamicContentCheckBox;
     
+    // ✅ 时间倍数范围配置（新增）
+    private JTextField timeMultiplierMinField;
+    private JTextField timeMultiplierMaxField;
+    private JLabel timeMultiplierRangeLabel;
+    
     public ResponseComparisonConfigPanelSimplified(ResponseComparisonConfig config) {
         this.config = config != null ? config : new ResponseComparisonConfig();
         initComponents();
@@ -84,6 +89,7 @@ public class ResponseComparisonConfigPanelSimplified extends JPanel {
             "响应时间 - 小于引用Pair",
             "响应时间 - 等于引用Pair",
             "响应时间 - 不等于引用Pair",
+            "响应时间 - 倍数范围对比（如：1.9-2.1倍）",
             "响应长度 - 大于引用Pair（精确比较）",
             "响应长度 - 小于引用Pair（精确比较）",
             "响应长度 - 等于引用Pair（精确比较）",
@@ -136,6 +142,36 @@ public class ResponseComparisonConfigPanelSimplified extends JPanel {
         mainPanel.add(thresholdHintLabel, gbc);
         row++;
         
+        // ✅ 新增：时间倍数范围配置（仅倍数范围对比时显示）
+        gbc.gridx = 0; gbc.gridy = row;
+        timeMultiplierRangeLabel = new JLabel("倍数范围:");
+        timeMultiplierRangeLabel.setFont(timeMultiplierRangeLabel.getFont().deriveFont(Font.BOLD, 12f));
+        mainPanel.add(timeMultiplierRangeLabel, gbc);
+        
+        gbc.gridx = 1; gbc.gridy = row;
+        JPanel multiplierPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        multiplierPanel.setBackground(Color.WHITE);
+        timeMultiplierMinField = new JTextField(8);
+        timeMultiplierMinField.setPreferredSize(new Dimension(60, 30));
+        timeMultiplierMinField.setFont(timeMultiplierMinField.getFont().deriveFont(Font.PLAIN, 12f));
+        multiplierPanel.add(timeMultiplierMinField);
+        
+        JLabel toLabel = new JLabel(" 至 ");
+        toLabel.setForeground(new Color(100, 100, 100));
+        multiplierPanel.add(toLabel);
+        
+        timeMultiplierMaxField = new JTextField(8);
+        timeMultiplierMaxField.setPreferredSize(new Dimension(60, 30));
+        timeMultiplierMaxField.setFont(timeMultiplierMaxField.getFont().deriveFont(Font.PLAIN, 12f));
+        multiplierPanel.add(timeMultiplierMaxField);
+        mainPanel.add(multiplierPanel, gbc);
+        
+        gbc.gridx = 2; gbc.gridy = row;
+        JLabel multiplierHintLabel = new JLabel("（如：1.9-2.1）");
+        multiplierHintLabel.setForeground(new Color(100, 100, 100));
+        mainPanel.add(multiplierHintLabel, gbc);
+        row++;
+        
         // 4. 忽略动态内容（仅响应体对比需要）
         gbc.gridx = 0; gbc.gridy = row; gbc.gridwidth = 3;
         ignoreDynamicContentCheckBox = new JCheckBox("忽略动态内容（时间戳、token等）");
@@ -149,6 +185,11 @@ public class ResponseComparisonConfigPanelSimplified extends JPanel {
         
         // 底部示例说明
         add(createExamplesPanel(), BorderLayout.SOUTH);
+        
+        // ✅ 初始化：默认隐藏倍数范围字段
+        timeMultiplierRangeLabel.setVisible(false);
+        timeMultiplierMinField.setVisible(false);
+        timeMultiplierMaxField.setVisible(false);
         
         // 初始化字段可见性
         updateFieldVisibility();
@@ -200,12 +241,26 @@ public class ResponseComparisonConfigPanelSimplified extends JPanel {
         String selected = (String) comparisonTypeCombo.getSelectedItem();
         
         // 阈值字段：仅在特定情况下需要
-        // - 响应时间：仅"大于"、"小于"、"不等于"需要阈值
+        // - 响应时间：仅"大于"、"小于"、"不等于"需要阈值（倍数范围不需要）
         // - 响应长度：仅"差异大于阈值"需要阈值，其他对比是精确比较
         boolean needThreshold = 
             (selected.contains("响应时间") && (selected.contains("大于") || selected.contains("小于") || selected.contains("不等于"))) ||
             selected.contains("差异大于阈值");
         thresholdField.setEnabled(needThreshold);
+        
+        // ✅ 新增：倍数范围字段（仅倍数范围对比时显示）
+        boolean needMultiplierRange = selected != null && selected.contains("倍数范围对比");
+        if (timeMultiplierRangeLabel != null) {
+            timeMultiplierRangeLabel.setVisible(needMultiplierRange);
+        }
+        if (timeMultiplierMinField != null) {
+            timeMultiplierMinField.setVisible(needMultiplierRange);
+            timeMultiplierMinField.setEnabled(needMultiplierRange);
+        }
+        if (timeMultiplierMaxField != null) {
+            timeMultiplierMaxField.setVisible(needMultiplierRange);
+            timeMultiplierMaxField.setEnabled(needMultiplierRange);
+        }
         
         // 忽略动态内容：仅响应体对比需要
         boolean needIgnoreDynamic = selected.contains("响应体内容");
@@ -236,6 +291,21 @@ public class ResponseComparisonConfigPanelSimplified extends JPanel {
             ignoreDynamicContentCheckBox.setSelected(config.isUseCleanedBodyComparison());
         }
         // 2. 特征对比模式（响应时间、长度、状态码）
+        // ✅ 优先检查时间对比模式（RELATIVE_TO_PAIR + 倍数范围）
+        else if (config.getTimeComparisonMode() == ResponseComparisonConfig.TimeComparisonMode.RELATIVE_TO_PAIR
+                && config.getReferencePairId() != null) {
+            Double minMultiplier = config.getRelativeTimeMultiplierMin();
+            Double maxMultiplier = config.getRelativeTimeMultiplierMax();
+            if (minMultiplier != null && maxMultiplier != null && minMultiplier > 0 && maxMultiplier > 0) {
+                // 倍数范围模式
+                referencePairIdSpinner.setValue(config.getReferencePairId());
+                comparisonTypeCombo.setSelectedItem("响应时间 - 倍数范围对比（如：1.9-2.1倍）");
+                timeMultiplierMinField.setText(String.valueOf(minMultiplier));
+                timeMultiplierMaxField.setText(String.valueOf(maxMultiplier));
+                // ✅ 确保字段可见性正确
+                updateFieldVisibility();
+            }
+        }
         else if (config.getReferencePairId() != null && config.getReferenceFeatureType() != null) {
             referencePairIdSpinner.setValue(config.getReferencePairId());
             String featureType = config.getReferenceFeatureType();
@@ -323,20 +393,61 @@ public class ResponseComparisonConfigPanelSimplified extends JPanel {
             newConfig.setReferencePairId(refPairId);
             
             if (selected.contains("响应时间")) {
-                newConfig.setReferenceFeatureType("RESPONSE_TIME");
-                
-                // 根据选择的对比类型设置操作符
-                if (selected.contains("大于")) {
-                    newConfig.setReferenceOperator("GREATER_THAN");
-                    newConfig.setReferenceValue(thresholdField.getText());
-                } else if (selected.contains("小于")) {
-                    newConfig.setReferenceOperator("LESS_THAN");
-                    newConfig.setReferenceValue(thresholdField.getText());
-                } else if (selected.contains("等于") && !selected.contains("不等于")) {
-                    newConfig.setReferenceOperator("EQUALS");
-                } else if (selected.contains("不等于")) {
-                    newConfig.setReferenceOperator("NOT_EQUALS");
-                    newConfig.setReferenceValue(thresholdField.getText());
+                // ✅ 新增：处理倍数范围模式
+                if (selected.contains("倍数范围对比")) {
+                    // 设置时间对比模式为相对模式
+                    newConfig.setTimeComparisonMode(ResponseComparisonConfig.TimeComparisonMode.RELATIVE_TO_PAIR);
+                    // ✅ 注意：referencePairId已在上面设置，不需要重复设置
+                    // ✅ 注意：倍数范围模式不需要设置referenceFeatureType，因为通过timeComparisonMode判断
+                    
+                    // 读取倍数范围
+                    try {
+                        String minText = timeMultiplierMinField.getText().trim();
+                        String maxText = timeMultiplierMaxField.getText().trim();
+                        if (!minText.isEmpty() && !maxText.isEmpty()) {
+                            double minMultiplier = Double.parseDouble(minText);
+                            double maxMultiplier = Double.parseDouble(maxText);
+                            
+                            // ✅ 验证：确保min < max且都是正数
+                            if (minMultiplier <= 0 || maxMultiplier <= 0) {
+                                throw new NumberFormatException("倍数必须大于0");
+                            }
+                            if (minMultiplier >= maxMultiplier) {
+                                // 自动交换
+                                double temp = minMultiplier;
+                                minMultiplier = maxMultiplier;
+                                maxMultiplier = temp;
+                            }
+                            
+                            newConfig.setRelativeTimeMultiplierMin(minMultiplier);
+                            newConfig.setRelativeTimeMultiplierMax(maxMultiplier);
+                        } else {
+                            // 如果输入为空，使用默认值
+                            newConfig.setRelativeTimeMultiplierMin(1.9);
+                            newConfig.setRelativeTimeMultiplierMax(2.1);
+                        }
+                    } catch (NumberFormatException e) {
+                        // 如果输入无效，使用默认值
+                        newConfig.setRelativeTimeMultiplierMin(1.9);
+                        newConfig.setRelativeTimeMultiplierMax(2.1);
+                    }
+                } else {
+                    // 普通时间对比模式：使用referenceFeatureType
+                    newConfig.setReferenceFeatureType("RESPONSE_TIME");
+                    
+                    // 根据选择的对比类型设置操作符
+                    if (selected.contains("大于")) {
+                        newConfig.setReferenceOperator("GREATER_THAN");
+                        newConfig.setReferenceValue(thresholdField.getText());
+                    } else if (selected.contains("小于")) {
+                        newConfig.setReferenceOperator("LESS_THAN");
+                        newConfig.setReferenceValue(thresholdField.getText());
+                    } else if (selected.contains("等于") && !selected.contains("不等于")) {
+                        newConfig.setReferenceOperator("EQUALS");
+                    } else if (selected.contains("不等于")) {
+                        newConfig.setReferenceOperator("NOT_EQUALS");
+                        newConfig.setReferenceValue(thresholdField.getText());
+                    }
                 }
             } 
             else if (selected.contains("响应长度")) {

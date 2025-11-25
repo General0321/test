@@ -56,8 +56,16 @@ public class ResponseComparisonConfig implements Serializable {
      */
     private TimeComparisonMode timeComparisonMode = TimeComparisonMode.ABSOLUTE;
     
-    /** 【RELATIVE_TO_PAIR模式】相对时间倍数（如：2.0表示2倍时间） */
+    /** 【RELATIVE_TO_PAIR模式】相对时间倍数（如：2.0表示2倍时间）
+     *  如果同时设置了relativeTimeMultiplierMin和relativeTimeMultiplierMax，则使用范围模式
+     */
     private Double relativeTimeMultiplier = 1.0;
+    
+    /** 【RELATIVE_TO_PAIR模式】相对时间倍数最小值（范围模式，如：1.9） */
+    private Double relativeTimeMultiplierMin;
+    
+    /** 【RELATIVE_TO_PAIR模式】相对时间倍数最大值（范围模式，如：2.1） */
+    private Double relativeTimeMultiplierMax;
     
     /** 【BOOLEAN_COMPARISON】是否与指定Pair对比响应差异 */
     private boolean compareWithReferencePair = false;
@@ -264,6 +272,22 @@ public class ResponseComparisonConfig implements Serializable {
     
     public void setRelativeTimeMultiplier(Double relativeTimeMultiplier) {
         this.relativeTimeMultiplier = relativeTimeMultiplier;
+    }
+    
+    public Double getRelativeTimeMultiplierMin() {
+        return relativeTimeMultiplierMin;
+    }
+    
+    public void setRelativeTimeMultiplierMin(Double relativeTimeMultiplierMin) {
+        this.relativeTimeMultiplierMin = relativeTimeMultiplierMin;
+    }
+    
+    public Double getRelativeTimeMultiplierMax() {
+        return relativeTimeMultiplierMax;
+    }
+    
+    public void setRelativeTimeMultiplierMax(Double relativeTimeMultiplierMax) {
+        this.relativeTimeMultiplierMax = relativeTimeMultiplierMax;
     }
     
     public boolean isCompareWithReferencePair() {
