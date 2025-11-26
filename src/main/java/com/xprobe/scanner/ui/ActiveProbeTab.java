@@ -120,7 +120,30 @@ public class ActiveProbeTab {
                 return false;
             }
         };
-        collectedDataTable = new JTable(collectedDataTableModel);
+        collectedDataTable = new JTable(collectedDataTableModel) {
+            // ✅ 修复：重写prepareRenderer确保选中行颜色正确显示（参考 arjunResultTable）
+            @Override
+            public Component prepareRenderer(javax.swing.table.TableCellRenderer renderer, int row, int column) {
+                Component c = super.prepareRenderer(renderer, row, column);
+                
+                if (isRowSelected(row)) {
+                    // 选中行：使用设置的选中颜色
+                    c.setBackground(getSelectionBackground());
+                    c.setForeground(getSelectionForeground());
+                } else {
+                    // 未选中行：使用默认背景色
+                    c.setBackground(Color.WHITE);
+                    c.setForeground(Color.BLACK);
+                }
+                
+                // ✅ 确保组件不透明，背景色才能正确显示
+                if (c instanceof JComponent) {
+                    ((JComponent) c).setOpaque(true);
+                }
+                
+                return c;
+            }
+        };
         collectedDataTable.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         collectedDataTable.setRowHeight(28);
         collectedDataTable.getTableHeader().setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
@@ -230,19 +253,17 @@ public class ActiveProbeTab {
             }
         });
         
-        // ✅ 关键修复：鼠标移动时恢复选择（如果被清除了）
+        // ✅ 关键修复：禁用鼠标移动时的选择变化（参考 arjunResultTable）
         collectedDataTable.addMouseMotionListener(new java.awt.event.MouseMotionAdapter() {
             @Override
+            public void mouseDragged(java.awt.event.MouseEvent e) {
+                // ✅ 阻止拖拽时改变选择
+                e.consume();
+            }
+            
+            @Override
             public void mouseMoved(java.awt.event.MouseEvent e) {
-                // ✅ 鼠标移动时，如果选择被清除了，恢复之前的选择
-                if (collectedDataTable.getSelectedRowCount() == 0 && !savedSelectedRows.isEmpty()) {
-                    // 恢复之前保存的选择
-                    for (int row : savedSelectedRows) {
-                        if (row >= 0 && row < collectedDataTable.getRowCount()) {
-                            collectedDataTable.addRowSelectionInterval(row, row);
-                        }
-                    }
-                }
+                // ✅ 鼠标移动时不改变选择（什么都不做，保持当前选择）
             }
         });
         
@@ -262,7 +283,30 @@ public class ActiveProbeTab {
                 return false;
             }
         };
-        arjunResultTable = new JTable(arjunResultTableModel);
+        arjunResultTable = new JTable(arjunResultTableModel) {
+            // ✅ 修复：重写prepareRenderer确保选中行颜色正确显示
+            @Override
+            public Component prepareRenderer(javax.swing.table.TableCellRenderer renderer, int row, int column) {
+                Component c = super.prepareRenderer(renderer, row, column);
+                
+                if (isRowSelected(row)) {
+                    // 选中行：使用设置的选中颜色
+                    c.setBackground(getSelectionBackground());
+                    c.setForeground(getSelectionForeground());
+                } else {
+                    // 未选中行：使用默认背景色
+                    c.setBackground(Color.WHITE);
+                    c.setForeground(Color.BLACK);
+                }
+                
+                // ✅ 确保组件不透明，背景色才能正确显示
+                if (c instanceof JComponent) {
+                    ((JComponent) c).setOpaque(true);
+                }
+                
+                return c;
+            }
+        };
         arjunResultTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         arjunResultTable.setRowHeight(25);
         arjunResultTable.getTableHeader().setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
