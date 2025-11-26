@@ -732,8 +732,10 @@ public class ActiveProbeTab {
         // 总开关监听
         masterEnableToggle.addActionListener(e -> toggleMasterSwitch());
         
-        arjunScanButton.addActionListener(e -> startArjunScan());
-        interfaceScanButton.addActionListener(e -> startInterfaceDiscovery());
+        arjunScanButton.addActionListener(e -> openProbeConfigDialog(
+            ActiveProbeConfigDialog.ProbeMode.ARJUN_ONLY));
+        interfaceScanButton.addActionListener(e -> openProbeConfigDialog(
+            ActiveProbeConfigDialog.ProbeMode.INTERFACE_ONLY));
         refreshDataButton.addActionListener(e -> refreshCollectedData());
         clearResultsButton.addActionListener(e -> clearResults());
         clearCacheButton.addActionListener(e -> clearArjunCache());  // ✅ 清空Arjun缓存
@@ -749,6 +751,15 @@ public class ActiveProbeTab {
         // Arjun配置已移至配置中心统一管理，此处不再提供UI修改
         // chunkSizeSpinner和timeoutSpinner保留用于读取配置值，但不提供UI修改
     }
+
+    private void openProbeConfigDialog(ActiveProbeConfigDialog.ProbeMode mode) {
+        SwingUtilities.invokeLater(() -> {
+            Window owner = SwingUtilities.getWindowAncestor(panel);
+            ParameterDataStorage.ParameterDataModel dataModel = parameterDataStorage.load();
+            ActiveProbeConfigDialog dialog = new ActiveProbeConfigDialog(owner, dataModel, mode);
+            dialog.setVisible(true);
+        });
+    }
     
     /**
      * 切换到实时监听模式
@@ -762,17 +773,26 @@ public class ActiveProbeTab {
         modeStatusLabel.setText("当前: 实时监听模式 (智能触发)");
         modeStatusLabel.setForeground(new Color(46, 204, 113));
         
-        // ✅ 检查总开关状态
+        // ✅ 检查总开关状态（必须在设置模式之前检查）
         if (!masterEnableToggle.isSelected()) {
             statusLabel.setText("⚫ 主动探测已禁用 - 被动收集持续进行");
             statusLabel.setForeground(Color.GRAY);
             api.logging().raiseInfoEvent("⚠️ 总开关已禁用，无法切换到实时监听模式");
             // 切换回手动模式
             manualModeRadio.setSelected(true);
+            modeStatusLabel.setText("当前: 手动触发模式 (SiteMap历史流量)");
+            modeStatusLabel.setForeground(Color.GRAY);
             return;
         }
         
+        // ✅ 确保后端总开关已启用（双重检查，确保状态同步）
+        // 注意：applyMasterSwitchState() 已经调用了 startRealtimeScanning()，
+        // 但为了确保状态一致，这里再次检查并启用
+        activeScanner.getRealtimeScanner().startRealtimeScanning();
+        
         // ✅ 设置后端为实时模式
+        // 注意：setRealtimeMode() 内部会检查 arjunEnabled，如果未启用会直接返回
+        // 但由于上面已经调用了 startRealtimeScanning()，所以这里应该能成功
         activeScanner.getRealtimeScanner().setRealtimeMode(true);
         
         statusLabel.setText("🔄 实时监听 - 阈值触发(15个参数) + 定时兜底(5分钟)...");
@@ -924,7 +944,7 @@ public class ActiveProbeTab {
                                 status             // 状态
                         });
                     } catch (Exception ex) {
-                            api.logging().raiseDebugEvent("获取子域名统计失败: " + ex.getMessage());
+                            api.logging().raiseErrorEvent("获取子域名统计失败: " + ex.getMessage());
                         }
                     }
                 }
@@ -965,7 +985,7 @@ public class ActiveProbeTab {
                 arjunResultsLabel.setText("发现参数: " + paramScanCount);
                 
             } catch (Exception ex) {
-                api.logging().raiseDebugEvent("刷新数据失败: " + ex.getMessage());
+                api.logging().raiseErrorEvent("刷新数据失败: " + ex.getMessage());
             }
         });
     }
@@ -1005,20 +1025,41 @@ public class ActiveProbeTab {
                             statusLabel.setText("❌ 接口探测失败，已取消参数探测");
                             statusLabel.setForeground(new Color(231, 76, 60));
                         });
-            } else {
-                        // ✅ 接口探测完成，进行Arjun参数探测（不先探测接口，因为已经探测过了）
+                        return; // 提前返回，避免继续执行
+                    }
+                    
+                    // ✅ 接口探测完成，进行Arjun参数探测（不先探测接口，因为已经探测过了）
+                    try {
                         if (manualSource) {
-                            processManualTargets(manualTargets, true, false).whenComplete((unused2, throwable2) -> {
-                                SwingUtilities.invokeLater(() -> {
-                                    if (throwable2 != null) {
-                                        statusLabel.setText("❌ Arjun 探测失败");
+                            processManualTargets(manualTargets, true, false)
+                                .whenComplete((unused2, throwable2) -> {
+                                    SwingUtilities.invokeLater(() -> {
+                                        if (throwable2 != null) {
+                                            statusLabel.setText("❌ Arjun 探测失败");
+                                            statusLabel.setForeground(new Color(231, 76, 60));
+                                        } else {
+                                            statusLabel.setText("✅ Arjun 探测完成");
+                                            statusLabel.setForeground(new Color(46, 204, 113));
+                                        }
+                                    });
+                                })
+                                .exceptionally(ex -> {
+                                    api.logging().raiseErrorEvent("Arjun探测异常: " + ex.getMessage());
+                                    SwingUtilities.invokeLater(() -> {
+                                        statusLabel.setText("❌ Arjun 探测异常");
                                         statusLabel.setForeground(new Color(231, 76, 60));
-                                    }
+                                    });
+                                    return null;
                                 });
-                            });
                         } else {
                             arjunTask.run();
                         }
+                    } catch (Exception e) {
+                        api.logging().raiseErrorEvent("启动Arjun探测时出错: " + e.getMessage());
+                        SwingUtilities.invokeLater(() -> {
+                            statusLabel.setText("❌ 启动Arjun探测失败");
+                            statusLabel.setForeground(new Color(231, 76, 60));
+                        });
                     }
                 });
             } else {
@@ -1038,17 +1079,6 @@ public class ActiveProbeTab {
     
     private void startInterfaceDiscovery() {
         try {
-            // ✅ 修复：根据接口来源选择决定数据源
-            // "无"选项表示使用已有采集数据，不需要执行接口探测
-            if (sourceNoneRadio.isSelected()) {
-                JOptionPane.showMessageDialog(panel,
-                    "接口来源选择为\"无\"，将使用已有采集数据。\n" +
-                    "如需执行接口探测，请先选择\"手动添加\"或\"自动采集\"。",
-                    "提示",
-                    JOptionPane.INFORMATION_MESSAGE);
-                return;
-            }
-            
             interfaceScanButton.setEnabled(false);
             statusLabel.setText("🔍 正在执行接口探测...");
             statusLabel.setForeground(new Color(52, 152, 219));
@@ -1056,6 +1086,7 @@ public class ActiveProbeTab {
             
             CompletableFuture<Void> task;
             if (sourceManualRadio.isSelected()) {
+                // ✅ 手动添加模式：弹出输入框让用户输入URL
                 List<String> manualTargets = promptManualTargets();
                 if (manualTargets == null || manualTargets.isEmpty()) {
                     interfaceScanButton.setEnabled(true);
@@ -1067,9 +1098,10 @@ public class ActiveProbeTab {
                 }
                 task = processManualTargets(manualTargets, false);
             } else if (sourceAutoRadio.isSelected()) {
+                // ✅ 自动采集模式：从Proxy实时流量触发
                 task = runAutoInterfaceDiscovery();
-                    } else {
-                // ✅ sourceNoneRadio被选中，使用已有采集数据，弹出选择对话框
+            } else {
+                // ✅ sourceNoneRadio被选中：使用已有采集数据，弹出选择对话框
                 ScanTarget target = promptScanTarget("接口探测");
                 if (target == null) {
                     // 用户取消选择
@@ -1524,21 +1556,24 @@ public class ActiveProbeTab {
                 return;
             }
             
-            // ✅ 对每个接口进行探测（发送请求验证接口是否存在）
+            // ✅ 修复：对每个接口进行完整的接口探测（包含随机路径验证）
             final int[] sentCount = {0}; // 使用数组来避免final限制
             for (ParameterCollector.EndpointKey epKey : hostEndpoints) {
                 HttpRequest template = collector.getEndpointTemplate(mainDomain, epKey);
                 if (template != null) {
-                    // 发送请求验证接口
                     try {
-                        if (api.http() != null) {
-                            api.http().sendRequest(template);
+                        // ✅ 从请求模板中获取完整URL
+                        String url = template.url();
+                        if (url != null && !url.isEmpty()) {
+                            // ✅ 调用完整的接口探测逻辑（包含随机路径验证）
+                            // 参数说明：url, runArjun=false（仅接口探测）, interfaceDiscoveryFirst=false（不先探测接口）
+                            realtimeScanner.triggerManualEndpointScan(url, false, false);
                             sentCount[0]++;
                             // 添加小延迟，避免请求过快
                             Thread.sleep(100);
                         }
                     } catch (Exception e) {
-                        api.logging().raiseDebugEvent("接口探测请求失败: " + epKey + " - " + e.getMessage());
+                        api.logging().raiseErrorEvent("接口探测请求失败: " + epKey + " - " + e.getMessage());
                     }
                 }
             }
@@ -1548,7 +1583,7 @@ public class ActiveProbeTab {
             SwingUtilities.invokeLater(() -> {
                 progressBar.setIndeterminate(false);
                 progressBar.setValue(0);
-                statusLabel.setText("✅ 子域名 " + host + " 接口探测完成（已发送 " + finalSentCount + " 个请求）");
+                statusLabel.setText("✅ 子域名 " + host + " 接口探测完成（已发送 " + finalSentCount + " 个请求，包含随机路径验证）");
                 statusLabel.setForeground(new Color(39, 174, 96));
             });
             
@@ -2037,7 +2072,7 @@ public class ActiveProbeTab {
             api.logging().raiseDebugEvent(String.format(
                 "Arjun扫描完成: %s%s - 未发现参数 (类型: %s)",
                 mainDomain, endpoint, parameterType
-        ));
+            ));
         }
     }
     
