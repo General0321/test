@@ -4,6 +4,7 @@ import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import com.xprobe.scanner.active.ActiveScanner;
 import com.xprobe.scanner.active.ParameterCollector;
+import com.xprobe.scanner.active.ParameterDataStorage;
 import com.xprobe.scanner.config.ConfigurationManager;
 import com.xprobe.scanner.config.ConfigStorage;
 import com.xprobe.scanner.config.XProbeConfig;
@@ -28,7 +29,7 @@ public class ActiveProbeTab {
     private final MontoyaApi api;
     private final ActiveScanner activeScanner;
     private final ConfigStorage configStorage;
-    private final com.xprobe.scanner.active.ParameterDataStorage parameterDataStorage;  // ✅ 参数数据存储
+    private final ParameterDataStorage parameterDataStorage;  // ✅ 参数数据存储
     private final com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner;  // ✅ 实时扫描器引用
     
     // 核心UI组件
@@ -559,14 +560,8 @@ public class ActiveProbeTab {
         gbc.anchor = GridBagConstraints.WEST;
         row.add(createModeSelectorPanel(), gbc);
         
-        // 接口来源
-        gbc.gridx = 1;
-        gbc.insets = new Insets(0, 20, 0, 6);  // 增加左侧间距
-        row.add(createSourcePanel(), gbc);
-        gbc.insets = new Insets(0, 6, 0, 6);  // 恢复默认间距
-        
         // 右侧：操作按钮（刷新已收集数据、清空 Arjun 结果、查看详情、清空 Arjun 缓存）
-        gbc.gridx = 2;
+        gbc.gridx = 1;
         gbc.weightx = 1.0;
         gbc.anchor = GridBagConstraints.EAST;
         row.add(createDataToolbar(), gbc);
@@ -611,8 +606,6 @@ public class ActiveProbeTab {
         arjunScanButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
         group.add(interfaceScanButton);
         group.add(arjunScanButton);
-        group.add(clearResultsButton);  // ✅ 清空 Arjun 结果
-        group.add(clearCacheButton);  // ✅ 清空 Arjun 缓存
         return group;
     }
     
@@ -665,6 +658,8 @@ public class ActiveProbeTab {
         clearCollectedDataButton.addActionListener(e -> clearAllCollectedData());
         
         toolbar.add(refreshDataButton);
+        toolbar.add(clearResultsButton);  // ✅ 清空 Arjun 结果
+        toolbar.add(clearCacheButton);  // ✅ 清空 Arjun 缓存
         toolbar.add(saveDataButton);
         toolbar.add(clearCollectedDataButton);  // ✅ 清空已收集数据
         toolbar.add(viewDetailsButton);
