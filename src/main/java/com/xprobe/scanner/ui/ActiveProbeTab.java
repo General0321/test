@@ -1,6 +1,7 @@
 package com.xprobe.scanner.ui;
 
 import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.http.message.requests.HttpRequest;
 import com.xprobe.scanner.active.ActiveScanner;
 import com.xprobe.scanner.active.ParameterCollector;
 import com.xprobe.scanner.config.ConfigurationManager;
@@ -14,8 +15,8 @@ import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
@@ -27,6 +28,7 @@ public class ActiveProbeTab {
     private final MontoyaApi api;
     private final ActiveScanner activeScanner;
     private final ConfigStorage configStorage;
+    private final com.xprobe.scanner.active.ParameterDataStorage parameterDataStorage;  // ✅ 参数数据存储
     private final com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner;  // ✅ 实时扫描器引用
     
     // 核心UI组件
@@ -78,6 +80,10 @@ public class ActiveProbeTab {
     
     // 实时监听模式定时器
     private javax.swing.Timer realtimeArjunTimer;
+    
+    // ✅ 保存表格选中状态（用于刷新后恢复）
+    private final int[] savedSelectedRow = {-1};
+    private final List<Integer> savedSelectedRows = new ArrayList<>();
 
     public ActiveProbeTab(MontoyaApi api, ConfigurationManager configManager, 
                          com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner) {
@@ -85,6 +91,7 @@ public class ActiveProbeTab {
         this.realtimeScanner = realtimeScanner;  // ✅ 保存引用
         this.activeScanner = new ActiveScanner(api, configManager, realtimeScanner);
         this.configStorage = new ConfigStorage(api);
+        this.parameterDataStorage = new com.xprobe.scanner.active.ParameterDataStorage(api);  // ✅ 初始化参数数据存储
         
         initializeComponents();
         loadMasterSwitchState();  // 从配置加载总开关状态
@@ -93,6 +100,9 @@ public class ActiveProbeTab {
         registerArjunResultListener(realtimeScanner);  // ✅ 注册Arjun结果监听器
         realtimeScanner.setActiveProbeTab(this);  // ✅ 设置ActiveProbeTab引用，用于接口探测结果回调
         startAutoRefresh();
+        
+        // ✅ 启动时自动恢复数据
+        restoreCollectedDataOnStartup();
     }
 
     private void initializeComponents() {
@@ -102,9 +112,9 @@ public class ActiveProbeTab {
         masterEnableToggle.setFocusPainted(false);
         updateToggleButtonAppearance(true);
         
-        // 已收集数据表格
+        // 已收集数据表格（按子域名显示）
         collectedDataTableModel = new DefaultTableModel(
-            new Object[]{"主域名", "接口数", "参数数", "关键词数", "最后更新", "状态"}, 0) {
+            new Object[]{"子域名", "主域名", "接口数", "参数数", "关键词数", "最后更新", "状态"}, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
                 return false;
@@ -114,18 +124,133 @@ public class ActiveProbeTab {
         collectedDataTable.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         collectedDataTable.setRowHeight(28);
         collectedDataTable.getTableHeader().setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
-        collectedDataTable.getColumnModel().getColumn(0).setPreferredWidth(200);
+        collectedDataTable.getColumnModel().getColumn(0).setPreferredWidth(200);  // 子域名
+        collectedDataTable.getColumnModel().getColumn(1).setPreferredWidth(150);  // 主域名
         
-        // ✅ 添加双击事件查看详情
+        // ✅ 修复：保持选中状态，只有点击其他地方才取消选中
+        collectedDataTable.setFocusable(true);
+        collectedDataTable.setSelectionBackground(new Color(184, 207, 229)); // 选中背景色
+        collectedDataTable.setSelectionForeground(Color.BLACK);
+        // 禁用行悬停效果，避免用户误以为选中状态改变
+        collectedDataTable.setRowSelectionAllowed(true);
+        collectedDataTable.setColumnSelectionAllowed(false);
+        // 设置选择模式，确保点击后保持选中
+        collectedDataTable.getSelectionModel().setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        
+        // ✅ 关键修复：禁用表格的自动行选择功能（鼠标悬停时的选择）
+        // 这将阻止鼠标移动时自动改变选择
+        collectedDataTable.setRowSelectionAllowed(true);
+        collectedDataTable.setCellSelectionEnabled(false);
+        
+        // ✅ 设置表格不允许拖拽选择
+        collectedDataTable.setDragEnabled(false);
+        
+        // ✅ 修复：监听选择变化，防止鼠标移动时清除选择
+        collectedDataTable.getSelectionModel().addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting()) {
+                // 保存当前选择
+                savedSelectedRows.clear();
+                int[] selectedRows = collectedDataTable.getSelectedRows();
+                for (int row : selectedRows) {
+                    savedSelectedRows.add(row);
+                }
+                if (selectedRows.length > 0) {
+                    savedSelectedRow[0] = selectedRows[0];
+                }
+            }
+        });
+        
+        // ✅ 修复：禁用鼠标移动时的自动选择行为
+        // 重写鼠标事件处理，确保只有明确点击才改变选择
         collectedDataTable.addMouseListener(new java.awt.event.MouseAdapter() {
             @Override
             public void mouseClicked(java.awt.event.MouseEvent e) {
-                if (e.getClickCount() == 2) {  // 双击
-                    int row = collectedDataTable.getSelectedRow();
+                // 确保点击时选中行
+                int row = collectedDataTable.rowAtPoint(e.getPoint());
                     if (row >= 0) {
+                    // 如果按住Ctrl或Shift，保留多选功能
+                    if (e.isControlDown()) {
+                        // Ctrl点击：切换选中状态
+                        if (collectedDataTable.isRowSelected(row)) {
+                            collectedDataTable.removeRowSelectionInterval(row, row);
+                        } else {
+                            collectedDataTable.addRowSelectionInterval(row, row);
+                        }
+                    } else if (e.isShiftDown()) {
+                        // Shift点击：区间选择
+                        int anchorRow = collectedDataTable.getSelectionModel().getAnchorSelectionIndex();
+                        if (anchorRow >= 0) {
+                            int min = Math.min(anchorRow, row);
+                            int max = Math.max(anchorRow, row);
+                            collectedDataTable.setRowSelectionInterval(min, max);
+                        } else {
+                            collectedDataTable.setRowSelectionInterval(row, row);
+                        }
+                    } else {
+                        // 普通点击：单选
+                        collectedDataTable.setRowSelectionInterval(row, row);
+                    }
+                    
+                    // 保存选择
+                    savedSelectedRow[0] = row;
+                    savedSelectedRows.clear();
+                    savedSelectedRows.add(row);
+                    
+                    // 双击查看详情
+                    if (e.getClickCount() == 2) {
                         showDomainDetails(row);
                     }
                 }
+            }
+            
+            @Override
+            public void mousePressed(java.awt.event.MouseEvent e) {
+                maybeShowPopup(e);
+            }
+            
+            @Override
+            public void mouseReleased(java.awt.event.MouseEvent e) {
+                maybeShowPopup(e);
+            }
+            
+            private void maybeShowPopup(java.awt.event.MouseEvent e) {
+                if (e.isPopupTrigger()) {
+                    int row = collectedDataTable.rowAtPoint(e.getPoint());
+                    if (row >= 0) {
+                        // 如果该行未选中，先选中它
+                        if (!collectedDataTable.isRowSelected(row)) {
+                            collectedDataTable.setRowSelectionInterval(row, row);
+                            savedSelectedRow[0] = row;
+                            savedSelectedRows.clear();
+                            savedSelectedRows.add(row);
+                        }
+                        showContextMenu(e.getX(), e.getY(), row);
+                    }
+                }
+            }
+        });
+        
+        // ✅ 关键修复：鼠标移动时恢复选择（如果被清除了）
+        collectedDataTable.addMouseMotionListener(new java.awt.event.MouseMotionAdapter() {
+            @Override
+            public void mouseMoved(java.awt.event.MouseEvent e) {
+                // ✅ 鼠标移动时，如果选择被清除了，恢复之前的选择
+                if (collectedDataTable.getSelectedRowCount() == 0 && !savedSelectedRows.isEmpty()) {
+                    // 恢复之前保存的选择
+                    for (int row : savedSelectedRows) {
+                        if (row >= 0 && row < collectedDataTable.getRowCount()) {
+                            collectedDataTable.addRowSelectionInterval(row, row);
+                        }
+                    }
+                }
+            }
+        });
+        
+        // ✅ 添加焦点监听器：失去焦点时不清除选择
+        collectedDataTable.addFocusListener(new java.awt.event.FocusAdapter() {
+            @Override
+            public void focusLost(java.awt.event.FocusEvent e) {
+                // 失去焦点时不自动清除选择，保持选中状态
             }
         });
 
@@ -141,6 +266,59 @@ public class ActiveProbeTab {
         arjunResultTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         arjunResultTable.setRowHeight(25);
         arjunResultTable.getTableHeader().setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+        
+        // ✅ 修复：保持选中状态，只有点击其他地方才取消选中
+        arjunResultTable.setFocusable(true);
+        arjunResultTable.setSelectionBackground(new Color(184, 207, 229)); // 选中背景色
+        arjunResultTable.setSelectionForeground(Color.BLACK);
+        // 禁用行悬停效果，避免用户误以为选中状态改变
+        arjunResultTable.setRowSelectionAllowed(true);
+        arjunResultTable.setColumnSelectionAllowed(false);
+        // 设置选择模式，确保点击后保持选中
+        arjunResultTable.getSelectionModel().setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        
+        // ✅ 添加鼠标监听器：确保点击时选中行，移动鼠标不取消选中
+        arjunResultTable.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mouseClicked(java.awt.event.MouseEvent e) {
+                // 确保点击时选中行
+                int row = arjunResultTable.rowAtPoint(e.getPoint());
+                if (row >= 0) {
+                    arjunResultTable.setRowSelectionInterval(row, row);
+                }
+            }
+            
+            @Override
+            public void mousePressed(java.awt.event.MouseEvent e) {
+                // ✅ 阻止默认的鼠标按下行为，防止拖拽时改变选择
+                // 真正的选择在mouseClicked中处理
+            }
+        });
+        
+        // ✅ 关键修复：禁用鼠标移动时的选择变化
+        arjunResultTable.addMouseMotionListener(new java.awt.event.MouseMotionAdapter() {
+            @Override
+            public void mouseDragged(java.awt.event.MouseEvent e) {
+                // ✅ 阻止拖拽时改变选择
+                e.consume();
+            }
+            
+            @Override
+            public void mouseMoved(java.awt.event.MouseEvent e) {
+                // ✅ 鼠标移动时不改变选择（什么都不做，保持当前选择）
+            }
+        });
+        
+        // ✅ 添加焦点监听器：失去焦点时不自动清除选择
+        arjunResultTable.addFocusListener(new java.awt.event.FocusAdapter() {
+            @Override
+            public void focusLost(java.awt.event.FocusEvent e) {
+                // 失去焦点时不自动清除选择，保持选中状态
+            }
+        });
+        
+        // ✅ 禁用表格的默认拖拽选择行为
+        arjunResultTable.setDragEnabled(false);
 
         // 状态标签
         statusLabel = new JLabel("🟢 就绪 - 正在监听Burp流量...");
@@ -243,9 +421,34 @@ public class ActiveProbeTab {
         panel = new JPanel(new BorderLayout(10, 8));
         panel.setBorder(new EmptyBorder(12, 12, 12, 12));
         
+        // ✅ 添加面板点击监听器：点击面板其他地方时清除表格选择
+        panel.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mouseClicked(java.awt.event.MouseEvent e) {
+                // 点击面板（非表格区域）时清除表格选择
+                if (!isPointInTable(e.getPoint(), collectedDataTable) && 
+                    !isPointInTable(e.getPoint(), arjunResultTable)) {
+                    collectedDataTable.clearSelection();
+                    arjunResultTable.clearSelection();
+                }
+            }
+        });
+        panel.setFocusable(true); // 允许面板获得焦点
+        
         panel.add(createTopBar(), BorderLayout.NORTH);
         panel.add(createSplitPane(), BorderLayout.CENTER);
         panel.add(createBottomPanel(), BorderLayout.SOUTH);
+    }
+    
+    /**
+     * ✅ 检查点是否在表格范围内
+     */
+    private boolean isPointInTable(java.awt.Point point, JTable table) {
+        if (table == null) {
+            return false;
+        }
+        java.awt.Point tableLocation = SwingUtilities.convertPoint(panel, point, table);
+        return table.contains(tableLocation);
     }
     
     private JComponent createTopBar() {
@@ -364,6 +567,8 @@ public class ActiveProbeTab {
         arjunScanButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
         group.add(interfaceScanButton);
         group.add(arjunScanButton);
+        group.add(clearResultsButton);  // ✅ 清空 Arjun 结果
+        group.add(clearCacheButton);  // ✅ 清空 Arjun 缓存
         return group;
     }
     
@@ -406,10 +611,19 @@ public class ActiveProbeTab {
                     JOptionPane.INFORMATION_MESSAGE);
             }
         });
+        
+        // ✅ 添加保存数据按钮
+        JButton saveDataButton = createStyledButton("💾 保存数据", new Color(52, 152, 219));
+        saveDataButton.addActionListener(e -> saveCollectedData());
+        
+        // ✅ 添加一键清空已收集数据按钮（新增）
+        JButton clearCollectedDataButton = createStyledButton("🗑️清空已收集数据", new Color(231, 76, 60));
+        clearCollectedDataButton.addActionListener(e -> clearAllCollectedData());
+        
         toolbar.add(refreshDataButton);
-        toolbar.add(clearResultsButton);
+        toolbar.add(saveDataButton);
+        toolbar.add(clearCollectedDataButton);  // ✅ 清空已收集数据
         toolbar.add(viewDetailsButton);
-        toolbar.add(clearCacheButton);
         return toolbar;
     }
     
@@ -566,6 +780,7 @@ public class ActiveProbeTab {
      * 开始自动刷新（每3秒更新一次收集数据）
      */
     private void startAutoRefresh() {
+        // ✅ 参考dev18实现：每3秒刷新一次
         refreshTimer = new javax.swing.Timer(3000, e -> refreshCollectedData());
         refreshTimer.start();
         
@@ -575,6 +790,7 @@ public class ActiveProbeTab {
 
     /**
      * 刷新已收集的数据
+     * ✅ 参考dev18实现，但添加了选中行保存和恢复功能
      */
     private void refreshCollectedData() {
         SwingUtilities.invokeLater(() -> {
@@ -598,35 +814,100 @@ public class ActiveProbeTab {
                     ? "仅参数名" : "参数名+关键词";
                 configInfoLabel.setText("配置: 间隔60秒 | 最小参数3个 | 最大并发5个 | 收集模式: " + modeText);
                 
-                // 获取域名级别的详细统计
-                Map<String, ?> domainStats = realtimeScanner.getDomainStatistics();
+                // ✅ 修改：按子域名显示，每行一个子域名
+                ParameterCollector parameterCollector = realtimeScanner.getParameterCollector();
+                
+                // ✅ 修复：保存当前选中的行信息（在清空表格之前）
+                Set<String> selectedHosts = new HashSet<>();
+                Set<String> selectedMainDomains = new HashSet<>();
+                int[] selectedRows = collectedDataTable.getSelectedRows();
+                for (int row : selectedRows) {
+                    if (row >= 0 && row < collectedDataTableModel.getRowCount()) {
+                        String host = (String) collectedDataTableModel.getValueAt(row, 0);
+                        String mainDomain = (String) collectedDataTableModel.getValueAt(row, 1);
+                        if (host != null && mainDomain != null) {
+                            selectedHosts.add(host);
+                            selectedMainDomains.add(mainDomain);
+                        }
+                    }
+                }
                 
                 // 清空并重新填充表格
                 collectedDataTableModel.setRowCount(0);
                 
-                for (Map.Entry<String, ?> entry : domainStats.entrySet()) {
-                    String mainDomain = entry.getKey();
-                    Object statsObj = entry.getValue();
+                // 遍历所有主域名
+                for (String mainDomain : parameterCollector.getAllMainDomains()) {
+                    // 获取该主域名下的所有子域名（host）
+                    Set<String> hosts = parameterCollector.getHostsForMainDomain(mainDomain);
                     
-                    try {
-                        int endpointCount = (int) statsObj.getClass().getMethod("getEndpointCount").invoke(statsObj);
-                        int parameterCount = (int) statsObj.getClass().getMethod("getParameterCount").invoke(statsObj);
-                        int keywordCount = (int) statsObj.getClass().getMethod("getKeywordCount").invoke(statsObj);
-                        String lastUpdate = (String) statsObj.getClass().getMethod("getLastUpdateTimeFormatted").invoke(statsObj);
-                        
-                        String status = endpointCount > 0 ? "✅ 已收集" : "⏳ 收集中";
+                    // 为每个子域名创建一行
+                    for (String host : hosts) {
+                        try {
+                            // 获取该子域名的统计信息
+                            Set<String> hostEndpoints = new HashSet<>();
+                            Set<String> hostParameters = parameterCollector.getParametersForHost(host);
+                            Set<String> hostKeywords = new HashSet<>();
+                            
+                            // 统计该子域名的接口数（需要遍历所有接口，找出属于该host的）
+                            Set<ParameterCollector.EndpointKey> allEndpointKeys = 
+                                parameterCollector.getEndpointKeysForMainDomain(mainDomain);
+                            for (ParameterCollector.EndpointKey epKey : allEndpointKeys) {
+                                if (epKey.host.equals(host)) {
+                                    hostEndpoints.add(epKey.endpoint);
+                                }
+                            }
+                            
+                            // 如果启用了关键词收集，获取该子域名的关键词
+                            if (parameterCollector.getCollectionMode() == ParameterCollector.CollectionMode.PARAMETERS_AND_KEYWORDS) {
+                                // 关键词是按主域名存储的，这里使用主域名的关键词
+                                hostKeywords = parameterCollector.getKeywordsForMainDomain(mainDomain);
+                            }
+                            
+                            // 获取最后更新时间（使用主域名的更新时间）
+                            long lastUpdateTime = parameterCollector.getLastUpdateTimeForDomain(mainDomain);
+                            java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("HH:mm:ss");
+                            String lastUpdate = sdf.format(new java.util.Date(lastUpdateTime));
+                            
+                            String status = hostEndpoints.size() > 0 ? "✅ 已收集" : "⏳ 收集中";
                         
                         collectedDataTableModel.addRow(new Object[]{
-                            mainDomain,
-                            endpointCount,
-                            parameterCount,
-                            keywordCount,
-                            lastUpdate,
-                            status
+                                host,              // 子域名
+                                mainDomain,        // 主域名
+                                hostEndpoints.size(),  // 接口数
+                                hostParameters.size(), // 参数数
+                                hostKeywords.size(),   // 关键词数
+                                lastUpdate,        // 最后更新
+                                status             // 状态
                         });
                     } catch (Exception ex) {
-                        api.logging().raiseDebugEvent("获取域名统计失败: " + ex.getMessage());
+                            api.logging().raiseDebugEvent("获取子域名统计失败: " + ex.getMessage());
+                        }
                     }
+                }
+                
+                // ✅ 修复：恢复之前选中的行（在表格填充完成后）
+                if (!selectedHosts.isEmpty()) {
+                    // 延迟恢复选择，确保表格已完全更新
+                    SwingUtilities.invokeLater(() -> {
+                        collectedDataTable.clearSelection();
+                        for (int i = 0; i < collectedDataTableModel.getRowCount(); i++) {
+                            String host = (String) collectedDataTableModel.getValueAt(i, 0);
+                            String mainDomain = (String) collectedDataTableModel.getValueAt(i, 1);
+                            // 如果该行之前被选中，恢复选中状态
+                            if (host != null && mainDomain != null && selectedHosts.contains(host) && selectedMainDomains.contains(mainDomain)) {
+                                collectedDataTable.addRowSelectionInterval(i, i);
+                            }
+                        }
+                        // 更新保存的选择状态（用于鼠标移动时恢复）
+                        savedSelectedRows.clear();
+                        int[] currentSelectedRows = collectedDataTable.getSelectedRows();
+                        for (int row : currentSelectedRows) {
+                            savedSelectedRows.add(row);
+                        }
+                        if (currentSelectedRows.length > 0) {
+                            savedSelectedRow[0] = currentSelectedRows[0];
+                        }
+                    });
                 }
                 
                 // ✅ 更新Arjun统计：只统计参数探测的结果
@@ -680,7 +961,7 @@ public class ActiveProbeTab {
                             statusLabel.setText("❌ 接口探测失败，已取消参数探测");
                             statusLabel.setForeground(new Color(231, 76, 60));
                         });
-                    } else {
+            } else {
                         // ✅ 接口探测完成，进行Arjun参数探测（不先探测接口，因为已经探测过了）
                         if (manualSource) {
                             processManualTargets(manualTargets, true, false).whenComplete((unused2, throwable2) -> {
@@ -743,14 +1024,26 @@ public class ActiveProbeTab {
                 task = processManualTargets(manualTargets, false);
             } else if (sourceAutoRadio.isSelected()) {
                 task = runAutoInterfaceDiscovery();
-            } else {
-                // sourceNoneRadio被选中，不应该执行到这里，但为了安全还是处理
-                interfaceScanButton.setEnabled(true);
-                progressBar.setIndeterminate(false);
-                progressBar.setValue(0);
-                statusLabel.setText("ℹ️ 接口来源未指定");
-                statusLabel.setForeground(Color.GRAY);
-                return;
+                    } else {
+                // ✅ sourceNoneRadio被选中，使用已有采集数据，弹出选择对话框
+                ScanTarget target = promptScanTarget("接口探测");
+                if (target == null) {
+                    // 用户取消选择
+                    interfaceScanButton.setEnabled(true);
+                    progressBar.setIndeterminate(false);
+                    progressBar.setValue(0);
+                    statusLabel.setText("ℹ️ 已取消接口探测");
+                    statusLabel.setForeground(Color.GRAY);
+                    return;
+                }
+                // ✅ 根据选择的目标创建任务
+                task = CompletableFuture.runAsync(() -> {
+                    if (target.isMainDomain()) {
+                        triggerInterfaceDiscoveryForMainDomain(target.getMainDomain());
+                    } else {
+                        triggerInterfaceDiscoveryForHost(target.getMainDomain(), target.getHost());
+                    }
+                });
             }
             
             task.whenComplete((unused, throwable) -> SwingUtilities.invokeLater(() -> {
@@ -917,13 +1210,313 @@ public class ActiveProbeTab {
     
     /**
      * ✅ 从已有采集数据触发Arjun探测（接口来源选择"无"时使用）
+     * 支持选择子域名或主域名进行探测
      */
     private CompletableFuture<Void> runArjunScanFromCollectedData() {
+        // ✅ 在UI线程中弹出选择对话框
+        ScanTarget target = promptScanTarget("Arjun 参数探测");
+        if (target == null) {
+            return CompletableFuture.completedFuture(null); // 用户取消
+        }
+        
         return CompletableFuture.runAsync(() -> {
-            api.logging().raiseInfoEvent("从已有采集数据触发Arjun探测");
-            // 使用手动模式从SiteMap触发（因为已有数据在SiteMap中）
-            activeScanner.getRealtimeScanner().triggerManualArjunScan();
+            if (target.isMainDomain()) {
+                // ✅ 按主域名探测（包含所有子域名）
+                api.logging().raiseInfoEvent("从已有采集数据触发Arjun探测: 主域名 " + target.getMainDomain());
+                activeScanner.getRealtimeScanner().triggerArjunForMainDomain(target.getMainDomain());
+            } else {
+                // ✅ 按子域名探测
+                api.logging().raiseInfoEvent("从已有采集数据触发Arjun探测: 子域名 " + target.getHost() + " (主域名: " + target.getMainDomain() + ")");
+                activeScanner.getRealtimeScanner().triggerArjunForHost(target.getMainDomain(), target.getHost());
+            }
         });
+    }
+    
+    
+    /**
+     * ✅ 弹出选择对话框，让用户选择探测目标（子域名或主域名）
+     */
+    private ScanTarget promptScanTarget(String scanType) {
+        try {
+            ParameterCollector collector = realtimeScanner.getParameterCollector();
+            if (collector == null) {
+                JOptionPane.showMessageDialog(panel,
+                    "参数收集器未初始化",
+                    "错误",
+                    JOptionPane.ERROR_MESSAGE);
+                return null;
+            }
+            
+            Set<String> mainDomains = collector.getAllMainDomains();
+            if (mainDomains.isEmpty()) {
+                JOptionPane.showMessageDialog(panel,
+                    "没有已收集的数据，请先收集一些流量数据",
+                    "提示",
+                    JOptionPane.INFORMATION_MESSAGE);
+                return null;
+            }
+            
+            // ✅ 创建选择对话框
+            JDialog dialog = new JDialog((Frame) SwingUtilities.getWindowAncestor(panel), 
+                "选择探测目标 - " + scanType, true);
+            dialog.setLayout(new BorderLayout(10, 10));
+            dialog.setSize(500, 400);
+            
+            // ✅ 创建选择面板
+            JPanel mainPanel = new JPanel(new BorderLayout(10, 10));
+            mainPanel.setBorder(new EmptyBorder(10, 10, 10, 10));
+            
+            // ✅ 单选按钮组：主域名 vs 子域名
+            ButtonGroup targetGroup = new ButtonGroup();
+            JRadioButton mainDomainRadio = new JRadioButton("按主域名探测（包含所有子域名）", true);
+            JRadioButton hostRadio = new JRadioButton("按子域名探测");
+            targetGroup.add(mainDomainRadio);
+            targetGroup.add(hostRadio);
+            
+            JPanel radioPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+            radioPanel.add(mainDomainRadio);
+            radioPanel.add(hostRadio);
+            
+            // ✅ 主域名选择列表
+            DefaultListModel<String> mainDomainModel = new DefaultListModel<>();
+            for (String md : mainDomains) {
+                Set<String> hosts = collector.getHostsForMainDomain(md);
+                Set<String> endpoints = collector.getEndpointsForMainDomain(md);
+                Set<String> params = collector.getParametersForMainDomain(md);
+                mainDomainModel.addElement(String.format("%s (%d子域名, %d接口, %d参数)", 
+                    md, hosts.size(), endpoints.size(), params.size()));
+            }
+            JList<String> mainDomainList = new JList<>(mainDomainModel);
+            mainDomainList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+            mainDomainList.setVisibleRowCount(8);
+            JScrollPane mainDomainScroll = new JScrollPane(mainDomainList);
+            mainDomainScroll.setBorder(BorderFactory.createTitledBorder("选择主域名"));
+            
+            // ✅ 子域名选择列表
+            DefaultListModel<String> hostModel = new DefaultListModel<>();
+            JList<String> hostList = new JList<>(hostModel);
+            hostList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+            hostList.setVisibleRowCount(8);
+            JScrollPane hostScroll = new JScrollPane(hostList);
+            hostScroll.setBorder(BorderFactory.createTitledBorder("选择子域名"));
+            
+            // ✅ 当选择主域名时，更新子域名列表
+            mainDomainList.addListSelectionListener(e -> {
+                if (!e.getValueIsAdjusting() && mainDomainList.getSelectedIndex() >= 0) {
+                    String selectedMainDomain = mainDomains.toArray(new String[0])[mainDomainList.getSelectedIndex()];
+                    hostModel.clear();
+                    Set<String> hosts = collector.getHostsForMainDomain(selectedMainDomain);
+                    Set<ParameterCollector.EndpointKey> allEndpointKeys = 
+                        collector.getEndpointKeysForMainDomain(selectedMainDomain);
+                    
+                    for (String host : hosts) {
+                        // ✅ 统计该子域名的接口数量
+                        int hostEndpointCount = 0;
+                        for (ParameterCollector.EndpointKey epKey : allEndpointKeys) {
+                            if (epKey.host.equals(host)) {
+                                hostEndpointCount++;
+                            }
+                        }
+                        Set<String> params = collector.getParametersForHost(host);
+                        hostModel.addElement(String.format("%s (%d接口, %d参数)", 
+                            host, hostEndpointCount, params.size()));
+                    }
+                }
+            });
+            
+            // ✅ 默认选择第一个主域名
+            if (mainDomainList.getModel().getSize() > 0) {
+                mainDomainList.setSelectedIndex(0);
+            }
+            
+            // ✅ 切换单选按钮时，启用/禁用相应的列表
+            mainDomainRadio.addActionListener(e -> {
+                mainDomainList.setEnabled(true);
+                hostList.setEnabled(false);
+            });
+            hostRadio.addActionListener(e -> {
+                mainDomainList.setEnabled(false);
+                hostList.setEnabled(true);
+                if (hostList.getModel().getSize() > 0 && hostList.getSelectedIndex() < 0) {
+                    hostList.setSelectedIndex(0);
+                }
+            });
+            
+            // ✅ 初始状态
+            mainDomainList.setEnabled(true);
+            hostList.setEnabled(false);
+            
+            // ✅ 布局
+            JPanel listPanel = new JPanel(new GridLayout(1, 2, 10, 0));
+            listPanel.add(mainDomainScroll);
+            listPanel.add(hostScroll);
+            
+            mainPanel.add(radioPanel, BorderLayout.NORTH);
+            mainPanel.add(listPanel, BorderLayout.CENTER);
+            
+            // ✅ 按钮面板
+            JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+            JButton okButton = new JButton("确定");
+            JButton cancelButton = new JButton("取消");
+            
+            okButton.addActionListener(e -> dialog.dispose());
+            cancelButton.addActionListener(e -> {
+                mainDomainList.clearSelection();
+                hostList.clearSelection();
+                dialog.dispose();
+            });
+            
+            buttonPanel.add(okButton);
+            buttonPanel.add(cancelButton);
+            mainPanel.add(buttonPanel, BorderLayout.SOUTH);
+            
+            dialog.add(mainPanel);
+            dialog.setLocationRelativeTo(panel);
+            dialog.setVisible(true);
+            
+            // ✅ 检查用户选择
+            if (mainDomainRadio.isSelected() && mainDomainList.getSelectedIndex() >= 0) {
+                String selectedMainDomain = mainDomains.toArray(new String[0])[mainDomainList.getSelectedIndex()];
+                return new ScanTarget(selectedMainDomain, null, true);
+            } else if (hostRadio.isSelected() && hostList.getSelectedIndex() >= 0 && mainDomainList.getSelectedIndex() >= 0) {
+                String selectedMainDomain = mainDomains.toArray(new String[0])[mainDomainList.getSelectedIndex()];
+                Set<String> hosts = collector.getHostsForMainDomain(selectedMainDomain);
+                String selectedHost = hosts.toArray(new String[0])[hostList.getSelectedIndex()];
+                return new ScanTarget(selectedMainDomain, selectedHost, false);
+            }
+            
+            return null; // 用户取消
+            
+                } catch (Exception e) {
+            api.logging().raiseErrorEvent("显示选择对话框失败: " + e.getMessage());
+            return null;
+        }
+    }
+    
+    /**
+     * ✅ 扫描目标（内部类）
+     */
+    private static class ScanTarget {
+        private final String mainDomain;
+        private final String host;
+        private final boolean isMainDomain;
+        
+        public ScanTarget(String mainDomain, String host, boolean isMainDomain) {
+            this.mainDomain = mainDomain;
+            this.host = host;
+            this.isMainDomain = isMainDomain;
+        }
+        
+        public String getMainDomain() { return mainDomain; }
+        public String getHost() { return host; }
+        public boolean isMainDomain() { return isMainDomain; }
+    }
+    
+    /**
+     * ✅ 按主域名触发接口探测（包含所有子域名）
+     */
+    private void triggerInterfaceDiscoveryForMainDomain(String mainDomain) {
+        try {
+            ParameterCollector collector = realtimeScanner.getParameterCollector();
+            Set<String> hosts = collector.getHostsForMainDomain(mainDomain);
+            
+            api.logging().raiseInfoEvent(String.format(
+                "开始对主域名 %s 进行接口探测（包含 %d 个子域名）", mainDomain, hosts.size()
+            ));
+            
+            // ✅ 对每个子域名进行接口探测
+            for (String host : hosts) {
+                triggerInterfaceDiscoveryForHost(mainDomain, host);
+            }
+            
+            // ✅ 更新UI状态（异步完成后）
+            SwingUtilities.invokeLater(() -> {
+                progressBar.setIndeterminate(false);
+                progressBar.setValue(0);
+                statusLabel.setText("✅ 主域名 " + mainDomain + " 接口探测完成");
+                statusLabel.setForeground(new Color(39, 174, 96));
+            });
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("按主域名触发接口探测失败: " + e.getMessage());
+            SwingUtilities.invokeLater(() -> {
+                progressBar.setIndeterminate(false);
+                progressBar.setValue(0);
+                statusLabel.setText("❌ 接口探测失败: " + e.getMessage());
+                statusLabel.setForeground(new Color(231, 76, 60));
+            });
+        }
+    }
+    
+    /**
+     * ✅ 按子域名触发接口探测
+     */
+    private void triggerInterfaceDiscoveryForHost(String mainDomain, String host) {
+        try {
+            ParameterCollector collector = realtimeScanner.getParameterCollector();
+            Set<ParameterCollector.EndpointKey> endpointKeys = 
+                collector.getEndpointKeysForMainDomain(mainDomain);
+            
+            // ✅ 过滤出该子域名的接口
+            List<ParameterCollector.EndpointKey> hostEndpoints = new ArrayList<>();
+            for (ParameterCollector.EndpointKey epKey : endpointKeys) {
+                if (epKey.host.equals(host)) {
+                    hostEndpoints.add(epKey);
+                }
+            }
+            
+            api.logging().raiseInfoEvent(String.format(
+                "开始对子域名 %s 进行接口探测（%d 个接口）", host, hostEndpoints.size()
+            ));
+            
+            if (hostEndpoints.isEmpty()) {
+                api.logging().raiseInfoEvent("⚠️ 子域名 " + host + " 没有可探测的接口");
+                SwingUtilities.invokeLater(() -> {
+                    progressBar.setIndeterminate(false);
+                    progressBar.setValue(0);
+                    statusLabel.setText("⚠️ 子域名 " + host + " 没有可探测的接口");
+                    statusLabel.setForeground(new Color(241, 196, 15));
+                });
+                return;
+            }
+            
+            // ✅ 对每个接口进行探测（发送请求验证接口是否存在）
+            final int[] sentCount = {0}; // 使用数组来避免final限制
+            for (ParameterCollector.EndpointKey epKey : hostEndpoints) {
+                HttpRequest template = collector.getEndpointTemplate(mainDomain, epKey);
+                if (template != null) {
+                    // 发送请求验证接口
+                    try {
+                        if (api.http() != null) {
+                            api.http().sendRequest(template);
+                            sentCount[0]++;
+                            // 添加小延迟，避免请求过快
+                            Thread.sleep(100);
+                        }
+                    } catch (Exception e) {
+                        api.logging().raiseDebugEvent("接口探测请求失败: " + epKey + " - " + e.getMessage());
+                    }
+                }
+            }
+            
+            // ✅ 更新UI状态
+            final int finalSentCount = sentCount[0];
+            SwingUtilities.invokeLater(() -> {
+                progressBar.setIndeterminate(false);
+                progressBar.setValue(0);
+                statusLabel.setText("✅ 子域名 " + host + " 接口探测完成（已发送 " + finalSentCount + " 个请求）");
+                statusLabel.setForeground(new Color(39, 174, 96));
+            });
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("按子域名触发接口探测失败: " + e.getMessage());
+            SwingUtilities.invokeLater(() -> {
+                progressBar.setIndeterminate(false);
+                progressBar.setValue(0);
+                statusLabel.setText("❌ 接口探测失败: " + e.getMessage());
+                statusLabel.setForeground(new Color(231, 76, 60));
+            });
+        }
     }
 
     private void clearResults() {
@@ -1113,7 +1706,9 @@ public class ActiveProbeTab {
      */
     private void showDomainDetails(int row) {
         try {
-            String mainDomain = (String) collectedDataTableModel.getValueAt(row, 0);
+            // ✅ 修改：第一列是子域名，第二列是主域名
+            String selectedHost = (String) collectedDataTableModel.getValueAt(row, 0);
+            String mainDomain = (String) collectedDataTableModel.getValueAt(row, 1);
             
             if (activeScanner.getRealtimeScanner() == null) {
                 return;
@@ -1122,62 +1717,59 @@ public class ActiveProbeTab {
             var realtimeScanner = activeScanner.getRealtimeScanner();
             ParameterCollector parameterCollector = realtimeScanner.getParameterCollector();
             
-            // 获取详细信息
-            Set<String> hosts = parameterCollector.getHostsForMainDomain(mainDomain);
-            Set<String> endpoints = parameterCollector.getEndpointsForMainDomain(mainDomain);
-            Set<String> parameters = parameterCollector.getParametersForMainDomain(mainDomain);
+            // ✅ 修改：只获取选中子域名的信息
+            // 1. 获取该子域名的参数
+            Set<String> hostParameters = parameterCollector.getParametersForHost(selectedHost);
+            
+            // 2. 获取该子域名的接口（通过过滤 EndpointKey）
+            Set<ParameterCollector.EndpointKey> allEndpointKeys = 
+                parameterCollector.getEndpointKeysForMainDomain(mainDomain);
+            Set<String> hostEndpoints = new HashSet<>();
+            for (ParameterCollector.EndpointKey epKey : allEndpointKeys) {
+                if (epKey.host.equals(selectedHost)) {
+                    hostEndpoints.add(epKey.endpoint);
+                }
+            }
+            
+            // 3. 关键词按主域名存储，这里显示主域名的关键词（作为参考）
             Set<String> keywords = parameterCollector.getKeywordsForMainDomain(mainDomain);
             
             // 构建详情文本
             StringBuilder details = new StringBuilder();
             details.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-            details.append("🌐 主域名: ").append(mainDomain).append("\n");
+            details.append("🌐 子域名: ").append(selectedHost).append("\n");
+            details.append("📌 主域名: ").append(mainDomain).append("\n");
             details.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
             
-            // 子域名列表
-            details.append("📍 子域名/主机 (").append(hosts.size()).append("个):\n");
-            if (hosts.isEmpty()) {
+            // 接口列表（只显示该子域名的接口）
+            details.append("🔗 接口路径 (").append(hostEndpoints.size()).append("个):\n");
+            if (hostEndpoints.isEmpty()) {
                 details.append("  - 无\n");
             } else {
-                hosts.stream().limit(20).forEach(host -> 
-                    details.append("  • ").append(host).append("\n"));
-                if (hosts.size() > 20) {
-                    details.append("  ... 还有 ").append(hosts.size() - 20).append(" 个\n");
-                }
-            }
-            details.append("\n");
-            
-            // 接口列表
-            details.append("🔗 接口路径 (").append(endpoints.size()).append("个):\n");
-            if (endpoints.isEmpty()) {
-                details.append("  - 无\n");
-            } else {
-                endpoints.stream().limit(30).forEach(endpoint -> 
+                hostEndpoints.stream().limit(50).forEach(endpoint -> 
                     details.append("  • ").append(endpoint).append("\n"));
-                if (endpoints.size() > 30) {
-                    details.append("  ... 还有 ").append(endpoints.size() - 30).append(" 个\n");
+                if (hostEndpoints.size() > 50) {
+                    details.append("  ... 还有 ").append(hostEndpoints.size() - 50).append(" 个\n");
                 }
             }
             details.append("\n");
             
-            // 参数列表
-            details.append("🔑 参数名称 (").append(parameters.size()).append("个):\n");
-            if (parameters.isEmpty()) {
+            // 参数列表（只显示该子域名的参数）
+            details.append("🔑 参数名称 (").append(hostParameters.size()).append("个):\n");
+            if (hostParameters.isEmpty()) {
                 details.append("  - 无\n");
             } else {
-                parameters.stream().limit(50).forEach(param -> 
+                hostParameters.stream().limit(100).forEach(param -> 
                     details.append("  • ").append(param).append("\n"));
-                if (parameters.size() > 50) {
-                    details.append("  ... 还有 ").append(parameters.size() - 50).append(" 个\n");
+                if (hostParameters.size() > 100) {
+                    details.append("  ... 还有 ").append(hostParameters.size() - 100).append(" 个\n");
                 }
             }
-            details.append("\n");
             
-            // 关键词列表
-            details.append("📝 关键词 (").append(keywords.size()).append("个):\n");
-            if (keywords.isEmpty()) {
-                details.append("  - 无\n");
-            } else {
+            // 关键词列表（按主域名，作为参考信息）
+            if (!keywords.isEmpty()) {
+                details.append("\n");
+                details.append("📝 关键词（主域名，参考）(").append(keywords.size()).append("个):\n");
                 keywords.stream().limit(50).forEach(keyword -> 
                     details.append("  • ").append(keyword).append("\n"));
                 if (keywords.size() > 50) {
@@ -1187,7 +1779,7 @@ public class ActiveProbeTab {
             
             // ✅ 优化：创建自定义对话框，方便复制
             JDialog dialog = new JDialog((Frame) SwingUtilities.getWindowAncestor(panel), 
-                "域名详细信息 - " + mainDomain, true);
+                "域名详细信息 - " + selectedHost, true);
             dialog.setLayout(new BorderLayout(10, 10));
             
             // 创建文本区域（可选择和复制）
@@ -1219,34 +1811,36 @@ public class ActiveProbeTab {
                     JOptionPane.INFORMATION_MESSAGE);
             });
             
-            // ✅ 复制参数列表按钮
+            // ✅ 复制参数列表按钮（使用子域名的参数）
+            final Set<String> finalHostParameters = new HashSet<>(hostParameters);
             JButton copyParamsButton = new JButton("📋 复制参数");
             copyParamsButton.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
             copyParamsButton.setBackground(new Color(155, 89, 182));
             copyParamsButton.setForeground(Color.WHITE);
             copyParamsButton.setOpaque(true);
             copyParamsButton.addActionListener(e -> {
-                String paramsText = String.join("\n", parameters);
+                String paramsText = String.join("\n", finalHostParameters);
                 java.awt.datatransfer.StringSelection selection = new java.awt.datatransfer.StringSelection(paramsText);
                 java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
                 JOptionPane.showMessageDialog(dialog, 
-                    "✅ 参数列表已复制到剪贴板 (" + parameters.size() + "个)", 
+                    "✅ 参数列表已复制到剪贴板 (" + finalHostParameters.size() + "个)", 
                     "提示", 
                     JOptionPane.INFORMATION_MESSAGE);
             });
             
-            // ✅ 复制接口列表按钮
+            // ✅ 复制接口列表按钮（使用子域名的接口）
+            final Set<String> finalHostEndpoints = new HashSet<>(hostEndpoints);
             JButton copyEndpointsButton = new JButton("📋 复制接口");
             copyEndpointsButton.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
             copyEndpointsButton.setBackground(new Color(26, 188, 156));
             copyEndpointsButton.setForeground(Color.WHITE);
             copyEndpointsButton.setOpaque(true);
             copyEndpointsButton.addActionListener(e -> {
-                String endpointsText = String.join("\n", endpoints);
+                String endpointsText = String.join("\n", finalHostEndpoints);
                 java.awt.datatransfer.StringSelection selection = new java.awt.datatransfer.StringSelection(endpointsText);
                 java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
                 JOptionPane.showMessageDialog(dialog, 
-                    "✅ 接口列表已复制到剪贴板 (" + endpoints.size() + "个)", 
+                    "✅ 接口列表已复制到剪贴板 (" + finalHostEndpoints.size() + "个)", 
                     "提示", 
                     JOptionPane.INFORMATION_MESSAGE);
             });
@@ -1391,15 +1985,15 @@ public class ActiveProbeTab {
         
         // 日志
         if (paramCount > 0) {
-            api.logging().raiseInfoEvent(String.format(
-                "✨ Arjun发现参数: %s%s - 参数: %s (类型: %s)",
-                mainDomain, endpoint, paramsStr, parameterType
-            ));
+        api.logging().raiseInfoEvent(String.format(
+            "✨ Arjun发现参数: %s%s - 参数: %s (类型: %s)",
+            mainDomain, endpoint, paramsStr, parameterType
+        ));
         } else {
             api.logging().raiseDebugEvent(String.format(
                 "Arjun扫描完成: %s%s - 未发现参数 (类型: %s)",
                 mainDomain, endpoint, parameterType
-            ));
+        ));
         }
     }
     
@@ -1437,6 +2031,340 @@ public class ActiveProbeTab {
                 break;
             default:
                 break;
+        }
+    }
+    
+    /**
+     * ✅ 显示右键菜单（支持删除和按子域名探测）
+     */
+    private void showContextMenu(int x, int y, int row) {
+        JPopupMenu popupMenu = new JPopupMenu();
+        
+        // 获取选中的行数据
+        String host = (String) collectedDataTableModel.getValueAt(row, 0);
+        String mainDomain = (String) collectedDataTableModel.getValueAt(row, 1);
+        
+        // ========== 接口探测菜单项 ==========
+        JMenuItem interfaceProbeHostItem = new JMenuItem("🔍 对此子域名进行接口探测");
+        interfaceProbeHostItem.addActionListener(e -> {
+            if (!masterEnableToggle.isSelected()) {
+                JOptionPane.showMessageDialog(panel,
+                    "请先启用主动探测",
+                    "提示",
+                    JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+            
+            int confirm = JOptionPane.showConfirmDialog(panel,
+                String.format("将对子域名 %s 进行接口探测\n\n" +
+                            "主域名: %s\n\n" +
+                            "是否继续？", host, mainDomain),
+                "确认接口探测",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE);
+            
+            if (confirm == JOptionPane.YES_OPTION) {
+                CompletableFuture.runAsync(() -> {
+                    triggerInterfaceDiscoveryForHost(mainDomain, host);
+                });
+                
+                SwingUtilities.invokeLater(() -> {
+                    statusLabel.setText("🔍 正在对子域名 " + host + " 进行接口探测...");
+                    statusLabel.setForeground(new Color(52, 152, 219));
+                    progressBar.setIndeterminate(true);
+                });
+            }
+        });
+        popupMenu.add(interfaceProbeHostItem);
+        
+        JMenuItem interfaceProbeMainDomainItem = new JMenuItem("🔍 对此主域名进行接口探测（包含所有子域名）");
+        interfaceProbeMainDomainItem.addActionListener(e -> {
+            if (!masterEnableToggle.isSelected()) {
+                JOptionPane.showMessageDialog(panel,
+                    "请先启用主动探测",
+                    "提示",
+                    JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+            
+            int confirm = JOptionPane.showConfirmDialog(panel,
+                String.format("将对主域名 %s 进行接口探测\n\n" +
+                            "将包含该主域名下的所有子域名。\n\n" +
+                            "是否继续？", mainDomain),
+                "确认接口探测",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE);
+            
+            if (confirm == JOptionPane.YES_OPTION) {
+                CompletableFuture.runAsync(() -> {
+                    triggerInterfaceDiscoveryForMainDomain(mainDomain);
+                });
+                
+                SwingUtilities.invokeLater(() -> {
+                    statusLabel.setText("🔍 正在对主域名 " + mainDomain + " 进行接口探测...");
+                    statusLabel.setForeground(new Color(52, 152, 219));
+                    progressBar.setIndeterminate(true);
+                });
+            }
+        });
+        popupMenu.add(interfaceProbeMainDomainItem);
+        
+        popupMenu.addSeparator();
+        
+        // ========== 参数探测（Arjun）菜单项 ==========
+        JMenuItem arjunProbeHostItem = new JMenuItem("✨ 对此子域名进行参数探测（使用主域名下所有接口和参数）");
+        arjunProbeHostItem.addActionListener(e -> {
+            if (!masterEnableToggle.isSelected()) {
+                JOptionPane.showMessageDialog(panel,
+                    "请先启用主动探测",
+                    "提示",
+                    JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+            
+            int confirm = JOptionPane.showConfirmDialog(panel,
+                String.format("将对子域名 %s 进行参数探测\n\n" +
+                            "将使用主域名 %s 下所有收集的接口和参数进行探测。\n\n" +
+                            "是否继续？", host, mainDomain),
+                "确认参数探测",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE);
+            
+            if (confirm == JOptionPane.YES_OPTION) {
+                // ✅ 对子域名进行探测（使用主域名下所有接口和参数）
+                CompletableFuture.runAsync(() -> {
+                    activeScanner.getRealtimeScanner().triggerArjunForHost(mainDomain, host);
+                });
+                
+                SwingUtilities.invokeLater(() -> {
+                    statusLabel.setText("✨ 正在对子域名 " + host + " 进行参数探测...");
+                    statusLabel.setForeground(new Color(155, 89, 182));
+                    progressBar.setIndeterminate(true);
+                });
+            }
+        });
+        popupMenu.add(arjunProbeHostItem);
+        
+        JMenuItem arjunProbeMainDomainItem = new JMenuItem("✨ 对此主域名进行参数探测（包含所有子域名）");
+        arjunProbeMainDomainItem.addActionListener(e -> {
+            if (!masterEnableToggle.isSelected()) {
+                JOptionPane.showMessageDialog(panel,
+                    "请先启用主动探测",
+                    "提示",
+                    JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+            
+            int confirm = JOptionPane.showConfirmDialog(panel,
+                String.format("将对主域名 %s 进行参数探测\n\n" +
+                            "将对该主域名下的所有子域名进行探测。\n\n" +
+                            "是否继续？", mainDomain),
+                "确认参数探测",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE);
+            
+            if (confirm == JOptionPane.YES_OPTION) {
+                CompletableFuture.runAsync(() -> {
+                    activeScanner.getRealtimeScanner().triggerArjunForMainDomain(mainDomain);
+                });
+                
+                SwingUtilities.invokeLater(() -> {
+                    statusLabel.setText("✨ 正在对主域名 " + mainDomain + " 进行参数探测...");
+                    statusLabel.setForeground(new Color(155, 89, 182));
+                    progressBar.setIndeterminate(true);
+                });
+            }
+        });
+        popupMenu.add(arjunProbeMainDomainItem);
+        
+        popupMenu.addSeparator();
+        
+        // 菜单项：删除子域名数据
+        JMenuItem deleteHostItem = new JMenuItem("🗑️ 删除此子域名数据");
+        deleteHostItem.addActionListener(e -> {
+            int confirm = JOptionPane.showConfirmDialog(panel,
+                String.format("确定要删除子域名 %s 的所有收集数据吗？\n\n" +
+                            "主域名: %s\n" +
+                            "此操作不可恢复！", host, mainDomain),
+                "确认删除",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.WARNING_MESSAGE);
+            
+            if (confirm == JOptionPane.YES_OPTION) {
+                // ✅ 同时删除内存和磁盘数据
+                boolean deleted = activeScanner.getRealtimeScanner()
+                    .getParameterCollector()
+                    .clearHost(mainDomain, host);
+                
+                // ✅ 同步删除磁盘数据
+                if (deleted) {
+                    parameterDataStorage.deleteHost(mainDomain, host);
+                    JOptionPane.showMessageDialog(panel,
+                        "✅ 子域名数据已删除（内存和磁盘）",
+                        "成功",
+                        JOptionPane.INFORMATION_MESSAGE);
+                    refreshCollectedData();
+                } else {
+                    JOptionPane.showMessageDialog(panel,
+                        "删除失败：未找到该子域名数据",
+                        "错误",
+                        JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        });
+        popupMenu.add(deleteHostItem);
+        
+        // 菜单项：删除主域名数据
+        JMenuItem deleteMainDomainItem = new JMenuItem("🗑️ 删除主域名 " + mainDomain + " 的所有数据");
+        deleteMainDomainItem.addActionListener(e -> {
+            int confirm = JOptionPane.showConfirmDialog(panel,
+                String.format("确定要删除主域名 %s 的所有收集数据吗？\n\n" +
+                            "包括所有子域名、接口和参数。\n" +
+                            "此操作不可恢复！", mainDomain),
+                "确认删除",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.WARNING_MESSAGE);
+            
+            if (confirm == JOptionPane.YES_OPTION) {
+                // ✅ 同时删除内存和磁盘数据
+                boolean deleted = activeScanner.getRealtimeScanner()
+                    .getParameterCollector()
+                    .clearMainDomain(mainDomain);
+                
+                // ✅ 同步删除磁盘数据
+                if (deleted) {
+                    parameterDataStorage.deleteMainDomain(mainDomain);
+                    JOptionPane.showMessageDialog(panel,
+                        "✅ 主域名数据已删除（内存和磁盘）",
+                        "成功",
+                        JOptionPane.INFORMATION_MESSAGE);
+                    refreshCollectedData();
+                } else {
+                    JOptionPane.showMessageDialog(panel,
+                        "删除失败：未找到该主域名数据",
+                        "错误",
+                        JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        });
+        popupMenu.add(deleteMainDomainItem);
+        
+        popupMenu.addSeparator();
+        
+        // ✅ 菜单项：一键清空所有数据
+        JMenuItem clearAllItem = new JMenuItem("🗑️ 一键清空所有收集数据");
+        clearAllItem.addActionListener(e -> clearAllCollectedData());
+        popupMenu.add(clearAllItem);
+        
+        popupMenu.show(collectedDataTable, x, y);
+    }
+    
+    /**
+     * ✅ 保存收集的数据到磁盘
+     */
+    private void saveCollectedData() {
+        try {
+            ParameterCollector collector = realtimeScanner.getParameterCollector();
+            if (collector == null) {
+                JOptionPane.showMessageDialog(panel,
+                    "参数收集器未初始化",
+                    "错误",
+                    JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+            
+            parameterDataStorage.save(collector);
+            JOptionPane.showMessageDialog(panel,
+                "✅ 数据已保存到: " + parameterDataStorage.getDataFilePath(),
+                "保存成功",
+                JOptionPane.INFORMATION_MESSAGE);
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("保存数据失败: " + e.getMessage());
+            JOptionPane.showMessageDialog(panel,
+                "保存数据失败: " + e.getMessage(),
+                "错误",
+                JOptionPane.ERROR_MESSAGE);
+        }
+    }
+    
+    /**
+     * ✅ 启动时自动恢复数据（如果存在保存的数据）
+     * 在插件初始化完成后自动执行，无需用户操作
+     */
+    private void restoreCollectedDataOnStartup() {
+        try {
+            if (!parameterDataStorage.exists()) {
+                api.logging().raiseDebugEvent("未找到保存的参数收集数据，跳过自动恢复");
+                return; // 没有保存的数据，跳过恢复
+            }
+            
+            ParameterCollector collector = realtimeScanner.getParameterCollector();
+            if (collector == null) {
+                api.logging().raiseErrorEvent("参数收集器未初始化，无法恢复数据");
+                return;
+            }
+            
+            api.logging().raiseInfoEvent("🔄 检测到保存的数据，开始自动恢复参数收集数据...");
+            
+            // ✅ 自动恢复数据
+            parameterDataStorage.restoreToCollector(collector, api);
+            
+            // 延迟刷新UI（确保初始化完成）
+            SwingUtilities.invokeLater(() -> {
+                refreshCollectedData();
+                api.logging().raiseInfoEvent("✅ 参数收集数据自动恢复完成，UI已更新");
+            });
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("启动时自动恢复数据失败: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * ✅ 一键清空所有收集的数据
+     */
+    private void clearAllCollectedData() {
+        int confirm = JOptionPane.showConfirmDialog(panel,
+            "确定要清空所有收集的数据吗？\n\n" +
+            "包括所有主域名、子域名、接口和参数。\n" +
+            "此操作不可恢复！\n\n" +
+            "是否继续？",
+            "确认清空",
+            JOptionPane.YES_NO_OPTION,
+            JOptionPane.WARNING_MESSAGE);
+        
+        if (confirm != JOptionPane.YES_OPTION) {
+            return;
+        }
+        
+        try {
+            ParameterCollector collector = realtimeScanner.getParameterCollector();
+            if (collector == null) {
+                return;
+            }
+            
+            // 清空内存中的数据
+            collector.clear();
+            
+            // 清空磁盘中的数据
+            parameterDataStorage.clearAll();
+            
+            // 刷新UI
+            refreshCollectedData();
+            
+            JOptionPane.showMessageDialog(panel,
+                "✅ 所有数据已清空",
+                "清空成功",
+                JOptionPane.INFORMATION_MESSAGE);
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("清空数据失败: " + e.getMessage());
+            JOptionPane.showMessageDialog(panel,
+                "清空数据失败: " + e.getMessage(),
+                "错误",
+                JOptionPane.ERROR_MESSAGE);
         }
     }
     

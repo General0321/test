@@ -360,9 +360,182 @@ public class RealtimeScannerRefactored {
     }
     
     /**
-     * 为指定主域名触发Arjun扫描
+     * ✅ 为指定子域名触发Arjun扫描（使用主域名下所有接口和参数）
+     * 
+     * 核心逻辑：
+     * 1. 获取主域名下所有收集的接口和参数
+     * 2. 将请求的目标host改为选中的子域名
+     * 3. 对所有接口进行参数探测
+     * 
+     * @param mainDomain 主域名
+     * @param targetHost 目标子域名（探测的目标host）
      */
-    private void triggerArjunForMainDomain(String mainDomain) {
+    public void triggerArjunForHost(String mainDomain, String targetHost) {
+        try {
+            // ✅ 修复：检查主动探测总开关
+            if (!arjunEnabled) {
+                api.logging().raiseDebugEvent("主动探测已禁用，跳过Arjun扫描: " + targetHost);
+                return;
+            }
+            
+            // ✅ 获取主域名下所有收集的参数
+            Set<String> collectedParams = parameterCollector.getParametersForMainDomain(mainDomain);
+            
+            // 如果启用了关键词收集，将关键词也加入参数列表
+            if (parameterCollector.getCollectionMode() == ParameterCollector.CollectionMode.PARAMETERS_AND_KEYWORDS) {
+                Set<String> keywords = parameterCollector.getKeywordsForMainDomain(mainDomain);
+                collectedParams.addAll(keywords);
+            }
+            
+            // ✅ 获取主域名下所有收集的接口
+            Set<ParameterCollector.EndpointKey> allEndpointKeys = 
+                parameterCollector.getEndpointKeysForMainDomain(mainDomain);
+            
+            api.logging().raiseInfoEvent(String.format(
+                "🔍 对子域名 %s 进行Arjun扫描（使用主域名 %s 的所有接口和参数）: 参数数=%d, 接口数=%d",
+                targetHost, mainDomain, collectedParams.size(), allEndpointKeys.size()
+            ));
+            
+            int scanned = 0;
+            for (ParameterCollector.EndpointKey epKey : allEndpointKeys) {
+                // ✅ 计算增量参数（未扫描过的）
+                Set<String> incrementalParams = parameterManager.getIncrementalParameters(
+                    epKey.method, targetHost, epKey.contentType, epKey.endpoint, collectedParams
+                );
+                
+                if (incrementalParams.isEmpty()) {
+                    continue;
+                }
+                
+                // ✅ 获取原始请求模板，但修改host为目标子域名
+                HttpRequest originalTemplate = parameterCollector.getEndpointTemplate(mainDomain, epKey);
+                if (originalTemplate == null) {
+                    continue;
+                }
+                
+                // ✅ 修改请求的host为目标子域名
+                HttpRequest modifiedRequest = modifyRequestHost(originalTemplate, targetHost);
+                if (modifiedRequest == null) {
+                    continue;
+                }
+                
+                final HttpRequest finalRequest = modifiedRequest;
+                final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
+                
+                // 异步调用 Arjun
+                arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                    if (result.isSuccess()) {
+                        String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
+                        
+                        if (!result.getFoundParameters().isEmpty()) {
+                            api.logging().raiseInfoEvent(String.format(
+                                "✅ Arjun 发现 %d 个参数: %s %s (%s) %s - %s",
+                                result.getFoundParameters().size(),
+                                epKey.method, targetHost, epKey.contentType, epKey.endpoint, 
+                                result.getFoundParameters()
+                            ));
+                            
+                            // ✅ 通知UI显示结果
+                            notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
+                            
+                            // ✅ 将发现的参数传递给漏洞扫描器
+                            triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                        } else {
+                            api.logging().raiseDebugEvent(String.format(
+                                "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
+                                epKey.method, targetHost, epKey.contentType, epKey.endpoint
+                            ));
+                            notifyArjunResult(mainDomain, epKey.endpoint, new HashSet<>(), paramType);
+                        }
+                        
+                        parameterManager.markParametersAsScanned(
+                            epKey.method, targetHost, epKey.contentType, epKey.endpoint, 
+                            finalIncrementalParams
+                        );
+                    } else {
+                        parameterManager.markParametersAsScanned(
+                            epKey.method, targetHost, epKey.contentType, epKey.endpoint, 
+                            finalIncrementalParams
+                        );
+                    }
+                }).exceptionally(ex -> {
+                    api.logging().raiseErrorEvent("Arjun扫描异常: " + ex.getMessage());
+                    parameterManager.markParametersAsScanned(
+                        epKey.method, targetHost, epKey.contentType, epKey.endpoint, 
+                        finalIncrementalParams
+                    );
+                    return null;
+                });
+                
+                scanned++;
+            }
+            
+            api.logging().raiseInfoEvent(String.format(
+                "✅ 子域名 %s Arjun扫描完成: 扫描了 %d 个接口",
+                targetHost, scanned
+            ));
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("触发子域名Arjun扫描时出错: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * ✅ 修改请求的host为目标子域名
+     * 使用buildRequest方法重新构建请求，但修改host
+     */
+    private HttpRequest modifyRequestHost(HttpRequest originalRequest, String targetHost) {
+        try {
+            // ✅ 获取原始请求的服务信息
+            burp.api.montoya.http.HttpService originalService = originalRequest.httpService();
+            int port = originalService.port();
+            boolean isSecure = originalService.secure();
+            
+            // ✅ 获取原始URL的路径和查询字符串
+            String originalUrl = originalRequest.url();
+            URI originalUri = new URI(originalUrl);
+            String scheme = originalUri.getScheme();
+            String path = originalUri.getPath();
+            if (path.isEmpty()) {
+                path = "/";
+            }
+            String query = originalUri.getQuery();
+            String fullPath = query != null ? path + "?" + query : path;
+            
+            // ✅ 获取原始请求的方法和Content-Type
+            String method = originalRequest.method();
+            String contentType = null;
+            for (var header : originalRequest.headers()) {
+                if ("Content-Type".equalsIgnoreCase(header.name())) {
+                    contentType = header.value();
+                    break;
+                }
+            }
+            
+            // ✅ 构建新URL（替换host）
+            String newUrl;
+            if (port != -1 && !(("https".equalsIgnoreCase(scheme) && port == 443) || 
+                               ("http".equalsIgnoreCase(scheme) && port == 80))) {
+                newUrl = scheme + "://" + targetHost + ":" + port + fullPath;
+            } else {
+                newUrl = scheme + "://" + targetHost + fullPath;
+            }
+            
+            // ✅ 使用buildRequest方法构建新请求（会自动设置正确的Host头）
+            return buildRequest(newUrl, method, contentType);
+            
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("修改请求host失败: " + e.getMessage());
+            e.printStackTrace();
+            return null;
+        }
+    }
+    
+    /**
+     * ✅ 为指定主域名触发Arjun扫描（包含所有子域名）
+     * @param mainDomain 主域名
+     */
+    public void triggerArjunForMainDomain(String mainDomain) {
         try {
             // ✅ 修复：检查主动探测总开关
             if (!arjunEnabled) {

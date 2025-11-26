@@ -338,6 +338,57 @@ public class ParameterCollector {
         api.logging().raiseInfoEvent("参数收集器已清空");
     }
     
+    /**
+     * ✅ 清空指定主域名的数据
+     */
+    public boolean clearMainDomain(String mainDomain) {
+        if (domainDataMap.remove(mainDomain) != null) {
+            domainKeywords.remove(mainDomain);
+            api.logging().raiseInfoEvent("已清空主域名数据: " + mainDomain);
+            return true;
+        }
+        return false;
+    }
+    
+    /**
+     * ✅ 清空指定子域名的数据
+     */
+    public boolean clearHost(String mainDomain, String host) {
+        DomainData domainData = domainDataMap.get(mainDomain);
+        if (domainData == null) {
+            return false;
+        }
+        
+        // 从hosts列表中移除
+        boolean hostRemoved = domainData.hosts.remove(host);
+        
+        // 从hostParameters中移除
+        domainData.hostParameters.remove(host);
+        
+        // 从endpointMap中移除该host的所有接口
+        domainData.endpointMap.entrySet().removeIf(entry -> {
+            EndpointInfo epInfo = entry.getValue();
+            if (epInfo.host.equals(host)) {
+                // 从allParameters中移除该接口的参数
+                epInfo.parameters.forEach(domainData.allParameters::remove);
+                return true;
+            }
+            return false;
+        });
+        
+        // 如果主域名下没有host了，删除整个主域名
+        if (domainData.hosts.isEmpty()) {
+            domainDataMap.remove(mainDomain);
+            domainKeywords.remove(mainDomain);
+        }
+        
+        if (hostRemoved) {
+            api.logging().raiseInfoEvent(String.format("已清空子域名数据: %s (主域名: %s)", host, mainDomain));
+        }
+        
+        return hostRemoved;
+    }
+    
     // ========== 辅助方法 ==========
     
     // ========== 参数和关键词提取逻辑（参考 GAP.py）==========
