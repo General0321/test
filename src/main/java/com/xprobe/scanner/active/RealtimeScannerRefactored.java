@@ -539,17 +539,33 @@ public class RealtimeScannerRefactored {
             int skippedNoTemplate = 0;
             int skippedModifyFailed = 0;
             
+            api.logging().raiseInfoEvent(String.format(
+                "🔍 开始扫描接口: 接口数=%d, 参数数=%d",
+                endpointKeysToScan.size(), collectedParams.size()
+            ));
+            
             for (ParameterCollector.EndpointKey epKey : endpointKeysToScan) {
+                api.logging().raiseInfoEvent(String.format(
+                    "处理接口: %s %s (%s) %s",
+                    epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
+                ));
+                
                 // ✅ 计算增量参数（未扫描过的）
                 Set<String> incrementalParams = parameterManager.getIncrementalParameters(
                     epKey.method, targetHost, epKey.contentType, epKey.endpoint, collectedParams
                 );
                 
+                api.logging().raiseInfoEvent(String.format(
+                    "增量参数数: %d (总参数数: %d)",
+                    incrementalParams.size(), collectedParams.size()
+                ));
+                
                 if (incrementalParams.isEmpty()) {
                     skippedEmptyParams++;
-                    api.logging().raiseDebugEvent(String.format(
-                        "跳过接口 %s %s (%s) %s：所有参数已扫描过",
-                        epKey.method, targetHost, epKey.contentType, epKey.endpoint
+                    api.logging().raiseInfoEvent(String.format(
+                        "⚠️ 跳过接口 %s %s (%s) %s：所有参数已扫描过（总参数数: %d）",
+                        epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint,
+                        collectedParams.size()
                     ));
                     continue;
                 }
@@ -558,26 +574,48 @@ public class RealtimeScannerRefactored {
                 HttpRequest originalTemplate = parameterCollector.getEndpointTemplate(mainDomain, epKey);
                 if (originalTemplate == null) {
                     skippedNoTemplate++;
-                    api.logging().raiseDebugEvent(String.format(
-                        "跳过接口 %s %s (%s) %s：未找到请求模板",
-                        epKey.method, targetHost, epKey.contentType, epKey.endpoint
+                    api.logging().raiseInfoEvent(String.format(
+                        "⚠️ 跳过接口 %s %s (%s) %s：未找到请求模板",
+                        epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
                     ));
                     continue;
                 }
+                
+                api.logging().raiseInfoEvent(String.format(
+                    "✅ 找到请求模板: %s %s (%s) %s",
+                    epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
+                ));
                 
                 // ✅ 修改请求的host为目标子域名
                 HttpRequest modifiedRequest = modifyRequestHost(originalTemplate, targetHost);
                 if (modifiedRequest == null) {
                     skippedModifyFailed++;
-                    api.logging().raiseDebugEvent(String.format(
-                        "跳过接口 %s %s (%s) %s：修改host失败",
-                        epKey.method, targetHost, epKey.contentType, epKey.endpoint
+                    api.logging().raiseInfoEvent(String.format(
+                        "⚠️ 跳过接口 %s %s (%s) %s：修改host失败",
+                        epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
                     ));
                     continue;
                 }
                 
+                api.logging().raiseInfoEvent(String.format(
+                    "✅ 请求修改成功: %s %s (%s) %s, 准备发送 Arjun 扫描",
+                    epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
+                ));
+                
                 final HttpRequest finalRequest = modifiedRequest;
                 final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
+                
+                // ✅ 检查 arjunService 是否可用
+                if (arjunService == null) {
+                    api.logging().raiseErrorEvent("❌ arjunService 为 null，无法执行 Arjun 扫描");
+                    continue;
+                }
+                
+                api.logging().raiseInfoEvent(String.format(
+                    "🚀 调用 Arjun 扫描: %s %s (%s) %s, 参数数=%d",
+                    epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint,
+                    finalIncrementalParams.size()
+                ));
                 
                 // 异步调用 Arjun
                 arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
@@ -625,6 +663,11 @@ public class RealtimeScannerRefactored {
                 });
                 
                 scanned++;
+                api.logging().raiseInfoEvent(String.format(
+                    "✅ 已提交 Arjun 扫描任务: %s %s (%s) %s, scanned计数=%d",
+                    epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint,
+                    scanned
+                ));
             }
             
             // ✅ 详细的统计日志
@@ -658,16 +701,25 @@ public class RealtimeScannerRefactored {
             int port = originalService.port();
             boolean isSecure = originalService.secure();
             
-            // ✅ 获取原始URL的路径和查询字符串
+            // ✅ 手动解析 URL 字符串，避免使用 URI 类无法处理未编码字符的问题
             String originalUrl = originalRequest.url();
-            URI originalUri = new URI(originalUrl);
-            String scheme = originalUri.getScheme();
-            String path = originalUri.getPath();
-            if (path.isEmpty()) {
-                path = "/";
+            String scheme = isSecure ? "https" : "http";
+            String fullPath = originalUrl;
+            
+            // 提取路径和查询字符串（从 URL 中提取，不依赖 URI 解析）
+            int schemeEnd = originalUrl.indexOf("://");
+            if (schemeEnd == -1) {
+                api.logging().raiseErrorEvent("无法解析URL格式: " + originalUrl);
+                return null;
             }
-            String query = originalUri.getQuery();
-            String fullPath = query != null ? path + "?" + query : path;
+            
+            int pathStart = originalUrl.indexOf('/', schemeEnd + 3);
+            if (pathStart == -1) {
+                fullPath = "/";
+            } else {
+                // 提取从第一个 / 开始的所有内容（包括查询字符串）
+                fullPath = originalUrl.substring(pathStart);
+            }
             
             // ✅ 获取原始请求的方法和Content-Type
             String method = originalRequest.method();
@@ -679,7 +731,7 @@ public class RealtimeScannerRefactored {
                 }
             }
             
-            // ✅ 构建新URL（替换host）
+            // ✅ 构建新URL（替换host，保持原始路径和查询字符串不变）
             String newUrl;
             if (port != -1 && !(("https".equalsIgnoreCase(scheme) && port == 443) || 
                                ("http".equalsIgnoreCase(scheme) && port == 80))) {
@@ -1604,16 +1656,50 @@ public class RealtimeScannerRefactored {
      */
     private HttpRequest buildRequest(String url, String method, String contentType) {
         try {
-            URI uri = new URI(url);
-            String host = uri.getHost();
-            String scheme = uri.getScheme();
-            int port = uri.getPort();
-            String path = uri.getPath();
-            if (path.isEmpty()) {
-                path = "/";
+            // ✅ 手动解析 URL，避免 URI 类无法处理未编码字符的问题
+            String scheme = null;
+            String host = null;
+            int port = -1;
+            String fullPath = null;
+            
+            // 解析 scheme
+            int schemeEnd = url.indexOf("://");
+            if (schemeEnd == -1) {
+                api.logging().raiseErrorEvent("无法解析URL格式（缺少scheme）: " + url);
+                return null;
             }
-            String query = uri.getQuery();
-            String fullPath = query != null ? path + "?" + query : path;
+            scheme = url.substring(0, schemeEnd);
+            
+            // 解析 host 和 port
+            int pathStart = url.indexOf('/', schemeEnd + 3);
+            String hostPort;
+            if (pathStart == -1) {
+                hostPort = url.substring(schemeEnd + 3);
+                fullPath = "/";
+            } else {
+                hostPort = url.substring(schemeEnd + 3, pathStart);
+                fullPath = url.substring(pathStart);
+            }
+            
+            // 解析 port
+            int portStart = hostPort.indexOf(':');
+            if (portStart == -1) {
+                host = hostPort;
+                port = -1; // 使用默认端口
+            } else {
+                host = hostPort.substring(0, portStart);
+                try {
+                    port = Integer.parseInt(hostPort.substring(portStart + 1));
+                } catch (NumberFormatException e) {
+                    api.logging().raiseErrorEvent("无法解析端口号: " + hostPort.substring(portStart + 1));
+                    return null;
+                }
+            }
+            
+            // 确保路径不为空
+            if (fullPath.isEmpty()) {
+                fullPath = "/";
+            }
             
             // ✅ 修复：构建HttpService（包含host、port、scheme信息）
             burp.api.montoya.http.HttpService httpService;

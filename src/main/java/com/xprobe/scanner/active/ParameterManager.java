@@ -97,14 +97,28 @@ public class ParameterManager {
         String key = generateKey(method, host, contentType, endpoint);
         Set<String> scanned = arjunScannedParameters.get(key);
         
+        api.logging().raiseInfoEvent(String.format(
+            "🔍 getIncrementalParameters: key=%s, 总参数数=%d, 已扫描参数数=%s",
+            key, allParams.size(), scanned != null ? String.valueOf(scanned.size()) : "null"
+        ));
+        
         if (scanned == null || scanned.isEmpty()) {
             // 首次扫描，返回所有参数
+            api.logging().raiseInfoEvent(String.format(
+                "✅ 首次扫描，返回所有参数: %d 个",
+                allParams.size()
+            ));
             return allParams;
         }
         
         // 计算增量：移除已扫描的参数
         Set<String> incremental = new HashSet<>(allParams);
         incremental.removeAll(scanned);
+        
+        api.logging().raiseInfoEvent(String.format(
+            "📊 增量参数: 总参数=%d, 已扫描=%d, 增量=%d",
+            allParams.size(), scanned.size(), incremental.size()
+        ));
         
         return incremental;
     }
