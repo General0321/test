@@ -436,7 +436,7 @@ public class RealtimeScannerRefactored {
                             ));
                             
                             // ✅ 通知UI显示结果
-                            notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
+                            notifyArjunResult(mainDomain, targetHost, epKey.endpoint, result.getFoundParameters(), paramType);
                             
                             // ✅ 将发现的参数传递给漏洞扫描器
                             triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
@@ -445,7 +445,7 @@ public class RealtimeScannerRefactored {
                                 "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
                                 epKey.method, targetHost, epKey.contentType, epKey.endpoint
                             ));
-                            notifyArjunResult(mainDomain, epKey.endpoint, new HashSet<>(), paramType);
+                            notifyArjunResult(mainDomain, targetHost, epKey.endpoint, new HashSet<>(), paramType);
                         }
                         
                         parameterManager.markParametersAsScanned(
@@ -585,7 +585,7 @@ public class RealtimeScannerRefactored {
                             ));
                             
                             // ✅ 通知UI显示结果
-                            notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
+                            notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, result.getFoundParameters(), paramType);
                             
                             triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
                         } else {
@@ -594,7 +594,7 @@ public class RealtimeScannerRefactored {
                                 "Arjun 扫描完成，未发现隐藏参数: %s",
                                 epKey
                             ));
-                            notifyArjunResult(mainDomain, epKey.endpoint, new HashSet<>(), paramType);
+                            notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType);
                         }
                         parameterManager.markParametersAsScanned(
                             epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
@@ -954,7 +954,7 @@ public class RealtimeScannerRefactored {
                                     ));
                                     
                                     // ✅ 通知UI显示结果
-                                    notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
+                                    notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, result.getFoundParameters(), paramType);
                                     
                                     // ✅ 将发现的参数传递给漏洞扫描器
                                     triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
@@ -964,7 +964,7 @@ public class RealtimeScannerRefactored {
                                         "Arjun 扫描完成，未发现隐藏参数: %s",
                                         epKey
                                     ));
-                                    notifyArjunResult(mainDomain, epKey.endpoint, new HashSet<>(), paramType);
+                                    notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType);
                                 }
                                 
                                 // 标记参数为已扫描
@@ -1083,7 +1083,7 @@ public class RealtimeScannerRefactored {
                                 ));
                                 
                                 // ✅ 通知UI显示结果
-                                notifyArjunResult(mainDomain, epKey.endpoint, result.getFoundParameters(), paramType);
+                                notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, result.getFoundParameters(), paramType);
                                 
                                 // ✅ 将发现的参数传递给漏洞扫描器
                                 triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
@@ -1093,7 +1093,7 @@ public class RealtimeScannerRefactored {
                                     "Arjun 扫描完成，未发现隐藏参数: %s",
                                     epKey
                                 ));
-                                notifyArjunResult(mainDomain, epKey.endpoint, new HashSet<>(), paramType);
+                                notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType);
                             }
                             
                             parameterManager.markParametersAsScanned(
@@ -1298,7 +1298,7 @@ public class RealtimeScannerRefactored {
                                         result.getFoundParameters()
                                     ));
                                     
-                                    notifyArjunResult(mainDomain, endpoint, result.getFoundParameters(), paramType);
+                                    notifyArjunResult(mainDomain, host, endpoint, result.getFoundParameters(), paramType);
                                     triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
                                 } else {
                                     // ✅ 修复：即使没有发现参数，也添加到表格中
@@ -1306,7 +1306,7 @@ public class RealtimeScannerRefactored {
                                         "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
                                         finalMethod, host, finalContentType, endpoint
                                     ));
-                                    notifyArjunResult(mainDomain, endpoint, new HashSet<>(), paramType);
+                                    notifyArjunResult(mainDomain, host, endpoint, new HashSet<>(), paramType);
                                 }
                                 
                                 parameterManager.markParametersAsScanned(
@@ -1353,7 +1353,7 @@ public class RealtimeScannerRefactored {
                                 if (!runArjun && activeProbeTab != null) {
                                     try {
                                         // ✅ 修复：使用已定义的mainDomain变量，不重复声明
-                                        activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, finalMethod, finalContentType, false, System.currentTimeMillis());
+                                        activeProbeTab.addInterfaceDiscoveryResult(mainDomain, host, endpoint, finalMethod, finalContentType, false, System.currentTimeMillis());
                                     } catch (Exception e) {
                                         // 忽略错误
                                     }
@@ -1377,7 +1377,7 @@ public class RealtimeScannerRefactored {
                                     if (!runArjun && activeProbeTab != null) {
                                         try {
                                             // ✅ 修复：使用已定义的mainDomain变量，不重复声明
-                                            activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, finalMethod, finalContentType, false, System.currentTimeMillis());
+                                            activeProbeTab.addInterfaceDiscoveryResult(mainDomain, host, endpoint, finalMethod, finalContentType, false, System.currentTimeMillis());
                                         } catch (Exception e) {
                                             // 忽略错误
                                         }
@@ -1389,7 +1389,7 @@ public class RealtimeScannerRefactored {
                                 if (!runArjun && activeProbeTab != null) {
                                     try {
                                         // ✅ 修复：使用已定义的mainDomain变量，不重复声明
-                                        activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, finalMethod, finalContentType, true, System.currentTimeMillis());
+                                        activeProbeTab.addInterfaceDiscoveryResult(mainDomain, host, endpoint, finalMethod, finalContentType, true, System.currentTimeMillis());
                                     } catch (Exception e) {
                                         // 忽略错误
                                     }
@@ -1652,7 +1652,7 @@ public class RealtimeScannerRefactored {
                     "接口不存在: %s %s (%s) %s - 状态码 404 (基准：两个随机路径都返回404，使用缓存)",
                     method, host, contentType != null ? contentType : "N/A", endpoint
                 ));
-                notifyInterfaceResult(mainDomain, endpoint, method, contentType, false);
+                notifyInterfaceResult(mainDomain, host, endpoint, method, contentType, false);
                 return false;
             }
             // 如果原始路径返回非404，说明接口存在
@@ -1660,7 +1660,7 @@ public class RealtimeScannerRefactored {
                 "✅ 接口存在: %s %s (%s) %s - 状态码 %d (基准：两个随机路径都返回404，使用缓存)",
                 method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
             ));
-            collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+            collectAndNotify(originalRequest, originalResponse, mainDomain, host, endpoint, method, contentType, true);
             return true;
         }
         
@@ -1679,7 +1679,7 @@ public class RealtimeScannerRefactored {
                     "接口不存在: %s %s (%s) %s - 状态码 %d，与基准响应相同 (泛解析，使用缓存)",
                     method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
                 ));
-                notifyInterfaceResult(mainDomain, endpoint, method, contentType, false);
+                notifyInterfaceResult(mainDomain, host, endpoint, method, contentType, false);
                 return false;
             } else {
                 // 与基准响应不同，说明接口存在
@@ -1687,7 +1687,7 @@ public class RealtimeScannerRefactored {
                     "✅ 接口存在: %s %s (%s) %s - 状态码 %d (与基准响应不同，验证通过，使用缓存)",
                     method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
                 ));
-                collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+                collectAndNotify(originalRequest, originalResponse, mainDomain, host, endpoint, method, contentType, true);
                 return true;
             }
         }
@@ -1709,7 +1709,7 @@ public class RealtimeScannerRefactored {
                 "✅ 接口存在: %s %s (%s) %s - 状态码 %d (与两个随机路径响应都不同，验证通过，使用缓存)",
                 method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
             ));
-            collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+            collectAndNotify(originalRequest, originalResponse, mainDomain, host, endpoint, method, contentType, true);
             return true;
         } else {
             // 与至少一个随机路径响应相同，保守处理为接口不存在
@@ -1717,7 +1717,7 @@ public class RealtimeScannerRefactored {
                 "接口不存在: %s %s (%s) %s - 状态码 %d (与随机路径响应相同，使用缓存)",
                 method, host, contentType != null ? contentType : "N/A", endpoint, originalStatusCode
             ));
-            notifyInterfaceResult(mainDomain, endpoint, method, contentType, false);
+            notifyInterfaceResult(mainDomain, host, endpoint, method, contentType, false);
             return false;
         }
     }
@@ -1739,7 +1739,7 @@ public class RealtimeScannerRefactored {
         if (api.http() == null) {
             api.logging().raiseErrorEvent("HTTP服务不可用，无法发送随机路径请求");
             // 保守处理，认为接口存在
-            collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+            collectAndNotify(originalRequest, originalResponse, mainDomain, host, endpoint, method, contentType, true);
             return true;
         }
         
@@ -1748,14 +1748,14 @@ public class RealtimeScannerRefactored {
             HttpRequest randomPathRequest1 = buildRequestWithRandomPath(url, method, contentType, randomPath1);
             if (randomPathRequest1 == null) {
                 api.logging().raiseDebugEvent("无法构建第一个随机路径请求，保守处理为接口存在");
-                collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+                collectAndNotify(originalRequest, originalResponse, mainDomain, host, endpoint, method, contentType, true);
                 return true;
             }
             
             HttpRequestResponse randomResponse1 = api.http().sendRequest(randomPathRequest1);
             if (randomResponse1 == null || randomResponse1.response() == null) {
                 api.logging().raiseDebugEvent("第一个随机路径请求无响应，保守处理为接口存在");
-                collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+                collectAndNotify(originalRequest, originalResponse, mainDomain, host, endpoint, method, contentType, true);
                 return true;
             }
             
@@ -1766,14 +1766,14 @@ public class RealtimeScannerRefactored {
             HttpRequest randomPathRequest2 = buildRequestWithRandomPath(url, method, contentType, randomPath2);
             if (randomPathRequest2 == null) {
                 api.logging().raiseDebugEvent("无法构建第二个随机路径请求，保守处理为接口存在");
-                collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+                collectAndNotify(originalRequest, originalResponse, mainDomain, host, endpoint, method, contentType, true);
                 return true;
             }
             
             HttpRequestResponse randomResponse2 = api.http().sendRequest(randomPathRequest2);
             if (randomResponse2 == null || randomResponse2.response() == null) {
                 api.logging().raiseDebugEvent("第二个随机路径请求无响应，保守处理为接口存在");
-                collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+                collectAndNotify(originalRequest, originalResponse, mainDomain, host, endpoint, method, contentType, true);
                 return true;
             }
             
@@ -1831,7 +1831,7 @@ public class RealtimeScannerRefactored {
         } catch (Exception e) {
             api.logging().raiseErrorEvent("建立随机路径基准失败: " + e.getMessage());
             // 保守处理，认为接口存在
-            collectAndNotify(originalRequest, originalResponse, mainDomain, endpoint, method, contentType, true);
+            collectAndNotify(originalRequest, originalResponse, mainDomain, host, endpoint, method, contentType, true);
             return true;
         }
     }
@@ -1840,7 +1840,7 @@ public class RealtimeScannerRefactored {
      * ✅ 收集参数并通知UI接口探测结果
      */
     private void collectAndNotify(HttpRequest originalRequest, HttpRequestResponse originalResponse,
-                                  String mainDomain, String endpoint, String method, String contentType,
+                                  String mainDomain, String host, String endpoint, String method, String contentType,
                                   boolean exists) {
         if (originalResponse != null) {
             parameterCollector.collectFromRequest(originalRequest);
@@ -1848,17 +1848,17 @@ public class RealtimeScannerRefactored {
                 parameterCollector.collectFromResponse(originalRequest, originalResponse.response());
             }
         }
-        notifyInterfaceResult(mainDomain, endpoint, method, contentType, exists);
+        notifyInterfaceResult(mainDomain, host, endpoint, method, contentType, exists);
     }
     
     /**
      * ✅ 通知UI接口探测结果
      */
-    private void notifyInterfaceResult(String mainDomain, String endpoint, String method,
+    private void notifyInterfaceResult(String mainDomain, String host, String endpoint, String method,
                                       String contentType, boolean exists) {
         if (activeProbeTab != null) {
             try {
-                activeProbeTab.addInterfaceDiscoveryResult(mainDomain, endpoint, method, contentType, exists, System.currentTimeMillis());
+                activeProbeTab.addInterfaceDiscoveryResult(mainDomain, host, endpoint, method, contentType, exists, System.currentTimeMillis());
             } catch (Exception e) {
                 // 忽略错误
             }
@@ -2469,12 +2469,13 @@ public class RealtimeScannerRefactored {
          * 当Arjun发现参数时被调用
          * 
          * @param mainDomain 主域名
+         * @param host 触发扫描的目标子域
          * @param endpoint 接口路径
          * @param foundParameters 发现的参数集合
          * @param parameterType 参数类型（GET/POST/JSON等）
          * @param timestamp 探测时间戳
          */
-        void onArjunResultFound(String mainDomain, String endpoint, Set<String> foundParameters, 
+        void onArjunResultFound(String mainDomain, String host, String endpoint, Set<String> foundParameters, 
                                String parameterType, long timestamp);
     }
     
@@ -2497,12 +2498,12 @@ public class RealtimeScannerRefactored {
     /**
      * 通知所有监听器Arjun发现了参数
      */
-    private void notifyArjunResult(String mainDomain, String endpoint, Set<String> foundParameters, 
+    private void notifyArjunResult(String mainDomain, String host, String endpoint, Set<String> foundParameters, 
                                    String parameterType) {
         long timestamp = System.currentTimeMillis();
         for (ArjunResultListener listener : arjunResultListeners) {
             try {
-                listener.onArjunResultFound(mainDomain, endpoint, foundParameters, parameterType, timestamp);
+                listener.onArjunResultFound(mainDomain, host, endpoint, foundParameters, parameterType, timestamp);
             } catch (Exception e) {
                 api.logging().raiseErrorEvent("Arjun结果监听器执行失败: " + e.getMessage());
             }

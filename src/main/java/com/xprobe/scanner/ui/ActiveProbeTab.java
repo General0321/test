@@ -2124,11 +2124,11 @@ public class ActiveProbeTab {
     private void registerArjunResultListener(com.xprobe.scanner.active.RealtimeScannerRefactored realtimeScanner) {
         realtimeScanner.addArjunResultListener(new com.xprobe.scanner.active.RealtimeScannerRefactored.ArjunResultListener() {
             @Override
-            public void onArjunResultFound(String mainDomain, String endpoint, Set<String> foundParameters, 
+            public void onArjunResultFound(String mainDomain, String host, String endpoint, Set<String> foundParameters,
                                           String parameterType, long timestamp) {
                 // 在UI线程中更新表格
                 SwingUtilities.invokeLater(() -> {
-                    addArjunResultToTable(mainDomain, endpoint, foundParameters, parameterType, timestamp);
+                    addArjunResultToTable(mainDomain, host, endpoint, foundParameters, parameterType, timestamp);
                 });
             }
         });
@@ -2137,12 +2137,13 @@ public class ActiveProbeTab {
     /**
      * ✅ 添加接口探测结果到表格
      */
-    public void addInterfaceDiscoveryResult(String mainDomain, String endpoint, String method, 
+    public void addInterfaceDiscoveryResult(String mainDomain, String host, String endpoint, String method, 
                                            String contentType, boolean exists, long timestamp) {
         SwingUtilities.invokeLater(() -> {
             // 格式化时间
             java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("HH:mm:ss");
             String timeStr = sdf.format(new java.util.Date(timestamp));
+            String targetDisplay = (host != null && !host.isBlank()) ? host : mainDomain;
             
             // 格式化接口信息
             String displayContentType = contentType != null ? contentType : "N/A";
@@ -2154,7 +2155,7 @@ public class ActiveProbeTab {
             // 添加到表格：探测类型, 目标域名, 接口, 发现参数, 参数类型, 验证状态, 探测时间
             arjunResultTableModel.addRow(new Object[]{
                 "接口探测",  // 探测类型
-                mainDomain,
+                targetDisplay,
                 interfaceInfo,
                 "-",  // 发现参数（接口探测无参数）
                 "-",  // 参数类型（接口探测无参数类型）
@@ -2167,11 +2168,12 @@ public class ActiveProbeTab {
     /**
      * 将Arjun结果添加到表格
      */
-    private void addArjunResultToTable(String mainDomain, String endpoint, Set<String> foundParameters, 
+    private void addArjunResultToTable(String mainDomain, String host, String endpoint, Set<String> foundParameters, 
                                        String parameterType, long timestamp) {
         // 格式化时间
         java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("HH:mm:ss");
         String timeStr = sdf.format(new java.util.Date(timestamp));
+        String targetDisplay = (host != null && !host.isBlank()) ? host : mainDomain;
         
         // 参数列表（逗号分隔）
         String paramsStr = foundParameters.isEmpty() ? "" : String.join(", ", foundParameters);
@@ -2193,7 +2195,7 @@ public class ActiveProbeTab {
         // ✅ 添加到表格：探测类型, 目标域名, 接口, 发现参数, 参数类型, 验证状态, 探测时间
         arjunResultTableModel.addRow(new Object[]{
             "参数探测",  // 探测类型
-            mainDomain,
+            targetDisplay,
             endpoint,
             displayParams,
             parameterType,
