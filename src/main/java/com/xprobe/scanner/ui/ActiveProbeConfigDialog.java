@@ -10,7 +10,7 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 仅负责探测配置弹窗的UI表现，功能逻辑后续接入。
+ * 接口/Arjun 探测配置弹窗，负责收集用户选择并交由后端执行。
  */
 public class ActiveProbeConfigDialog extends JDialog {
 
@@ -41,6 +41,7 @@ public class ActiveProbeConfigDialog extends JDialog {
     private final JRadioButton strategyInterfaceThenArjun;
     private final JRadioButton strategyArjunOnly;
 
+    private final ExecutionHandler executionHandler;
     private final Map<String, List<ParameterDataStorage.HostData>> mainDomainHosts = new LinkedHashMap<>();
     private final List<JCheckBox> subdomainCheckboxes = new ArrayList<>();
     private final Map<String, Integer> mainDomainKeywordCounts = new HashMap<>();
@@ -48,9 +49,11 @@ public class ActiveProbeConfigDialog extends JDialog {
 
     public ActiveProbeConfigDialog(Window owner,
                                    ParameterDataStorage.ParameterDataModel dataModel,
-                                   ProbeMode mode) {
+                                   ProbeMode mode,
+                                   ExecutionHandler executionHandler) {
         super(owner, "接口/Arjun 探测配置", ModalityType.APPLICATION_MODAL);
         this.dataModel = dataModel != null ? dataModel : new ParameterDataStorage.ParameterDataModel();
+        this.executionHandler = executionHandler;
         this.presetCombo = new JComboBox<>(new String[]{"默认配置"});
         this.subdomainTreePanel = new JPanel();
         this.selectionStatsLabel = new JLabel("子域：0 接口：0 参数：0");
@@ -291,13 +294,7 @@ public class ActiveProbeConfigDialog extends JDialog {
         JButton cancelButton = new JButton("取消");
         cancelButton.addActionListener(e -> dispose());
         JButton executeButton = new JButton("立即执行");
-        executeButton.addActionListener(e -> {
-            JOptionPane.showMessageDialog(this,
-                "当前仅实现界面展示，执行逻辑将在后续版本接入。",
-                "提示",
-                JOptionPane.INFORMATION_MESSAGE);
-            dispose();
-        });
+        executeButton.addActionListener(e -> handleExecuteRequest());
         footer.add(cancelButton);
         footer.add(executeButton);
         return footer;
@@ -496,6 +493,171 @@ public class ActiveProbeConfigDialog extends JDialog {
             default -> strategyInterfaceThenArjun.setSelected(true);
         }
         updateScopeAvailability();
+    }
+
+    private void handleExecuteRequest() {
+        try {
+            if (executionHandler == null) {
+                JOptionPane.showMessageDialog(this,
+                    "未找到执行器，无法触发探测。",
+                    "提示",
+                    JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            ExecutionConfig config = collectExecutionConfig();
+            executionHandler.onExecute(config);
+            dispose();
+        } catch (IllegalArgumentException ex) {
+            JOptionPane.showMessageDialog(this, ex.getMessage(), "提示", JOptionPane.WARNING_MESSAGE);
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this,
+                "执行探测失败: " + ex.getMessage(),
+                "错误",
+                JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private ExecutionConfig collectExecutionConfig() {
+        InterfaceSource interfaceSource = sourceManualRadio.isSelected()
+            ? InterfaceSource.MANUAL
+            : (sourceAutoRadio.isSelected() ? InterfaceSource.AUTO : InterfaceSource.COLLECTED);
+
+        ScopeOption interfaceScope = interfaceScopeAll.isEnabled() && interfaceScopeAll.isSelected()
+            ? ScopeOption.ALL_SUBDOMAINS
+            : ScopeOption.SELECTED_SUBDOMAINS;
+
+        ScopeOption parameterScope = parameterScopeAll.isEnabled() && parameterScopeAll.isSelected()
+            ? ScopeOption.ALL_SUBDOMAINS
+            : ScopeOption.SELECTED_SUBDOMAINS;
+
+        ProbeMode strategy = strategyInterfaceOnly.isSelected()
+            ? ProbeMode.INTERFACE_ONLY
+            : (strategyInterfaceThenArjun.isSelected() ? ProbeMode.INTERFACE_THEN_ARJUN : ProbeMode.ARJUN_ONLY);
+
+        Map<String, Set<String>> selectedHosts = collectSelectedHostsByDomain();
+        if (interfaceSource != InterfaceSource.MANUAL && selectedHosts.isEmpty()) {
+            throw new IllegalArgumentException("请至少选择一个目标子域后再执行。");
+        }
+
+        List<String> manualEntries = interfaceSource == InterfaceSource.MANUAL
+            ? readManualEndpoints()
+            : Collections.emptyList();
+
+        if (interfaceSource == InterfaceSource.MANUAL && manualEntries.isEmpty()) {
+            throw new IllegalArgumentException("请在手动输入区域提供至少一个接口路径或URL。");
+        }
+
+        return new ExecutionConfig(
+            selectedHosts,
+            interfaceSource,
+            interfaceScope,
+            parameterScope,
+            strategy,
+            customDictionaryToggle.isSelected(),
+            manualEntries
+        );
+    }
+
+    private Map<String, Set<String>> collectSelectedHostsByDomain() {
+        Map<String, Set<String>> grouped = new LinkedHashMap<>();
+        for (String key : selectedHostKeys) {
+            if (key == null || key.isBlank()) {
+                continue;
+            }
+            String[] parts = key.split("\\|\\|", 2);
+            String mainDomain = parts.length > 0 ? parts[0] : null;
+            String host = parts.length > 1 ? parts[1] : null;
+            if (mainDomain == null || mainDomain.isBlank()) {
+                continue;
+            }
+            grouped.computeIfAbsent(mainDomain, md -> new LinkedHashSet<>());
+            if (host != null && !host.isBlank() && !"(unknown)".equals(host)) {
+                grouped.get(mainDomain).add(host);
+            }
+        }
+        return grouped;
+    }
+
+    private List<String> readManualEndpoints() {
+        String text = manualEndpointsArea.getText();
+        if (text == null || text.isBlank()) {
+            return Collections.emptyList();
+        }
+        return Arrays.stream(text.split("\\r?\\n"))
+            .map(String::trim)
+            .filter(line -> !line.isEmpty())
+            .filter(line -> !line.startsWith("#"))
+            .collect(Collectors.toList());
+    }
+
+    public enum InterfaceSource {
+        COLLECTED,
+        AUTO,
+        MANUAL
+    }
+
+    public enum ScopeOption {
+        SELECTED_SUBDOMAINS,
+        ALL_SUBDOMAINS
+    }
+
+    public static class ExecutionConfig {
+        private final Map<String, Set<String>> selectedHostsByDomain;
+        private final InterfaceSource interfaceSource;
+        private final ScopeOption interfaceScope;
+        private final ScopeOption parameterScope;
+        private final ProbeMode strategy;
+        private final boolean customDictionaryEnabled;
+        private final List<String> manualEntries;
+
+        public ExecutionConfig(Map<String, Set<String>> selectedHostsByDomain,
+                               InterfaceSource interfaceSource,
+                               ScopeOption interfaceScope,
+                               ScopeOption parameterScope,
+                               ProbeMode strategy,
+                               boolean customDictionaryEnabled,
+                               List<String> manualEntries) {
+            this.selectedHostsByDomain = Collections.unmodifiableMap(new LinkedHashMap<>(selectedHostsByDomain));
+            this.interfaceSource = interfaceSource;
+            this.interfaceScope = interfaceScope;
+            this.parameterScope = parameterScope;
+            this.strategy = strategy;
+            this.customDictionaryEnabled = customDictionaryEnabled;
+            this.manualEntries = Collections.unmodifiableList(new ArrayList<>(manualEntries));
+        }
+
+        public Map<String, Set<String>> getSelectedHostsByDomain() {
+            return selectedHostsByDomain;
+        }
+
+        public InterfaceSource getInterfaceSource() {
+            return interfaceSource;
+        }
+
+        public ScopeOption getInterfaceScope() {
+            return interfaceScope;
+        }
+
+        public ScopeOption getParameterScope() {
+            return parameterScope;
+        }
+
+        public ProbeMode getStrategy() {
+            return strategy;
+        }
+
+        public boolean isCustomDictionaryEnabled() {
+            return customDictionaryEnabled;
+        }
+
+        public List<String> getManualEntries() {
+            return manualEntries;
+        }
+    }
+
+    @FunctionalInterface
+    public interface ExecutionHandler {
+        void onExecute(ExecutionConfig config) throws Exception;
     }
 }
 

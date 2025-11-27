@@ -5,6 +5,7 @@ import burp.api.montoya.http.message.requests.HttpRequest;
 import com.xprobe.scanner.active.ActiveScanner;
 import com.xprobe.scanner.active.ParameterCollector;
 import com.xprobe.scanner.active.ParameterDataStorage;
+import com.xprobe.scanner.active.arjun.ArjunService;
 import com.xprobe.scanner.config.ConfigurationManager;
 import com.xprobe.scanner.config.ConfigStorage;
 import com.xprobe.scanner.config.XProbeConfig;
@@ -17,7 +18,10 @@ import java.awt.*;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
@@ -751,9 +755,159 @@ public class ActiveProbeTab {
         SwingUtilities.invokeLater(() -> {
             Window owner = SwingUtilities.getWindowAncestor(panel);
             ParameterDataStorage.ParameterDataModel dataModel = parameterDataStorage.load();
-            ActiveProbeConfigDialog dialog = new ActiveProbeConfigDialog(owner, dataModel, mode);
+            ActiveProbeConfigDialog dialog = new ActiveProbeConfigDialog(
+                owner,
+                dataModel,
+                mode,
+                config -> SwingUtilities.invokeLater(() -> executeProbeConfiguration(config))
+            );
             dialog.setVisible(true);
         });
+    }
+    
+    private void executeProbeConfiguration(ActiveProbeConfigDialog.ExecutionConfig config) {
+        disableActionButtons(true);
+        progressBar.setIndeterminate(true);
+        progressBar.setValue(0);
+        statusLabel.setText("⏳ 正在根据配置执行探测...");
+        statusLabel.setForeground(new Color(52, 152, 219));
+        
+        CompletableFuture<Void> interfacePhase = config.getStrategy() == ActiveProbeConfigDialog.ProbeMode.ARJUN_ONLY
+            ? CompletableFuture.completedFuture(null)
+            : runInterfacePhase(config);
+        
+        CompletableFuture<Void> pipeline;
+        if (config.getStrategy() == ActiveProbeConfigDialog.ProbeMode.INTERFACE_THEN_ARJUN) {
+            pipeline = interfacePhase.thenCompose(v -> runArjunPhase(config));
+        } else if (config.getStrategy() == ActiveProbeConfigDialog.ProbeMode.ARJUN_ONLY) {
+            pipeline = runArjunPhase(config);
+        } else {
+            pipeline = interfacePhase;
+        }
+        
+        ArjunService arjunService = realtimeScanner.getArjunService();
+        final boolean dictionaryOverwritten = arjunService != null && !config.isCustomDictionaryEnabled();
+        final Set<String> originalDictionary = dictionaryOverwritten
+            ? arjunService.getUserCustomDictionary()
+            : null;
+        if (dictionaryOverwritten) {
+            arjunService.setUserCustomDictionary(Collections.emptySet());
+        }
+        
+        final ArjunService finalArjunService = arjunService;
+        pipeline.whenComplete((unused, throwable) -> {
+            if (dictionaryOverwritten && finalArjunService != null) {
+                finalArjunService.setUserCustomDictionary(
+                    originalDictionary != null ? originalDictionary : Collections.emptySet());
+            }
+            SwingUtilities.invokeLater(() -> {
+                disableActionButtons(false);
+                progressBar.setIndeterminate(false);
+                progressBar.setValue(throwable == null ? 100 : 0);
+                if (throwable == null) {
+                    String successText = switch (config.getStrategy()) {
+                        case INTERFACE_ONLY -> "✅ 接口探测完成";
+                        case INTERFACE_THEN_ARJUN -> "✅ 接口+参数探测完成";
+                        case ARJUN_ONLY -> "✅ 参数探测完成";
+                    };
+                    statusLabel.setText(successText);
+                    statusLabel.setForeground(new Color(46, 204, 113));
+                } else {
+                    statusLabel.setText("❌ 执行失败");
+                    statusLabel.setForeground(new Color(231, 76, 60));
+                    JOptionPane.showMessageDialog(panel,
+                        "执行配置失败:\n" + throwable.getMessage(),
+                        "错误",
+                        JOptionPane.ERROR_MESSAGE);
+                }
+                refreshCollectedData();
+            });
+        });
+    }
+    
+    private CompletableFuture<Void> runInterfacePhase(ActiveProbeConfigDialog.ExecutionConfig config) {
+        return switch (config.getInterfaceSource()) {
+            case MANUAL -> processManualTargets(config.getManualEntries(), false, false);
+            case AUTO -> runAutoInterfaceDiscovery();
+            case COLLECTED -> {
+                Map<String, Set<String>> targets = resolveHostsByScope(
+                    config.getSelectedHostsByDomain(),
+                    config.getInterfaceScope()
+                );
+                if (targets.isEmpty()) {
+                    yield CompletableFuture.failedFuture(
+                        new IllegalArgumentException("所选主域没有可用子域可执行接口探测。"));
+                }
+                yield CompletableFuture.runAsync(() -> runInterfaceOnTargets(targets, config.getInterfaceScope()));
+            }
+        };
+    }
+    
+    private CompletableFuture<Void> runArjunPhase(ActiveProbeConfigDialog.ExecutionConfig config) {
+        return switch (config.getInterfaceSource()) {
+            case MANUAL -> {
+                boolean interfaceFirst = config.getStrategy() == ActiveProbeConfigDialog.ProbeMode.INTERFACE_THEN_ARJUN;
+                yield processManualTargets(config.getManualEntries(), true, interfaceFirst);
+            }
+            case AUTO -> runAutoArjunScan();
+            case COLLECTED -> {
+                Map<String, Set<String>> targets = resolveHostsByScope(
+                    config.getSelectedHostsByDomain(),
+                    config.getParameterScope()
+                );
+                if (targets.isEmpty()) {
+                    yield CompletableFuture.failedFuture(
+                        new IllegalArgumentException("所选主域没有可用子域可执行参数探测。"));
+                }
+                yield CompletableFuture.runAsync(() -> runArjunOnTargets(targets, config.getParameterScope()));
+            }
+        };
+    }
+    
+    private Map<String, Set<String>> resolveHostsByScope(Map<String, Set<String>> selected,
+                                                        ActiveProbeConfigDialog.ScopeOption scope) {
+        Map<String, Set<String>> resolved = new LinkedHashMap<>();
+        ParameterCollector collector = realtimeScanner.getParameterCollector();
+        selected.forEach((mainDomain, hosts) -> {
+            if (mainDomain == null || mainDomain.isBlank()) {
+                return;
+            }
+            Set<String> resolvedHosts = scope == ActiveProbeConfigDialog.ScopeOption.ALL_SUBDOMAINS
+                ? new LinkedHashSet<>(collector.getHostsForMainDomain(mainDomain))
+                : new LinkedHashSet<>(hosts);
+            resolvedHosts.removeIf(h -> h == null || h.isBlank() || "(unknown)".equals(h));
+            if (!resolvedHosts.isEmpty()) {
+                resolved.put(mainDomain, resolvedHosts);
+            }
+        });
+        return resolved;
+    }
+    
+    private void runInterfaceOnTargets(Map<String, Set<String>> targets,
+                                       ActiveProbeConfigDialog.ScopeOption scope) {
+        if (scope == ActiveProbeConfigDialog.ScopeOption.ALL_SUBDOMAINS) {
+            targets.keySet().forEach(this::triggerInterfaceDiscoveryForMainDomain);
+        } else {
+            targets.forEach((mainDomain, hosts) -> hosts.forEach(host ->
+                triggerInterfaceDiscoveryForHost(mainDomain, host)));
+        }
+    }
+    
+    private void runArjunOnTargets(Map<String, Set<String>> targets,
+                                   ActiveProbeConfigDialog.ScopeOption scope) {
+        if (scope == ActiveProbeConfigDialog.ScopeOption.ALL_SUBDOMAINS) {
+            targets.keySet().forEach(domain ->
+                activeScanner.getRealtimeScanner().triggerArjunForMainDomain(domain));
+        } else {
+            targets.forEach((mainDomain, hosts) -> hosts.forEach(host ->
+                activeScanner.getRealtimeScanner().triggerArjunForHost(mainDomain, host)));
+        }
+    }
+    
+    private void disableActionButtons(boolean disable) {
+        arjunScanButton.setEnabled(!disable);
+        interfaceScanButton.setEnabled(!disable);
+        refreshDataButton.setEnabled(!disable);
     }
     
     /**
