@@ -239,6 +239,32 @@ public class ParameterCollector {
     }
     
     /**
+     * ✅ 直接添加参数（用于数据恢复，不需要endpoint）
+     * 
+     * @param host 子域名
+     * @param parameter 参数名
+     * @param mainDomain 主域名
+     */
+    public void addParameterDirectly(String host, String parameter, String mainDomain) {
+        DomainData domainData = domainDataMap.computeIfAbsent(mainDomain, DomainData::new);
+        int beforeSize = domainData.getAllParameters().size();
+        domainData.addParameterDirectly(host, parameter);
+        int afterSize = domainData.getAllParameters().size();
+        // ✅ 记录所有参数添加情况（包括已存在的参数）
+        if (afterSize > beforeSize) {
+            api.logging().raiseDebugEvent(String.format(
+                "恢复参数: 主域 %s, 子域 %s, 参数 %s (主域参数数: %d -> %d) [新增]",
+                mainDomain, host, parameter, beforeSize, afterSize
+            ));
+        } else {
+            api.logging().raiseDebugEvent(String.format(
+                "恢复参数: 主域 %s, 子域 %s, 参数 %s (主域参数数: %d) [已存在]",
+                mainDomain, host, parameter, beforeSize
+            ));
+        }
+    }
+    
+    /**
      * 获取主域名的所有 host
      */
     public Set<String> getHostsForMainDomain(String mainDomain) {
@@ -766,6 +792,22 @@ public class ParameterCollector {
             }
             
             // ✅ 如果是新参数，更新时间
+            if (isNew) {
+                updateLastUpdateTime();
+            }
+        }
+        
+        /**
+         * ✅ 直接添加参数（用于数据恢复，不需要endpoint）
+         * 
+         * @param host 子域名
+         * @param parameter 参数名
+         */
+        public void addParameterDirectly(String host, String parameter) {
+            boolean isNew = allParameters.add(parameter);
+            hosts.add(host);
+            hostParameters.computeIfAbsent(host, k -> ConcurrentHashMap.newKeySet())
+                         .add(parameter);
             if (isNew) {
                 updateLastUpdateTime();
             }

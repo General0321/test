@@ -371,6 +371,67 @@ public class RealtimeScannerRefactored {
      * @param targetHost 目标子域名（探测的目标host）
      */
     public void triggerArjunForHost(String mainDomain, String targetHost) {
+        // ✅ 默认使用主域下所有子域的接口和参数（保持向后兼容）
+        triggerArjunForHost(mainDomain, targetHost, false, false);
+    }
+    
+    /**
+     * ✅ 为指定子域名触发Arjun扫描（支持参数范围选择）
+     * 
+     * @param mainDomain 主域名
+     * @param targetHost 目标子域名（探测的目标host）
+     * @param useOnlyHostParameters 如果为true，只使用该子域的参数；如果为false，使用主域下所有子域的参数
+     */
+    public void triggerArjunForHost(String mainDomain, String targetHost, boolean useOnlyHostParameters) {
+        // ✅ 保持向后兼容：接口范围默认跟随参数范围
+        triggerArjunForHost(mainDomain, targetHost, useOnlyHostParameters, useOnlyHostParameters);
+    }
+    
+    /**
+     * ✅ 为指定子域名触发Arjun扫描（支持接口范围和参数范围独立选择）
+     * 
+     * @param mainDomain 主域名
+     * @param targetHost 目标子域名（探测的目标host）
+     * @param useOnlyHostEndpoints 如果为true，只使用该子域的接口；如果为false，使用主域下所有子域的接口
+     * @param useOnlyHostParameters 如果为true，只使用该子域的参数；如果为false，使用主域下所有子域的参数
+     */
+    public void triggerArjunForHost(String mainDomain, String targetHost, 
+                                    boolean useOnlyHostEndpoints, boolean useOnlyHostParameters) {
+        // ✅ 向后兼容：获取数据后调用性能优化版本
+        Set<ParameterCollector.EndpointKey> allEndpointKeys = null;
+        Set<String> allParameters = null;
+        Set<String> keywords = null;
+        
+        if (!useOnlyHostEndpoints) {
+            allEndpointKeys = parameterCollector.getEndpointKeysForMainDomain(mainDomain);
+        }
+        
+        if (!useOnlyHostParameters) {
+            allParameters = parameterCollector.getParametersForMainDomain(mainDomain);
+            if (parameterCollector.getCollectionMode() == ParameterCollector.CollectionMode.PARAMETERS_AND_KEYWORDS) {
+                keywords = parameterCollector.getKeywordsForMainDomain(mainDomain);
+            }
+        }
+        
+        triggerArjunForHost(mainDomain, targetHost, useOnlyHostEndpoints, useOnlyHostParameters,
+            allEndpointKeys, allParameters, keywords);
+    }
+    
+    /**
+     * ✅ 为指定子域名触发Arjun扫描（性能优化版本：接收已缓存的数据，避免重复获取）
+     * 
+     * @param mainDomain 主域名
+     * @param targetHost 目标子域名（探测的目标host）
+     * @param useOnlyHostEndpoints 如果为true，只使用该子域的接口；如果为false，使用主域下所有子域的接口
+     * @param useOnlyHostParameters 如果为true，只使用该子域的参数；如果为false，使用主域下所有子域的参数
+     * @param allEndpointKeys 主域下所有接口（已缓存，如果为null则内部获取）
+     * @param allParameters 主域下所有参数（已缓存，如果为null则内部获取）
+     * @param keywords 主域下所有关键词（已缓存，如果为null则内部获取）
+     */
+    public void triggerArjunForHost(String mainDomain, String targetHost, 
+                                    boolean useOnlyHostEndpoints, boolean useOnlyHostParameters,
+                                    Set<ParameterCollector.EndpointKey> allEndpointKeys,
+                                    Set<String> allParameters, Set<String> keywords) {
         try {
             // ✅ 修复：检查主动探测总开关
             if (!arjunEnabled) {
@@ -378,44 +439,140 @@ public class RealtimeScannerRefactored {
                 return;
             }
             
-            // ✅ 获取主域名下所有收集的参数
-            Set<String> collectedParams = parameterCollector.getParametersForMainDomain(mainDomain);
+            // ✅ 根据参数范围选择获取参数
+            Set<String> collectedParams;
+            if (useOnlyHostParameters) {
+                // ✅ 仅使用该子域的参数
+                collectedParams = parameterCollector.getParametersForHost(targetHost);
+                api.logging().raiseInfoEvent(String.format(
+                    "使用仅选中子域参数模式: 子域名 %s, 参数数=%d",
+                    targetHost, collectedParams.size()
+                ));
+            } else {
+                // ✅ 使用主域下所有子域的参数合集（包含主域本身）
+                if (allParameters != null) {
+                    collectedParams = new HashSet<>(allParameters);
+                    api.logging().raiseInfoEvent(String.format(
+                        "使用主域所有子域参数合集（缓存）: 主域名 %s, 子域名 %s, 参数数=%d",
+                        mainDomain, targetHost, collectedParams.size()
+                    ));
+                } else {
+                    collectedParams = parameterCollector.getParametersForMainDomain(mainDomain);
+                    api.logging().raiseInfoEvent(String.format(
+                        "使用主域所有子域参数合集（实时获取）: 主域名 %s, 子域名 %s, 参数数=%d",
+                        mainDomain, targetHost, collectedParams.size()
+                    ));
+                }
+            }
             
             // 如果启用了关键词收集，将关键词也加入参数列表
             if (parameterCollector.getCollectionMode() == ParameterCollector.CollectionMode.PARAMETERS_AND_KEYWORDS) {
-                Set<String> keywords = parameterCollector.getKeywordsForMainDomain(mainDomain);
-                collectedParams.addAll(keywords);
+                if (keywords != null) {
+                    collectedParams.addAll(keywords);
+                } else {
+                    Set<String> keywordsFromCollector = parameterCollector.getKeywordsForMainDomain(mainDomain);
+                    collectedParams.addAll(keywordsFromCollector);
+                }
             }
             
-            // ✅ 获取主域名下所有收集的接口
-            Set<ParameterCollector.EndpointKey> allEndpointKeys = 
-                parameterCollector.getEndpointKeysForMainDomain(mainDomain);
+            // ✅ 获取主域名下所有收集的接口（使用缓存或获取）
+            Set<ParameterCollector.EndpointKey> allEndpointKeysToUse;
+            if (allEndpointKeys != null) {
+                allEndpointKeysToUse = allEndpointKeys;
+            } else {
+                allEndpointKeysToUse = parameterCollector.getEndpointKeysForMainDomain(mainDomain);
+            }
             
-            api.logging().raiseInfoEvent(String.format(
-                "🔍 对子域名 %s 进行Arjun扫描（使用主域名 %s 的所有接口和参数）: 参数数=%d, 接口数=%d",
-                targetHost, mainDomain, collectedParams.size(), allEndpointKeys.size()
-            ));
+            // ✅ 根据接口范围选择过滤接口
+            Set<ParameterCollector.EndpointKey> endpointKeysToScan;
+            if (useOnlyHostEndpoints) {
+                // 只使用该子域的接口
+                endpointKeysToScan = new HashSet<>();
+                for (ParameterCollector.EndpointKey epKey : allEndpointKeysToUse) {
+                    if (epKey.host.equals(targetHost)) {
+                        endpointKeysToScan.add(epKey);
+                    }
+                }
+                api.logging().raiseInfoEvent(String.format(
+                    "🔍 对子域名 %s 进行Arjun扫描（接口范围: 仅选中子域, 参数范围: %s）: 参数数=%d, 接口数=%d",
+                    targetHost, useOnlyHostParameters ? "仅选中子域" : "主域所有子域", 
+                    collectedParams.size(), endpointKeysToScan.size()
+                ));
+            } else {
+                // 使用主域下所有子域的接口
+                endpointKeysToScan = allEndpointKeysToUse;
+                api.logging().raiseInfoEvent(String.format(
+                    "🔍 对子域名 %s 进行Arjun扫描（接口范围: 主域所有子域, 参数范围: %s）: 参数数=%d, 接口数=%d",
+                    targetHost, useOnlyHostParameters ? "仅选中子域" : "主域所有子域",
+                    collectedParams.size(), endpointKeysToScan.size()
+                ));
+            }
+            
+            // ✅ 检查接口和参数是否为空
+            if (endpointKeysToScan.isEmpty()) {
+                api.logging().raiseInfoEvent(String.format(
+                    "⚠️ 子域名 %s 没有可用的接口，跳过 Arjun 扫描",
+                    targetHost
+                ));
+                return;
+            }
+            
+            if (collectedParams.isEmpty()) {
+                // ✅ 详细诊断：为什么参数为空
+                api.logging().raiseInfoEvent(String.format(
+                    "⚠️ 子域名 %s 没有可用的参数，跳过 Arjun 扫描\n" +
+                    "   诊断信息：\n" +
+                    "   - 参数范围: %s\n" +
+                    "   - 主域名: %s\n" +
+                    "   - 是否使用缓存: %s\n" +
+                    "   - 建议：检查参数收集数据或尝试清空Arjun缓存后重新收集",
+                    targetHost,
+                    useOnlyHostParameters ? "仅选中子域" : "主域所有子域",
+                    mainDomain,
+                    allParameters != null ? "是" : "否"
+                ));
+                return;
+            }
             
             int scanned = 0;
-            for (ParameterCollector.EndpointKey epKey : allEndpointKeys) {
+            int skippedEmptyParams = 0;
+            int skippedNoTemplate = 0;
+            int skippedModifyFailed = 0;
+            
+            for (ParameterCollector.EndpointKey epKey : endpointKeysToScan) {
                 // ✅ 计算增量参数（未扫描过的）
                 Set<String> incrementalParams = parameterManager.getIncrementalParameters(
                     epKey.method, targetHost, epKey.contentType, epKey.endpoint, collectedParams
                 );
                 
                 if (incrementalParams.isEmpty()) {
+                    skippedEmptyParams++;
+                    api.logging().raiseDebugEvent(String.format(
+                        "跳过接口 %s %s (%s) %s：所有参数已扫描过",
+                        epKey.method, targetHost, epKey.contentType, epKey.endpoint
+                    ));
                     continue;
                 }
                 
                 // ✅ 获取原始请求模板，但修改host为目标子域名
                 HttpRequest originalTemplate = parameterCollector.getEndpointTemplate(mainDomain, epKey);
                 if (originalTemplate == null) {
+                    skippedNoTemplate++;
+                    api.logging().raiseDebugEvent(String.format(
+                        "跳过接口 %s %s (%s) %s：未找到请求模板",
+                        epKey.method, targetHost, epKey.contentType, epKey.endpoint
+                    ));
                     continue;
                 }
                 
                 // ✅ 修改请求的host为目标子域名
                 HttpRequest modifiedRequest = modifyRequestHost(originalTemplate, targetHost);
                 if (modifiedRequest == null) {
+                    skippedModifyFailed++;
+                    api.logging().raiseDebugEvent(String.format(
+                        "跳过接口 %s %s (%s) %s：修改host失败",
+                        epKey.method, targetHost, epKey.contentType, epKey.endpoint
+                    ));
                     continue;
                 }
                 
@@ -470,10 +627,20 @@ public class RealtimeScannerRefactored {
                 scanned++;
             }
             
-            api.logging().raiseInfoEvent(String.format(
-                "✅ 子域名 %s Arjun扫描完成: 扫描了 %d 个接口",
-                targetHost, scanned
-            ));
+            // ✅ 详细的统计日志
+            if (scanned > 0) {
+                api.logging().raiseInfoEvent(String.format(
+                    "✅ 子域名 %s Arjun扫描完成: 扫描了 %d 个接口, 跳过 %d 个（参数已扫描: %d, 无模板: %d, 修改失败: %d）",
+                    targetHost, scanned, skippedEmptyParams + skippedNoTemplate + skippedModifyFailed,
+                    skippedEmptyParams, skippedNoTemplate, skippedModifyFailed
+                ));
+            } else {
+                api.logging().raiseInfoEvent(String.format(
+                    "⚠️ 子域名 %s Arjun扫描: 没有发送任何请求（跳过 %d 个接口：参数已扫描: %d, 无模板: %d, 修改失败: %d）",
+                    targetHost, skippedEmptyParams + skippedNoTemplate + skippedModifyFailed,
+                    skippedEmptyParams, skippedNoTemplate, skippedModifyFailed
+                ));
+            }
             
         } catch (Exception e) {
             api.logging().raiseErrorEvent("触发子域名Arjun扫描时出错: " + e.getMessage());

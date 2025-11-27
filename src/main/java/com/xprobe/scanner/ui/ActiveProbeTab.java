@@ -13,7 +13,9 @@ import com.xprobe.scanner.config.XProbeConfig;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
+import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.TableColumn;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -50,6 +52,7 @@ public class ActiveProbeTab {
     private JButton interfaceScanButton;
     private JButton clearResultsButton;
     private JButton clearCacheButton;  // ✅ 清空Arjun缓存按钮
+    private JButton stopAllTasksButton;
     private JProgressBar progressBar;
     
     // 模式控制
@@ -368,6 +371,19 @@ public class ActiveProbeTab {
         
         // ✅ 禁用表格的默认拖拽选择行为
         arjunResultTable.setDragEnabled(false);
+        
+        // ✅ 表格选择互斥：当一个表格被选中时，清除另一个表格的选择
+        collectedDataTable.getSelectionModel().addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting() && collectedDataTable.getSelectedRowCount() > 0) {
+                arjunResultTable.clearSelection();
+            }
+        });
+        
+        arjunResultTable.getSelectionModel().addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting() && arjunResultTable.getSelectedRowCount() > 0) {
+                collectedDataTable.clearSelection();
+            }
+        });
 
         // 状态标签
         statusLabel = new JLabel("🟢 就绪 - 正在监听Burp流量...");
@@ -387,6 +403,8 @@ public class ActiveProbeTab {
         refreshDataButton = createStyledButton("刷新已收集数据", new Color(52, 152, 219));
         clearResultsButton = createStyledButton("清空 Arjun 结果", new Color(231, 76, 60));
         clearCacheButton = createStyledButton("清空 Arjun 缓存", new Color(230, 126, 34));  // ✅ 清空Arjun扫描记录
+        stopAllTasksButton = createStyledButton("⏹️ 停止所有任务", new Color(192, 57, 43));
+        stopAllTasksButton.addActionListener(e -> stopAllTasks());
         
         // 模式控制
         realtimeModeRadio = new JRadioButton("实时监听模式");
@@ -543,6 +561,7 @@ public class ActiveProbeTab {
         
         JScrollPane resultScrollPane = new JScrollPane(arjunResultTable);
         resultScrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        resultScrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
         resultScrollPane.getViewport().setScrollMode(JViewport.BLIT_SCROLL_MODE);
         resultPanel.add(resultScrollPane, BorderLayout.CENTER);
 
@@ -608,8 +627,11 @@ public class ActiveProbeTab {
         interfaceScanButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
         arjunScanButton.setPreferredSize(new Dimension(140, 32));
         arjunScanButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
+        stopAllTasksButton.setPreferredSize(new Dimension(110, 28));
+        stopAllTasksButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
         group.add(interfaceScanButton);
         group.add(arjunScanButton);
+        group.add(stopAllTasksButton);  // ✅ 停止所有任务按钮放在第一行最后
         return group;
     }
     
@@ -828,12 +850,19 @@ public class ActiveProbeTab {
     private CompletableFuture<Void> runInterfacePhase(ActiveProbeConfigDialog.ExecutionConfig config) {
         return switch (config.getInterfaceSource()) {
             case MANUAL -> processManualTargets(config.getManualEntries(), false, false);
-            case AUTO -> runAutoInterfaceDiscovery();
+            case AUTO -> {
+                // ✅ 目标子域保持勾选的，不扩展；接口范围传递给探测方法，决定使用哪些接口
+                Map<String, Set<String>> targets = config.getSelectedHostsByDomain();
+                if (targets.isEmpty()) {
+                    yield CompletableFuture.failedFuture(
+                        new IllegalArgumentException("自动采集模式下没有可用子域可执行接口探测。"));
+                }
+                yield CompletableFuture.runAsync(() ->
+                    runAutoInterfaceDiscoveryOnTargets(targets, config.getInterfaceScope()));
+            }
             case COLLECTED -> {
-                Map<String, Set<String>> targets = resolveHostsByScope(
-                    config.getSelectedHostsByDomain(),
-                    config.getInterfaceScope()
-                );
+                // ✅ 目标子域保持勾选的，不扩展；接口范围传递给探测方法，决定使用哪些接口
+                Map<String, Set<String>> targets = config.getSelectedHostsByDomain();
                 if (targets.isEmpty()) {
                     yield CompletableFuture.failedFuture(
                         new IllegalArgumentException("所选主域没有可用子域可执行接口探测。"));
@@ -846,24 +875,65 @@ public class ActiveProbeTab {
     private CompletableFuture<Void> runArjunPhase(ActiveProbeConfigDialog.ExecutionConfig config) {
         return switch (config.getInterfaceSource()) {
             case MANUAL -> {
+                // ✅ 手动输入模式下，接口探测使用手动输入的URL，但参数探测复用已收集数据的逻辑
+                // 参数探测按照勾选的目标范围和参数范围选项来处理
                 boolean interfaceFirst = config.getStrategy() == ActiveProbeConfigDialog.ProbeMode.INTERFACE_THEN_ARJUN;
-                yield processManualTargets(config.getManualEntries(), true, interfaceFirst);
+                
+                // 如果策略是先接口再参数，先执行接口探测
+                CompletableFuture<Void> interfacePhase = interfaceFirst
+                    ? processManualTargets(config.getManualEntries(), false, false)
+                    : CompletableFuture.completedFuture(null);
+                
+                // 参数探测：目标子域保持勾选的，不扩展；接口范围和参数范围都传递给探测方法
+                CompletableFuture<Void> arjunPhase = CompletableFuture.runAsync(() -> {
+                    Map<String, Set<String>> targets = config.getSelectedHostsByDomain();
+                    if (targets.isEmpty()) {
+                        api.logging().raiseInfoEvent("⚠️ 手动输入模式下没有可用子域可执行参数探测。");
+                        return;
+                    }
+                    runArjunOnTargets(targets, config.getInterfaceScope(), config.getParameterScope());
+                });
+                
+                yield interfacePhase.thenCompose(v -> arjunPhase);
             }
-            case AUTO -> runAutoArjunScan();
+            case AUTO -> {
+                // ✅ 自动采集模式下，接口探测使用自动采集逻辑，但参数探测复用已收集数据的逻辑
+                // 因为参数是从已收集的数据中获取的，而不是从自动采集的接口中解析的
+                // ✅ 目标子域保持勾选的，不扩展；参数范围传递给探测方法，决定使用哪些参数
+                Map<String, Set<String>> targets = config.getSelectedHostsByDomain();
+                if (targets.isEmpty()) {
+                    yield CompletableFuture.failedFuture(
+                        new IllegalArgumentException("自动采集模式下没有可用子域可执行参数探测。"));
+                }
+                // ✅ 复用已收集数据的参数探测逻辑
+                yield CompletableFuture.runAsync(() -> runArjunOnTargets(targets, config.getInterfaceScope(), config.getParameterScope()));
+            }
             case COLLECTED -> {
-                Map<String, Set<String>> targets = resolveHostsByScope(
-                    config.getSelectedHostsByDomain(),
-                    config.getParameterScope()
-                );
+                // ✅ 目标子域保持勾选的，不扩展；接口范围和参数范围都传递给探测方法
+                Map<String, Set<String>> targets = config.getSelectedHostsByDomain();
                 if (targets.isEmpty()) {
                     yield CompletableFuture.failedFuture(
                         new IllegalArgumentException("所选主域没有可用子域可执行参数探测。"));
                 }
-                yield CompletableFuture.runAsync(() -> runArjunOnTargets(targets, config.getParameterScope()));
+                yield CompletableFuture.runAsync(() -> runArjunOnTargets(targets, config.getInterfaceScope(), config.getParameterScope()));
             }
         };
     }
     
+    /**
+     * ✅ 根据范围选项解析目标子域集合（已废弃，不再用于接口/参数探测阶段）
+     * 
+     * 注意：接口/参数范围选项不应该扩展目标子域列表，而应该只影响使用的接口/参数范围。
+     * 目标子域应该始终保持勾选的结果不变。
+     * 
+     * 正确的逻辑：
+     * - 目标选择：决定探测哪些子域（只探测勾选的）
+     * - 接口范围：决定使用哪些接口（仅选中子域接口 vs 主域所有子域接口），传递给探测方法
+     * - 参数范围：决定使用哪些参数（仅选中子域参数 vs 主域所有子域参数），传递给探测方法
+     * 
+     * @deprecated 此方法已不再使用，保留仅用于参考
+     */
+    @Deprecated
     private Map<String, Set<String>> resolveHostsByScope(Map<String, Set<String>> selected,
                                                         ActiveProbeConfigDialog.ScopeOption scope) {
         Map<String, Set<String>> resolved = new LinkedHashMap<>();
@@ -883,27 +953,222 @@ public class ActiveProbeTab {
         return resolved;
     }
     
+    /**
+     * ✅ 根据接口范围选项执行接口探测（性能优化：在主域级别缓存数据，避免重复获取）
+     * 
+     * 逻辑说明：
+     * 1. 如果 scope = SELECTED_SUBDOMAINS（仅选中子域接口）：
+     *    对每个子域，只探测该子域的接口
+     * 
+     * 2. 如果 scope = ALL_SUBDOMAINS（主域所有子域接口）：
+     *    对每个子域，探测主域下所有子域的接口（但请求的host还是该子域）
+     * 
+     * @param targets 目标子域集合，格式：Map<主域, Set<子域>>
+     * @param scope 接口范围选项
+     */
     private void runInterfaceOnTargets(Map<String, Set<String>> targets,
                                        ActiveProbeConfigDialog.ScopeOption scope) {
-        if (scope == ActiveProbeConfigDialog.ScopeOption.ALL_SUBDOMAINS) {
-            targets.keySet().forEach(this::triggerInterfaceDiscoveryForMainDomain);
-        } else {
-            targets.forEach((mainDomain, hosts) -> hosts.forEach(host ->
-                triggerInterfaceDiscoveryForHost(mainDomain, host)));
+        if (targets.isEmpty()) {
+            return;
         }
+
+        // ✅ 判断是否只使用选中子域的接口
+        boolean useOnlyHostEndpoints = scope == ActiveProbeConfigDialog.ScopeOption.SELECTED_SUBDOMAINS;
+        ParameterCollector collector = realtimeScanner.getParameterCollector();
+
+        // ✅ 性能优化：在主域级别缓存接口数据，避免对每个子域重复获取
+        targets.forEach((mainDomain, hosts) -> {
+            if (hosts == null || hosts.isEmpty()) {
+                api.logging().raiseDebugEvent(String.format(
+                    "接口探测跳过：主域名 %s 无可用子域（scope=%s）",
+                    mainDomain, scope));
+                return;
+            }
+
+            // ✅ 只获取一次主域的所有接口（如果多个子域属于同一主域，避免重复获取）
+            Set<ParameterCollector.EndpointKey> allEndpointKeys = 
+                collector.getEndpointKeysForMainDomain(mainDomain);
+            
+            if (allEndpointKeys.isEmpty()) {
+                api.logging().raiseDebugEvent(String.format(
+                    "接口探测跳过：主域名 %s 没有可用的接口",
+                    mainDomain));
+                return;
+            }
+
+            // ✅ 批量处理同一主域下的所有子域
+            for (String host : hosts) {
+                triggerInterfaceDiscoveryForHost(mainDomain, host, useOnlyHostEndpoints, allEndpointKeys, collector);
+            }
+        });
     }
     
+    /**
+     * ✅ 根据接口范围选项执行自动接口采集
+     * 
+     * 逻辑说明：
+     * 1. 如果 scope = SELECTED_SUBDOMAINS（仅选中子域接口）：
+     *    对每个子域，只探测该子域的接口
+     * 
+     * 2. 如果 scope = ALL_SUBDOMAINS（主域所有子域接口）：
+     *    对每个子域，探测主域下所有子域的接口（但请求的host还是该子域）
+     * 
+     * @param targets 目标子域集合，格式：Map<主域, Set<子域>>
+     * @param scope 接口范围选项
+     */
+    private void runAutoInterfaceDiscoveryOnTargets(Map<String, Set<String>> targets,
+                                                    ActiveProbeConfigDialog.ScopeOption scope) {
+        if (targets.isEmpty()) {
+            return;
+        }
+
+        // ✅ 判断是否只使用选中子域的接口
+        boolean useOnlyHostEndpoints = scope == ActiveProbeConfigDialog.ScopeOption.SELECTED_SUBDOMAINS;
+
+        targets.forEach((mainDomain, hosts) -> {
+            if (hosts == null || hosts.isEmpty()) {
+                api.logging().raiseDebugEvent(String.format(
+                    "自动接口采集跳过：主域名 %s 无可用子域（scope=%s）",
+                    mainDomain, scope));
+                return;
+            }
+
+            hosts.forEach(host -> triggerAutoInterfaceDiscovery(mainDomain, host, useOnlyHostEndpoints));
+        });
+    }
+
+    /**
+     * ✅ 根据接口范围和参数范围选项执行Arjun参数探测（性能优化：在主域级别缓存数据，避免重复获取）
+     * 
+     * 逻辑说明：
+     * 1. 接口范围：
+     *    - SELECTED_SUBDOMAINS（仅选中子域接口）：只使用该子域的接口
+     *    - ALL_SUBDOMAINS（主域所有子域接口）：使用主域下所有子域的接口
+     * 
+     * 2. 参数范围：
+     *    - SELECTED_SUBDOMAINS（仅选中子域参数）：只使用该子域的参数
+     *    - ALL_SUBDOMAINS（主域所有子域参数）：使用主域下所有子域的参数
+     * 
+     * 注意：接口范围和参数范围是独立的，可以不同步。
+     * 
+     * @param targets 目标子域集合，格式：Map<主域, Set<子域>>
+     * @param interfaceScope 接口范围选项
+     * @param parameterScope 参数范围选项
+     */
     private void runArjunOnTargets(Map<String, Set<String>> targets,
-                                   ActiveProbeConfigDialog.ScopeOption scope) {
-        if (scope == ActiveProbeConfigDialog.ScopeOption.ALL_SUBDOMAINS) {
-            targets.keySet().forEach(domain ->
-                activeScanner.getRealtimeScanner().triggerArjunForMainDomain(domain));
-        } else {
-            targets.forEach((mainDomain, hosts) -> hosts.forEach(host ->
-                activeScanner.getRealtimeScanner().triggerArjunForHost(mainDomain, host)));
+                                   ActiveProbeConfigDialog.ScopeOption interfaceScope,
+                                   ActiveProbeConfigDialog.ScopeOption parameterScope) {
+        if (targets.isEmpty()) {
+            api.logging().raiseInfoEvent("⚠️ Arjun 探测：没有选择任何目标子域");
+            return;
         }
+
+        // ✅ 判断接口范围和参数范围
+        boolean useOnlyHostEndpoints = interfaceScope == ActiveProbeConfigDialog.ScopeOption.SELECTED_SUBDOMAINS;
+        boolean useOnlyHostParameters = parameterScope == ActiveProbeConfigDialog.ScopeOption.SELECTED_SUBDOMAINS;
+
+        api.logging().raiseInfoEvent(String.format(
+            "🚀 开始 Arjun 参数探测：目标数=%d, 接口范围=%s, 参数范围=%s",
+            targets.values().stream().mapToInt(Set::size).sum(),
+            useOnlyHostEndpoints ? "仅选中子域" : "主域所有子域",
+            useOnlyHostParameters ? "仅选中子域" : "主域所有子域"
+        ));
+
+        // ✅ 性能优化：在主域级别缓存数据，避免对每个子域重复获取
+        ParameterCollector collector = realtimeScanner.getParameterCollector();
+        
+        targets.forEach((mainDomain, hosts) -> {
+            if (hosts == null || hosts.isEmpty()) {
+                api.logging().raiseDebugEvent(String.format(
+                    "Arjun 触发跳过：主域名 %s 无可用子域（接口范围=%s, 参数范围=%s）",
+                    mainDomain, interfaceScope, parameterScope));
+                return;
+            }
+
+            // ✅ 只获取一次主域的数据（如果多个子域属于同一主域，避免重复获取）
+            // 注意：无论接口范围如何，都需要获取主域下所有接口，因为需要根据接口范围进行过滤
+            Set<ParameterCollector.EndpointKey> allEndpointKeys = collector.getEndpointKeysForMainDomain(mainDomain);
+            Set<String> allParameters = null;
+            Set<String> keywords = null;
+            
+            // ✅ 诊断：检查主域数据是否存在
+            Set<String> allHosts = collector.getHostsForMainDomain(mainDomain);
+            api.logging().raiseInfoEvent(String.format(
+                "主域名 %s: 接口数=%d, 子域数=%d, 已知子域列表=%s",
+                mainDomain, allEndpointKeys.size(), hosts.size(), allHosts
+            ));
+            
+            if (allEndpointKeys.isEmpty()) {
+                api.logging().raiseInfoEvent(String.format(
+                    "⚠️ 主域名 %s 没有可用的接口，跳过 Arjun 探测",
+                    mainDomain));
+                return;
+            }
+            
+            if (!useOnlyHostParameters) {
+                // ✅ 需要主域所有子域的参数合集（包含主域本身）
+                allParameters = collector.getParametersForMainDomain(mainDomain);
+                
+                // ✅ 诊断：如果参数为空，检查各个子域的参数
+                if (allParameters == null || allParameters.isEmpty()) {
+                    api.logging().raiseInfoEvent(String.format(
+                        "⚠️ 主域名 %s: 获取主域所有子域参数合集为空，检查各个子域参数",
+                        mainDomain
+                    ));
+                    for (String host : hosts) {
+                        Set<String> hostParams = collector.getParametersForHost(host);
+                        api.logging().raiseInfoEvent(String.format(
+                            "   子域 %s: 参数数=%d, 参数列表=%s",
+                            host, hostParams.size(), hostParams.size() > 0 ? hostParams.toString() : "空"
+                        ));
+                    }
+                } else {
+                    api.logging().raiseInfoEvent(String.format(
+                        "主域名 %s: 获取主域所有子域参数合集，参数数=%d",
+                        mainDomain, allParameters.size()
+                    ));
+                }
+                
+                // 如果启用了关键词收集，也获取关键词
+                if (collector.getCollectionMode() == ParameterCollector.CollectionMode.PARAMETERS_AND_KEYWORDS) {
+                    keywords = collector.getKeywordsForMainDomain(mainDomain);
+                    api.logging().raiseInfoEvent(String.format(
+                        "主域名 %s: 获取关键词，关键词数=%d",
+                        mainDomain, keywords != null ? keywords.size() : 0
+                    ));
+                }
+            } else {
+                api.logging().raiseInfoEvent(String.format(
+                    "参数范围=仅选中子域，将在每个子域级别获取参数"
+                ));
+            }
+
+            // ✅ 批量处理同一主域下的所有子域
+            for (String host : hosts) {
+                api.logging().raiseDebugEvent(String.format(
+                    "开始对子域名 %s 进行 Arjun 探测（接口范围=%s, 参数范围=%s）",
+                    host, useOnlyHostEndpoints ? "仅选中子域" : "主域所有子域",
+                    useOnlyHostParameters ? "仅选中子域" : "主域所有子域"));
+                activeScanner.getRealtimeScanner().triggerArjunForHost(mainDomain, host, useOnlyHostEndpoints, useOnlyHostParameters,
+                    allEndpointKeys, allParameters, keywords);
+            }
+        });
     }
     
+    private void triggerAutoInterfaceDiscovery(String mainDomain, String host) {
+        // ✅ 默认只使用该子域的接口（保持向后兼容）
+        triggerAutoInterfaceDiscovery(mainDomain, host, true);
+    }
+    
+    private void triggerAutoInterfaceDiscovery(String mainDomain, String host, boolean useOnlyHostEndpoints) {
+        api.logging().raiseInfoEvent(String.format(
+            "⚙️ 自动采集（接口）预留：主域名 %s, 子域名 %s, 接口范围=%s。暂时回退到缓存数据进行探测。",
+            mainDomain, host, useOnlyHostEndpoints ? "仅选中子域" : "主域所有子域"));
+
+        // TODO: 实现基于响应体/JS 的接口解析逻辑
+        triggerInterfaceDiscoveryForHost(mainDomain, host, useOnlyHostEndpoints);
+    }
+
     private void disableActionButtons(boolean disable) {
         arjunScanButton.setEnabled(!disable);
         interfaceScanButton.setEnabled(!disable);
@@ -1045,6 +1310,12 @@ public class ActiveProbeTab {
                     }
                 }
                 
+                // ✅ 修复频闪：先清除选中状态，避免清空表格时的视觉闪烁
+                collectedDataTable.clearSelection();
+                
+                // ✅ 使用批量更新模式，减少渲染次数
+                collectedDataTable.getSelectionModel().setValueIsAdjusting(true);
+                
                 // 清空并重新填充表格
                 collectedDataTableModel.setRowCount(0);
                 
@@ -1100,28 +1371,28 @@ public class ActiveProbeTab {
                 
                 // ✅ 修复：恢复之前选中的行（在表格填充完成后）
                 if (!selectedHosts.isEmpty()) {
-                    // 延迟恢复选择，确保表格已完全更新
-                    SwingUtilities.invokeLater(() -> {
-                        collectedDataTable.clearSelection();
-                        for (int i = 0; i < collectedDataTableModel.getRowCount(); i++) {
-                            String host = (String) collectedDataTableModel.getValueAt(i, 0);
-                            String mainDomain = (String) collectedDataTableModel.getValueAt(i, 1);
-                            // 如果该行之前被选中，恢复选中状态
-                            if (host != null && mainDomain != null && selectedHosts.contains(host) && selectedMainDomains.contains(mainDomain)) {
-                                collectedDataTable.addRowSelectionInterval(i, i);
-                            }
+                    // ✅ 立即恢复选择，避免延迟导致的闪烁
+                    for (int i = 0; i < collectedDataTableModel.getRowCount(); i++) {
+                        String host = (String) collectedDataTableModel.getValueAt(i, 0);
+                        String mainDomain = (String) collectedDataTableModel.getValueAt(i, 1);
+                        // 如果该行之前被选中，恢复选中状态
+                        if (host != null && mainDomain != null && selectedHosts.contains(host) && selectedMainDomains.contains(mainDomain)) {
+                            collectedDataTable.addRowSelectionInterval(i, i);
                         }
-                        // 更新保存的选择状态（用于鼠标移动时恢复）
-                        savedSelectedRows.clear();
-                        int[] currentSelectedRows = collectedDataTable.getSelectedRows();
-                        for (int row : currentSelectedRows) {
-                            savedSelectedRows.add(row);
-                        }
-                        if (currentSelectedRows.length > 0) {
-                            savedSelectedRow[0] = currentSelectedRows[0];
-                        }
-                    });
+                    }
+                    // 更新保存的选择状态（用于鼠标移动时恢复）
+                    savedSelectedRows.clear();
+                    int[] currentSelectedRows = collectedDataTable.getSelectedRows();
+                    for (int row : currentSelectedRows) {
+                        savedSelectedRows.add(row);
+                    }
+                    if (currentSelectedRows.length > 0) {
+                        savedSelectedRow[0] = currentSelectedRows[0];
+                    }
                 }
+                
+                // ✅ 结束批量更新模式，触发一次渲染（避免频闪）
+                collectedDataTable.getSelectionModel().setValueIsAdjusting(false);
                 
                 // ✅ 更新Arjun统计：只统计参数探测的结果
                 int paramScanCount = 0;
@@ -1675,24 +1946,67 @@ public class ActiveProbeTab {
     
     /**
      * ✅ 按子域名触发接口探测
+     * 
+     * @param mainDomain 主域名
+     * @param host 目标子域名
      */
     private void triggerInterfaceDiscoveryForHost(String mainDomain, String host) {
+        // ✅ 默认只使用该子域的接口（保持向后兼容）
+        triggerInterfaceDiscoveryForHost(mainDomain, host, true);
+    }
+    
+    /**
+     * ✅ 按子域名触发接口探测（支持接口范围选择，向后兼容版本）
+     * 
+     * @param mainDomain 主域名
+     * @param host 目标子域名（探测的目标host）
+     * @param useOnlyHostEndpoints 如果为true，只使用该子域的接口；如果为false，使用主域下所有子域的接口
+     */
+    private void triggerInterfaceDiscoveryForHost(String mainDomain, String host, boolean useOnlyHostEndpoints) {
+        // ✅ 向后兼容：获取数据后调用性能优化版本
+        ParameterCollector collector = realtimeScanner.getParameterCollector();
+        Set<ParameterCollector.EndpointKey> allEndpointKeys = 
+            collector.getEndpointKeysForMainDomain(mainDomain);
+        triggerInterfaceDiscoveryForHost(mainDomain, host, useOnlyHostEndpoints, allEndpointKeys, collector);
+    }
+    
+    /**
+     * ✅ 按子域名触发接口探测（支持接口范围选择，性能优化版本）
+     * 
+     * @param mainDomain 主域名
+     * @param host 目标子域名（探测的目标host）
+     * @param useOnlyHostEndpoints 如果为true，只使用该子域的接口；如果为false，使用主域下所有子域的接口
+     * @param allEndpointKeys 主域下所有接口（已缓存，避免重复获取）
+     * @param collector 参数收集器（已获取，避免重复获取）
+     */
+    private void triggerInterfaceDiscoveryForHost(String mainDomain, String host, boolean useOnlyHostEndpoints,
+                                                   Set<ParameterCollector.EndpointKey> allEndpointKeys,
+                                                   ParameterCollector collector) {
         try {
-            ParameterCollector collector = realtimeScanner.getParameterCollector();
-            Set<ParameterCollector.EndpointKey> endpointKeys = 
-                collector.getEndpointKeysForMainDomain(mainDomain);
-            
-            // ✅ 过滤出该子域名的接口
+            // ✅ 根据接口范围选择过滤接口
             List<ParameterCollector.EndpointKey> hostEndpoints = new ArrayList<>();
-            for (ParameterCollector.EndpointKey epKey : endpointKeys) {
-                if (epKey.host.equals(host)) {
-                    hostEndpoints.add(epKey);
+            if (useOnlyHostEndpoints) {
+                // 只使用该子域的接口
+                for (ParameterCollector.EndpointKey epKey : allEndpointKeys) {
+                    if (epKey.host.equals(host)) {
+                        hostEndpoints.add(epKey);
+                    }
+                }
+                if (!hostEndpoints.isEmpty()) {
+                    api.logging().raiseDebugEvent(String.format(
+                        "开始对子域名 %s 进行接口探测（使用仅选中子域的接口，%d 个接口）", host, hostEndpoints.size()
+                    ));
+                }
+            } else {
+                // 使用主域下所有子域的接口（但请求的host还是该子域）
+                hostEndpoints.addAll(allEndpointKeys);
+                if (!hostEndpoints.isEmpty()) {
+                    api.logging().raiseDebugEvent(String.format(
+                        "开始对子域名 %s 进行接口探测（使用主域 %s 所有子域的接口，%d 个接口）", 
+                        host, mainDomain, hostEndpoints.size()
+                    ));
                 }
             }
-            
-            api.logging().raiseInfoEvent(String.format(
-                "开始对子域名 %s 进行接口探测（%d 个接口）", host, hostEndpoints.size()
-            ));
             
             if (hostEndpoints.isEmpty()) {
                 api.logging().raiseInfoEvent("⚠️ 子域名 " + host + " 没有可探测的接口");
@@ -1714,6 +2028,33 @@ public class ActiveProbeTab {
                         // ✅ 从请求模板中获取完整URL
                         String url = template.url();
                         if (url != null && !url.isEmpty()) {
+                            // ✅ 如果使用主域下所有子域的接口，需要修改请求的host为目标子域
+                            if (!useOnlyHostEndpoints && !epKey.host.equals(host)) {
+                                // 修改URL的host为目标子域
+                                try {
+                                    java.net.URI originalUri = new java.net.URI(url);
+                                    String scheme = originalUri.getScheme();
+                                    String path = originalUri.getPath();
+                                    String query = originalUri.getQuery();
+                                    int port = originalUri.getPort();
+                                    
+                                    String newUrl;
+                                    if (port != -1 && !(("https".equalsIgnoreCase(scheme) && port == 443) || 
+                                                       ("http".equalsIgnoreCase(scheme) && port == 80))) {
+                                        newUrl = scheme + "://" + host + ":" + port + 
+                                                (path.isEmpty() ? "/" : path) + 
+                                                (query != null ? "?" + query : "");
+                                    } else {
+                                        newUrl = scheme + "://" + host + 
+                                                (path.isEmpty() ? "/" : path) + 
+                                                (query != null ? "?" + query : "");
+                                    }
+                                    url = newUrl;
+                                } catch (Exception e) {
+                                    api.logging().raiseDebugEvent("修改URL host失败，使用原始URL: " + e.getMessage());
+                                }
+                            }
+                            
                             // ✅ 调用完整的接口探测逻辑（包含随机路径验证）
                             // 参数说明：url, runArjun=false（仅接口探测）, interfaceDiscoveryFirst=false（不先探测接口）
                             realtimeScanner.triggerManualEndpointScan(url, false, false);
@@ -1806,6 +2147,23 @@ public class ActiveProbeTab {
                 api.logging().raiseInfoEvent("✅ 用户手动清空了Arjun扫描缓存");
             }
         }
+    }
+
+    /**
+     * 立即停止所有正在执行的主动探测任务
+     */
+    private void stopAllTasks() {
+        CompletableFuture.runAsync(() -> {
+            activeScanner.stopRealtimeScanning();
+            realtimeScanner.stopRealtimeScanning();
+        });
+        SwingUtilities.invokeLater(() -> {
+            statusLabel.setText("⏹️ 手动停止了所有任务");
+            statusLabel.setForeground(Color.GRAY);
+            progressBar.setIndeterminate(false);
+            progressBar.setValue(0);
+        });
+        api.logging().raiseInfoEvent("⏹️ 用户请求停止所有主动探测任务");
     }
 
     /**

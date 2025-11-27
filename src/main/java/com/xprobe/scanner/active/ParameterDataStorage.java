@@ -135,9 +135,35 @@ public class ParameterDataStorage {
                                 }
                             }
                         }
-                        // ✅ 统计该子域名的参数
-                        if (hostData.parameters != null) {
-                            restoredParameters += hostData.parameters.size();
+                        // ✅ 直接恢复该子域名的参数（不仅仅是统计）
+                        if (hostData.parameters != null && !hostData.parameters.isEmpty()) {
+                            String host = hostData.host;
+                            String mainDomain = mainDomainData.mainDomain;
+                            api.logging().raiseInfoEvent(String.format(
+                                "恢复子域 %s 的参数: %d 个参数 (主域: %s)",
+                                host, hostData.parameters.size(), mainDomain
+                            ));
+                            
+                            // ✅ 诊断：恢复前检查主域参数数
+                            Set<String> beforeParams = collector.getParametersForMainDomain(mainDomain);
+                            api.logging().raiseInfoEvent(String.format(
+                                "恢复前: 主域 %s 的参数数=%d",
+                                mainDomain, beforeParams.size()
+                            ));
+                            
+                            for (String parameter : hostData.parameters) {
+                                // 为每个接口添加参数（如果接口已恢复）
+                                // 如果接口未恢复，至少添加到主域参数集合中
+                                collector.addParameterDirectly(host, parameter, mainDomain);
+                                restoredParameters++;
+                            }
+                            
+                            // ✅ 诊断：恢复后检查主域参数数
+                            Set<String> afterParams = collector.getParametersForMainDomain(mainDomain);
+                            api.logging().raiseInfoEvent(String.format(
+                                "恢复后: 主域 %s 的参数数=%d (新增: %d)",
+                                mainDomain, afterParams.size(), afterParams.size() - beforeParams.size()
+                            ));
                         }
                     }
                 } else if (mainDomainData.endpoints != null) {
@@ -166,6 +192,40 @@ public class ParameterDataStorage {
                 "✅ 参数收集数据恢复完成: 恢复了 %d 个接口, %d 个参数, %d 个关键词", 
                 restoredEndpoints, restoredParameters, restoredKeywords
             ));
+            
+            // ✅ 诊断：检查恢复后的参数是否正确填充到主域参数集合中
+            for (MainDomainData mainDomainData : model.mainDomains.values()) {
+                String mainDomain = mainDomainData.mainDomain;
+                Set<String> restoredParams = collector.getParametersForMainDomain(mainDomain);
+                
+                // ✅ 计算期望参数数（去重后的参数数，因为 allParameters 是 Set）
+                Set<String> expectedParams = new HashSet<>();
+                int totalCount = 0;
+                if (mainDomainData.hostDataMap != null) {
+                    for (HostData hostData : mainDomainData.hostDataMap.values()) {
+                        if (hostData.parameters != null) {
+                            totalCount += hostData.parameters.size();
+                            expectedParams.addAll(hostData.parameters);
+                        }
+                    }
+                }
+                
+                api.logging().raiseInfoEvent(String.format(
+                    "诊断: 主域 %s 恢复后的参数数=%d (期望去重后: %d, 原始总数: %d)",
+                    mainDomain, restoredParams.size(), expectedParams.size(), totalCount
+                ));
+                
+                // ✅ 如果参数数不匹配，列出缺失的参数
+                if (restoredParams.size() < expectedParams.size()) {
+                    Set<String> missingParams = new HashSet<>(expectedParams);
+                    missingParams.removeAll(restoredParams);
+                    api.logging().raiseInfoEvent(String.format(
+                        "缺失的参数数: %d, 前10个缺失参数: %s",
+                        missingParams.size(), 
+                        missingParams.stream().limit(10).collect(java.util.stream.Collectors.joining(", "))
+                    ));
+                }
+            }
             
         } catch (Exception e) {
             api.logging().raiseErrorEvent("恢复参数收集数据失败: " + e.getMessage());
