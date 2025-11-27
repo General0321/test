@@ -31,6 +31,7 @@ public class ActiveProbeConfigDialog extends JDialog {
     private final JRadioButton sourceAutoRadio;
     private final JTextArea manualEndpointsArea;
     private final JScrollPane manualScrollPane;
+    private final JPanel manualInputPanel;
     private final JRadioButton interfaceScopeSubdomain;
     private final JRadioButton interfaceScopeAll;
     private final JRadioButton parameterScopeSubdomain;
@@ -60,6 +61,7 @@ public class ActiveProbeConfigDialog extends JDialog {
         this.sourceAutoRadio = new JRadioButton("自动采集（Proxy/SiteMap）");
         this.manualEndpointsArea = new JTextArea(5, 30);
         this.manualScrollPane = new JScrollPane(manualEndpointsArea);
+        this.manualInputPanel = new JPanel(new BorderLayout());
         this.interfaceScopeSubdomain = new JRadioButton("仅选中子域接口", true);
         this.interfaceScopeAll = new JRadioButton("主域所有子域接口");
         this.parameterScopeSubdomain = new JRadioButton("仅选中子域参数", true);
@@ -176,7 +178,7 @@ public class ActiveProbeConfigDialog extends JDialog {
     }
 
     private JPanel buildSourcePanel() {
-        JPanel panel = buildTitledPanel("STEP 2 接口选择（接口数据获取策略）");
+        JPanel panel = buildTitledPanel("STEP 2 接口来源选择（接口数据获取策略）");
         panel.setLayout(new BorderLayout(8, 8));
 
         JPanel cards = new JPanel(new GridLayout(1, 3, 8, 0));
@@ -190,7 +192,7 @@ public class ActiveProbeConfigDialog extends JDialog {
         panel.add(cards, BorderLayout.NORTH);
 
         JPanel interfaceScopePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
-        interfaceScopePanel.add(new JLabel("接口范围："));
+        interfaceScopePanel.add(new JLabel("接口来源范围："));
         ButtonGroup interfaceGroup = new ButtonGroup();
         interfaceGroup.add(interfaceScopeSubdomain);
         interfaceGroup.add(interfaceScopeAll);
@@ -206,14 +208,13 @@ public class ActiveProbeConfigDialog extends JDialog {
         manualEndpointsArea.setBorder(BorderFactory.createLineBorder(new Color(200, 200, 200)));
         manualEndpointsArea.setToolTipText("每行一个接口路径，例如 /api/v1/user/list");
         manualEndpointsArea.setEnabled(false);
-        manualScrollPane.setPreferredSize(new Dimension(320, 120));
         manualScrollPane.setVisible(false);
 
-        JPanel manualPanel = new JPanel(new BorderLayout());
-        manualPanel.setBorder(new EmptyBorder(4, 0, 0, 0));
-        manualPanel.add(new JLabel("手动接口列表（仅在“手动输入”模式下显示）"), BorderLayout.NORTH);
-        manualPanel.add(manualScrollPane, BorderLayout.CENTER);
-        panel.add(manualPanel, BorderLayout.SOUTH);
+        manualInputPanel.removeAll();
+        manualInputPanel.setBorder(new EmptyBorder(4, 0, 0, 0));
+        manualInputPanel.add(manualScrollPane, BorderLayout.CENTER);
+        manualInputPanel.setVisible(false);
+        panel.add(manualInputPanel, BorderLayout.SOUTH);
         return panel;
     }
 
@@ -236,7 +237,7 @@ public class ActiveProbeConfigDialog extends JDialog {
     }
 
     private JPanel buildScopePanel() {
-        JPanel panel = buildTitledPanel("STEP 3 参数选择");
+        JPanel panel = buildTitledPanel("STEP 3 参数范围选择");
         panel.setLayout(new BorderLayout());
 
         JPanel parameterPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
@@ -249,7 +250,7 @@ public class ActiveProbeConfigDialog extends JDialog {
         parameterPanel.add(customDictionaryToggle);
         panel.add(parameterPanel, BorderLayout.NORTH);
 
-        JTextArea hint = new JTextArea("说明：参数范围独立生效，可与接口范围不同步。可选扩展：关键词过滤 / 参数标签过滤 / 历史结果导入。");
+        JTextArea hint = new JTextArea("说明：参数范围独立生效，可与接口范围不同步。");
         hint.setLineWrap(true);
         hint.setWrapStyleWord(true);
         hint.setEditable(false);
@@ -326,6 +327,7 @@ public class ActiveProbeConfigDialog extends JDialog {
     private void toggleManualArea(boolean visible) {
         manualEndpointsArea.setEnabled(visible);
         manualScrollPane.setVisible(visible);
+        manualInputPanel.setVisible(visible);
         Container parent = manualScrollPane.getParent();
         if (parent != null) {
             parent.revalidate();
@@ -338,9 +340,10 @@ public class ActiveProbeConfigDialog extends JDialog {
         interfaceScopeSubdomain.setEnabled(!manualSource);
         interfaceScopeAll.setEnabled(!manualSource);
 
-        parameterScopeSubdomain.setEnabled(true);
-        parameterScopeAll.setEnabled(true);
-        customDictionaryToggle.setEnabled(true);
+        boolean interfaceOnlyStrategy = strategyInterfaceOnly.isSelected();
+        parameterScopeSubdomain.setEnabled(!interfaceOnlyStrategy);
+        parameterScopeAll.setEnabled(!interfaceOnlyStrategy);
+        customDictionaryToggle.setEnabled(!interfaceOnlyStrategy);
     }
 
     private void loadInitialData() {
@@ -489,9 +492,10 @@ public class ActiveProbeConfigDialog extends JDialog {
         switch (mode) {
             case INTERFACE_ONLY -> strategyInterfaceOnly.setSelected(true);
             case INTERFACE_THEN_ARJUN -> strategyInterfaceThenArjun.setSelected(true);
-            case ARJUN_ONLY -> strategyArjunOnly.setSelected(true);
-            default -> strategyInterfaceOnly.setSelected(true);
+            case ARJUN_ONLY -> strategyInterfaceThenArjun.setSelected(true);
+            default -> strategyInterfaceThenArjun.setSelected(true);
         }
+        updateScopeAvailability();
     }
 }
 
