@@ -2890,6 +2890,60 @@ public class RealtimeScannerRefactored {
     /**
      * 停止所有主动任务并清空调度队列（不影响被动收集）
      */
+    // ===== 辅助方法：形态识别与参数注入 =====
+    private boolean hasBothUrlAndBodyParameters(burp.api.montoya.http.message.requests.HttpRequest request) {
+        boolean hasUrl = false, hasBody = false;
+        if (request == null) return false;
+        for (var p : request.parameters()) {
+            if (p.type() == burp.api.montoya.http.message.params.HttpParameterType.URL) hasUrl = true;
+            if (p.type() == burp.api.montoya.http.message.params.HttpParameterType.BODY) hasBody = true;
+            if (hasUrl && hasBody) return true;
+        }
+        return false;
+    }
+
+    private burp.api.montoya.http.message.requests.HttpRequest buildRequestWithParams(
+            String url, String method, String contentType, java.util.Set<String> paramNames) {
+        burp.api.montoya.http.message.requests.HttpRequest req = buildRequest(url, method, contentType);
+        if (req == null || paramNames == null || paramNames.isEmpty()) return req;
+        try {
+            if ("GET".equalsIgnoreCase(method)) {
+                for (String name : paramNames) {
+                    req = req.withAddedParameters(
+                        burp.api.montoya.http.message.params.HttpParameter.urlParameter(name, "xprobe_test")
+                    );
+                }
+            } else if (contentType != null && contentType.toLowerCase(java.util.Locale.ROOT).contains("json")) {
+                StringBuilder sb = new StringBuilder();
+                sb.append("{");
+                boolean first = true;
+                for (String name : paramNames) {
+                    if (!first) sb.append(",");
+                    sb.append("\"").append(name).append("\":\"xprobe_test\"");
+                    first = false;
+                }
+                sb.append("}");
+                req = req.withBody(sb.toString());
+                // 确保Content-Type
+                boolean hasCT = false;
+                for (var h : req.headers()) { if ("Content-Type".equalsIgnoreCase(h.name())) { hasCT = true; break; } }
+                if (!hasCT) req = req.withAddedHeader("Content-Type", "application/json");
+            } else {
+                // 表单
+                for (String name : paramNames) {
+                    req = req.withAddedParameters(
+                        burp.api.montoya.http.message.params.HttpParameter.bodyParameter(name, "xprobe_test")
+                    );
+                }
+                // 确保Content-Type
+                boolean hasCT = false;
+                for (var h : req.headers()) { if ("Content-Type".equalsIgnoreCase(h.name())) { hasCT = true; break; } }
+                if (!hasCT) req = req.withAddedHeader("Content-Type", "application/x-www-form-urlencoded");
+            }
+        } catch (Exception ignore) {}
+        return req;
+    }
+
     public void stopAllTasksAndClear() {
         try {
             // 关闭实时触发
