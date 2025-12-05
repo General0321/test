@@ -691,61 +691,53 @@ public class RealtimeScannerRefactored {
     }
     
     /**
-     * ✅ 修改请求的host为目标子域名
-     * 使用buildRequest方法重新构建请求，但修改host
+     * ✅ 修改请求的host为目标子域名（克隆方式）
+     * 仅替换 HttpService 与 Host 头，保留原始 headers/body/Cookie/Authorization，避免会话丢失
      */
     private HttpRequest modifyRequestHost(HttpRequest originalRequest, String targetHost) {
         try {
-            // ✅ 获取原始请求的服务信息
             burp.api.montoya.http.HttpService originalService = originalRequest.httpService();
-            int port = originalService.port();
             boolean isSecure = originalService.secure();
-            
-            // ✅ 手动解析 URL 字符串，避免使用 URI 类无法处理未编码字符的问题
-            String originalUrl = originalRequest.url();
-            String scheme = isSecure ? "https" : "http";
-            String fullPath = originalUrl;
-            
-            // 提取路径和查询字符串（从 URL 中提取，不依赖 URI 解析）
-            int schemeEnd = originalUrl.indexOf("://");
-            if (schemeEnd == -1) {
-                api.logging().raiseErrorEvent("无法解析URL格式: " + originalUrl);
-                return null;
+            int originalPort = originalService.port();
+
+            // 规范化 host：HttpService 使用裸 host；Host 头的 IPv6 使用 [addr]
+            String rawHost = targetHost;
+            if (rawHost.startsWith("[") && rawHost.endsWith("]")) {
+                rawHost = rawHost.substring(1, rawHost.length() - 1);
             }
-            
-            int pathStart = originalUrl.indexOf('/', schemeEnd + 3);
-            if (pathStart == -1) {
-                fullPath = "/";
+
+            // 计算有效端口
+            int effectivePort = originalPort;
+            if (effectivePort <= 0) {
+                effectivePort = isSecure ? 443 : 80;
+            }
+
+            // 替换服务
+            burp.api.montoya.http.HttpService newService = burp.api.montoya.http.HttpService.httpService(
+                rawHost,
+                effectivePort,
+                isSecure
+            );
+            HttpRequest newReq = originalRequest.withService(newService);
+
+            // 设置 Host 头
+            String hostHeaderHost = rawHost.contains(":") ? "[" + rawHost + "]" : rawHost;
+            boolean defaultPort = (isSecure && effectivePort == 443) || (!isSecure && effectivePort == 80);
+            String hostHeaderValue = defaultPort ? hostHeaderHost : hostHeaderHost + ":" + effectivePort;
+
+            boolean hasHost = false;
+            for (var h : newReq.headers()) {
+                if ("Host".equalsIgnoreCase(h.name())) { hasHost = true; break; }
+            }
+            if (hasHost) {
+                newReq = newReq.withUpdatedHeader("Host", hostHeaderValue);
             } else {
-                // 提取从第一个 / 开始的所有内容（包括查询字符串）
-                fullPath = originalUrl.substring(pathStart);
+                newReq = newReq.withAddedHeader("Host", hostHeaderValue);
             }
-            
-            // ✅ 获取原始请求的方法和Content-Type
-            String method = originalRequest.method();
-            String contentType = null;
-            for (var header : originalRequest.headers()) {
-                if ("Content-Type".equalsIgnoreCase(header.name())) {
-                    contentType = header.value();
-                    break;
-                }
-            }
-            
-            // ✅ 构建新URL（替换host，保持原始路径和查询字符串不变）
-            String newUrl;
-            if (port != -1 && !(("https".equalsIgnoreCase(scheme) && port == 443) || 
-                               ("http".equalsIgnoreCase(scheme) && port == 80))) {
-                newUrl = scheme + "://" + targetHost + ":" + port + fullPath;
-            } else {
-                newUrl = scheme + "://" + targetHost + fullPath;
-            }
-            
-            // ✅ 使用buildRequest方法构建新请求（会自动设置正确的Host头）
-            return buildRequest(newUrl, method, contentType);
-            
+
+            return newReq;
         } catch (Exception e) {
             api.logging().raiseErrorEvent("修改请求host失败: " + e.getMessage());
-            e.printStackTrace();
             return null;
         }
     }
@@ -985,32 +977,50 @@ public class RealtimeScannerRefactored {
      */
     public void triggerManualEndpointScan(String url, boolean runArjun, boolean interfaceDiscoveryFirst) {
         try {
+            // 兼容旧接口：忽略返回的Future
+            triggerManualEndpointScanAsync(url, runArjun, interfaceDiscoveryFirst);
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("触发手动端点 Arjun 扫描时出错: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 新增：异步触发手动端点扫描，并返回可等待的Future
+     */
+    public CompletableFuture<Void> triggerManualEndpointScanAsync(String url, boolean runArjun, boolean interfaceDiscoveryFirst) {
+        return triggerManualEndpointScanAsync(url, runArjun, interfaceDiscoveryFirst, false);
+    }
+
+    /**
+     * 带参数范围控制的手动端点扫描（useOnlyHostParameters=true 表示仅使用目标子域的参数）
+     */
+    public CompletableFuture<Void> triggerManualEndpointScanAsync(String url, boolean runArjun, boolean interfaceDiscoveryFirst, boolean useOnlyHostParameters) {
+        try {
             api.logging().raiseInfoEvent("开始对手动添加的端点进行 Arjun 探测: " + url);
-            
+
             // 检查是否已被扫描过（任意method和contentType组合）
             URI uri = new URI(url);
             String host = uri.getHost();
             String endpoint = uri.getPath().isEmpty() ? "/" : uri.getPath();
-            
+
             if (parameterManager.hasBeenScanned(host, endpoint)) {
                 api.logging().raiseInfoEvent(String.format(
                     "端点 %s %s 已经被扫描过，跳过",
                     host, endpoint
                 ));
-                return;
+                return CompletableFuture.completedFuture(null);
             }
-            
-            CompletableFuture.runAsync(() -> {
+
+            return CompletableFuture.runAsync(() -> {
                 try {
-                    performIncrementalArjunScan(true, url, runArjun, interfaceDiscoveryFirst);
+                    performIncrementalArjunScan(true, url, runArjun, interfaceDiscoveryFirst, useOnlyHostParameters);
                 } catch (Exception e) {
                     api.logging().raiseErrorEvent("手动端点 Arjun 扫描失败: " + e.getMessage());
-                    e.printStackTrace();
                 }
             });
-            
         } catch (Exception e) {
             api.logging().raiseErrorEvent("触发手动端点 Arjun 扫描时出错: " + e.getMessage());
+            return CompletableFuture.failedFuture(e);
         }
     }
     
@@ -1051,6 +1061,28 @@ public class RealtimeScannerRefactored {
 
                     if (entry.response() != null) {
                         parameterCollector.collectFromResponse(entry.request(), entry.response());
+                        // 解析响应体中的相对路径接口
+                        try {
+                            String body = entry.response().bodyToString();
+                            if (body != null && !body.isEmpty()) {
+                                java.util.Set<String> paths = com.xprobe.scanner.active.discovery.InterfaceAutoDiscoveryEngine.extractRelativePaths(body);
+                                if (!paths.isEmpty()) {
+                                    java.net.URI u = new java.net.URI(entry.request().url());
+                                    String scheme = (u.getScheme() != null) ? u.getScheme() : "https";
+                                    String host = u.getHost();
+                                    if (host == null || host.isEmpty()) continue;
+                                    int port = u.getPort();
+                                    if (port < 0) port = ("https".equalsIgnoreCase(scheme) ? 443 : 80);
+                                    for (String p : paths) {
+                                        String full = scheme + "://" + host + ( (port==443 && "https".equalsIgnoreCase(scheme)) || (port==80 && "http".equalsIgnoreCase(scheme)) ? "" : (":"+port) ) + p;
+                                        burp.api.montoya.http.message.requests.HttpRequest synth = buildRequest(full, "GET", null);
+                                        if (synth != null) {
+                                            parameterCollector.collectFromRequest(synth);
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (Exception ignore) {}
                     }
                 }
 
@@ -1073,11 +1105,97 @@ public class RealtimeScannerRefactored {
             }
         });
     }
+
+    /**
+     * 针对选中目标与接口范围执行“自动采集”（从 SiteMap 获取），满足 AUTO 模式按范围采集的设计
+     * @param targets 选中目标 Map<mainDomain, Set<host>>
+     * @param useOnlyHostEndpoints true=仅选中子域接口；false=主域所有子域接口
+     */
+    public java.util.concurrent.CompletableFuture<ParameterCollector.CollectorStatistics> triggerInterfaceDiscoveryForTargets(
+            Map<String, java.util.Set<String>> targets, boolean useOnlyHostEndpoints) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                ParameterCollector.CollectorStatistics before = parameterCollector.getStatistics();
+                if (targets == null || targets.isEmpty()) {
+                    api.logging().raiseInfoEvent("AUTO接口采集：未选择任何目标，跳过");
+                    return before;
+                }
+
+                // 选中主域集合
+                java.util.Set<String> selectedMainDomains = new java.util.HashSet<>(targets.keySet());
+                // 允许的host集合
+                java.util.Set<String> allowedHosts = new java.util.HashSet<>();
+                if (useOnlyHostEndpoints) {
+                    // 仅选中子域
+                    for (var e : targets.entrySet()) {
+                        if (e.getValue() != null) allowedHosts.addAll(e.getValue());
+                    }
+                }
+
+                SiteMap siteMap = api.siteMap();
+                java.util.List<HttpRequestResponse> entries = siteMap.requestResponses();
+                int processed = 0;
+
+                for (HttpRequestResponse entry : entries) {
+                    if (entry == null || entry.request() == null) continue;
+                    String url = entry.request().url();
+                    String host;
+                    try {
+                        java.net.URI u = new java.net.URI(url);
+                        host = u.getHost();
+                    } catch (Exception ex) {
+                        continue;
+                    }
+                    if (host == null || host.isEmpty()) continue;
+
+                    // 判断是否允许
+                    boolean allow;
+                    if (useOnlyHostEndpoints) {
+                        allow = allowedHosts.contains(host);
+                    } else {
+                        // 主域匹配
+                        String md = extractMainDomain(host);
+                        allow = selectedMainDomains.contains(md);
+                    }
+                    if (!allow) continue;
+
+                    // 收集
+                    if (parameterCollector.collectFromRequest(entry.request())) {
+                        processed++;
+                    }
+                    if (entry.response() != null) {
+                        parameterCollector.collectFromResponse(entry.request(), entry.response());
+                    }
+                }
+
+                ParameterCollector.CollectorStatistics after = parameterCollector.getStatistics();
+                api.logging().raiseInfoEvent(String.format(
+                    "AUTO接口采集完成: 处理 %d 条站点数据, 记录请求 %d 条, 新接口 %d 个, 新参数 %d 个 (范围=%s)",
+                    entries.size(), processed,
+                    Math.max(after.getEndpointCount() - before.getEndpointCount(), 0),
+                    Math.max(after.getParameterCount() - before.getParameterCount(), 0),
+                    useOnlyHostEndpoints ? "仅选中子域" : "主域所有子域"
+                ));
+                return after;
+            } catch (Exception e) {
+                api.logging().raiseErrorEvent("AUTO接口采集失败: " + e.getMessage());
+                throw new RuntimeException(e);
+            }
+        });
+    }
     
     /**
      * 执行增量 Arjun 扫描（从 SiteMap/Proxy 收集的流量）
      */
     private void performIncrementalArjunScan(boolean isManualEndpoint, String manualUrl, boolean runArjun, boolean interfaceDiscoveryFirst) {
+        performIncrementalArjunScan(isManualEndpoint, manualUrl, runArjun, interfaceDiscoveryFirst, null);
+    }
+
+    /**
+     * 执行增量 Arjun 扫描（从 SiteMap/Proxy 收集的流量），可选手动参数范围
+     * @param useOnlyHostParameters 当非空且为true时，在手动端点模式下仅使用目标子域参数
+     */
+    private void performIncrementalArjunScan(boolean isManualEndpoint, String manualUrl, boolean runArjun, boolean interfaceDiscoveryFirst, Boolean useOnlyHostParameters) {
         try {
             int totalScanned = 0;
             int totalSkipped = 0;
@@ -1085,7 +1203,8 @@ public class RealtimeScannerRefactored {
             
             if (isManualEndpoint && manualUrl != null) {
                 // 手动添加的端点：尝试所有 method 和 contentType 组合
-                totalScanned = scanManualEndpoint(manualUrl, runArjun, interfaceDiscoveryFirst);
+                boolean onlyHostParams = useOnlyHostParameters != null ? useOnlyHostParameters : false;
+                totalScanned = scanManualEndpoint(manualUrl, runArjun, interfaceDiscoveryFirst, onlyHostParams);
                 api.logging().raiseInfoEvent(String.format(
                     "手动端点扫描完成: 扫描 %d 个组合",
                     totalScanned
@@ -1356,18 +1475,20 @@ public class RealtimeScannerRefactored {
      * @param url 手动添加的 URL
      * @return 扫描的组合数量
      */
-    private int scanManualEndpoint(String url, boolean runArjun, boolean interfaceDiscoveryFirst) {
+    private int scanManualEndpoint(String url, boolean runArjun, boolean interfaceDiscoveryFirst, boolean useOnlyHostParameters) {
         try {
             URI uri = new URI(url);
             String host = uri.getHost();
             String endpoint = uri.getPath().isEmpty() ? "/" : uri.getPath();
             String mainDomain = extractMainDomain(host);
             
-            // 获取该主域名收集的所有参数
-            Set<String> collectedParams = parameterCollector.getParametersForMainDomain(mainDomain);
+            // 获取参数集合：根据参数范围决定使用主域参数合集或目标子域参数
+            Set<String> collectedParams = useOnlyHostParameters
+                ? parameterCollector.getParametersForHost(host)
+                : parameterCollector.getParametersForMainDomain(mainDomain);
             
-            // 如果启用了关键词收集，将关键词也加入参数列表
-            if (parameterCollector.getCollectionMode() == ParameterCollector.CollectionMode.PARAMETERS_AND_KEYWORDS) {
+            // 如果启用了关键词收集，将关键词也加入参数列表（仅在使用主域参数合集时合并关键词）
+            if (!useOnlyHostParameters && parameterCollector.getCollectionMode() == ParameterCollector.CollectionMode.PARAMETERS_AND_KEYWORDS) {
                 Set<String> keywords = parameterCollector.getKeywordsForMainDomain(mainDomain);
                 collectedParams.addAll(keywords);
             }
@@ -1400,13 +1521,13 @@ public class RealtimeScannerRefactored {
                     method, host, contentTypeForKey, endpoint, collectedParams
                 );
                     
+                    // 即使无增量参数，在参数探测阶段也不跳过，回退到当前参数来源范围的集合
                     if (incrementalParams.isEmpty() && runArjun) {
-                        String displayContentType = contentTypeForKey != null ? contentTypeForKey : "N/A";
                         api.logging().raiseDebugEvent(String.format(
-                            "跳过 %s %s (%s) %s (无新参数)",
-                            method, host, displayContentType, endpoint
+                            "无增量参数，回退到当前参数来源集合: %s %s (%s) %s (参数数=%d)",
+                            method, host, (contentTypeForKey != null ? contentTypeForKey : "N/A"), endpoint, collectedParams.size()
                         ));
-                        continue;
+                        incrementalParams = new HashSet<>(collectedParams);
                     }
                     
                     // 构建请求
@@ -2766,6 +2887,23 @@ public class RealtimeScannerRefactored {
     /**
      * ✅ P0修复：关闭RealtimeScanner资源
      */
+    /**
+     * 停止所有主动任务并清空调度队列（不影响被动收集）
+     */
+    public void stopAllTasksAndClear() {
+        try {
+            // 关闭实时触发
+            stopRealtimeScanning();
+            // 清空任务调度器队列
+            if (taskScheduler != null) {
+                taskScheduler.pauseAllTasksAndClear();
+            }
+            api.logging().raiseInfoEvent("⏹️ 已请求停止所有主动任务并清空队列");
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("停止所有主动任务失败: " + e.getMessage());
+        }
+    }
+
     public void shutdown() {
         api.logging().raiseInfoEvent("关闭RealtimeScanner资源...");
         

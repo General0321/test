@@ -338,9 +338,10 @@ public class ActiveProbeConfigDialog extends JDialog {
         interfaceScopeAll.setEnabled(!manualSource);
 
         boolean interfaceOnlyStrategy = strategyInterfaceOnly.isSelected();
-        parameterScopeSubdomain.setEnabled(!interfaceOnlyStrategy);
-        parameterScopeAll.setEnabled(!interfaceOnlyStrategy);
-        customDictionaryToggle.setEnabled(!interfaceOnlyStrategy);
+        boolean enableParamScope = !interfaceOnlyStrategy; // 参数范围在手动来源下也生效（对选中目标应用）
+        parameterScopeSubdomain.setEnabled(enableParamScope);
+        parameterScopeAll.setEnabled(enableParamScope);
+        customDictionaryToggle.setEnabled(enableParamScope);
     }
 
     private void loadInitialData() {
@@ -489,7 +490,7 @@ public class ActiveProbeConfigDialog extends JDialog {
         switch (mode) {
             case INTERFACE_ONLY -> strategyInterfaceOnly.setSelected(true);
             case INTERFACE_THEN_ARJUN -> strategyInterfaceThenArjun.setSelected(true);
-            case ARJUN_ONLY -> strategyInterfaceThenArjun.setSelected(true);
+            case ARJUN_ONLY -> strategyArjunOnly.setSelected(true);
             default -> strategyInterfaceThenArjun.setSelected(true);
         }
         updateScopeAvailability();

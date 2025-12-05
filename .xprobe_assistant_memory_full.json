@@ -1,0 +1,951 @@
+{
+  "memory_version": "2025-12-02.5",
+  "created_at_utc": "2025-12-02T11:37:56.130Z",
+  "last_updated_from": ["代码调用关系文档.md", "ARCHITECTURE.md"],
+  "project": {
+    "name": "XProbe - Burp Suite 被动安全扫描器",
+    "root": "/Users/0x7llcf/Desktop/tools/burp插件/XProbe",
+    "artifact": "build/libs/XProbe-1.0.0.jar",
+    "language": "Java",
+    "java_min": 17,
+    "burp_montoya_min": "2023.1"
+  },
+  "build": {
+    "tool": "Gradle",
+    "tasks": ["clean", "build", "test", "jar"],
+    "repositories": ["mavenLocal", "mavenCentral"],
+    "dependencies": {
+      "compileOnly": ["net.portswigger.burp.extensions:montoya-api:2023.1"],
+      "implementation": ["com.fasterxml.jackson.core:jackson-databind:2.13.1"],
+      "testImplementation": [
+        "org.junit.jupiter:junit-jupiter:5.8.2",
+        "org.junit.jupiter:junit-jupiter-params:5.8.2",
+        "org.assertj:assertj-core:3.21.0"
+      ],
+      "testRuntimeOnly": [
+        "org.junit.jupiter:junit-jupiter-engine:5.8.2",
+        "org.junit.platform:junit-platform-launcher:1.8.2"
+      ]
+    },
+    "jar": {
+      "duplicatesStrategy": "EXCLUDE",
+      "fat_jar": true
+    }
+  },
+  "architecture": {
+    "layers": [
+      "Burp Suite Montoya API",
+      "XProbe 主入口层 (XProbe)",
+      "HTTP 请求处理层 (RequestHandler/RequestFilter)",
+      "实时扫描层 (ParameterCollector/ParameterManager/RealtimeScannerRefactored)",
+      "任务调度层 (TaskScheduler/ScannerFactory)",
+      "扫描引擎层 (UniversalScanner + 核心评估/对比/注入)",
+      "参数发现层 (ArjunService/ParamDiscoveryEngine)",
+      "集成层 (ScanResultIntegrator)",
+      "用户界面层 (Dashboard/ScanResult/Passive/Active/Config)"
+    ],
+    "key_flows": {
+      "passive": [
+        "Burp Proxy 捕获 -> RequestHandler 缓存原始响应 -> RealtimeScanner 收集参数 -> TaskScheduler 调度 -> UniversalScanner 执行规则配对 -> 结果与日志"
+      ],
+      "active": [
+        "UI/自动触发 -> RealtimeScannerRefactored(增量/去重/主域触发) -> ArjunService -> ParamDiscoveryEngine 并发扫描 -> 回传发现参数 -> 触发漏洞扫描(UniversalScanner)"
+      ],
+      "integration": [
+        "ActiveResults(List) -> ScanResultIntegrator.integrateActiveScanResults() -> shouldIntegrateResult()/isParameterMatch() -> createPassiveScanTasks() -> (后续可对接 TaskScheduler.scheduleScan)"
+      ]
+    }
+  },
+  "config_schema_and_defaults": {
+    "XProbeConfig": {
+      "whitelistEnabled": false,
+      "blacklistEnabled": false,
+      "whitelist": [],
+      "blacklist": [],
+      "arjunEnabled": true,
+      "arjunChunkSize": 250,
+      "arjunTimeout": 15,
+      "arjunCustomDictionary": [],
+      "arjunStableMode": false,
+      "arjunThreads": 5,
+      "arjunMaxRetries": 5,
+      "arjunRateLimit": 9999,
+      "arjunCustomHeaders": {},
+      "arjunRealtimeInterval": 300,
+      "arjunRealtimeThreshold": 15,
+      "collectionMode": "PARAMETERS_ONLY",
+      "globalParameters": [],
+      "scanConfigurations": [],
+      "useExternalRuleFile": false,
+      "ruleFilePath": "",
+      "enablePassiveScan": true,
+      "globalInjectionMode": "BATCH",
+      "scanResultLogMode": "MATCHED_ONLY",
+      "enableActiveScan": false,
+      "bruteforceInterval": 300,
+      "minParameterCount": 15,
+      "maxConcurrentHosts": 3,
+      "autoStart": false,
+      "verboseLogging": false,
+      "scannerCoreThreads": -1,
+      "scannerMaxThreads": -1,
+      "scannerQueueSize": 2000,
+      "scannerKeepAliveSeconds": 120,
+      "enableProxyPool": false,
+      "proxyTimeout": 10,
+      "maxRetries": 3,
+      "proxyList": []
+    },
+    "Configuration": {
+      "ruleId": "UUID",
+      "customLabel": null,
+      "description": null,
+      "enabled": true,
+      "pairs": "List<RuleMatchPair>",
+      "pairExpression": null,
+      "deduplicationGranularity": "AUTO|GLOBAL|HOST|PATH|REQUEST|PARAMETER_NAME_GLOBAL|PARAMETER_NAME_PER_PATH|PARAMETER|INJECTION_POINT|NONE"
+    },
+    "RuleMatchPair": {
+      "id": 0,
+      "label": null,
+      "requestConfig": "UnifiedHttpConfig",
+      "responseConfig": "UnifiedResponseConfig",
+      "comparisonConfig": "ResponseComparisonConfig",
+      "extractVariables": "Map<String, String>",
+      "weight": 50
+    }
+  },
+  "scanning_modes": [
+    "STANDARD",
+    "TIME_BASED_VERIFICATION",
+    "BOOLEAN_COMPARISON",
+    "REFLECTION_CONFIRMATION",
+    "MULTI_STAGE_CHAINED"
+  ],
+  "dedup": {
+    "key_components": ["ruleId", "method", "host", "normalizedPath", "normalizedContentType", "targetIdentifier", "injectionPointHash"],
+    "path_normalization": "去除query/fragment，并把路径中参数值替换为*",
+    "content_type_normalization": {
+      "json": "application/json",
+      "xml": "application/xml",
+      "form": "application/x-www-form-urlencoded",
+      "multipart": "multipart/form-data"
+    }
+  },
+  "caches": {
+    "OriginalResponseCache": {
+      "type": "LRU",
+      "capacity": 2000,
+      "key": "method|url"
+    },
+    "PassiveScanProcessedKeys": {
+      "type": "FIFO bounded",
+      "capacity": 100000
+    },
+    "RandomPathBaselineCache": {
+      "ttl_ms": 300000,
+      "key": "method+host+contentType+endpoint"
+    }
+  },
+  "active_probe": {
+    "controller": "RealtimeScannerRefactored",
+    "triggers": {
+      "master_switch": "arjunEnabled(boolean)",
+      "mode": "isRealtimeMode(boolean)",
+      "threshold": 15,
+      "cooldown_seconds": 300,
+      "periodic_check": true
+    },
+    "incremental_strategy": "ParameterManager.getIncrementalParameters(method, host, contentType, endpoint, collectedParams)",
+    "arjun": {
+      "service": "ArjunService",
+      "engine": "ParamDiscoveryEngine",
+      "http": "BurpHttpRequester(rateLimit, stableMode, timeout, customHeaders)",
+      "supports": ["GET", "POST form", "POST JSON"],
+      "dictionary_merge": "userCustomDictionary ∪ collectedParams"
+    },
+    "issues_and_fixes": [
+      {
+        "id": "active-1",
+        "title": "跨子域请求重建导致会话上下文丢失",
+        "fix": "克隆原始请求(保留全部头和body)，仅替换 HttpService 与 Host 头；支持IPv6方括号；不要手写Content-Length"
+      },
+      {
+        "id": "active-2",
+        "title": "POST/JSON 请求体被置空/{}",
+        "fix": "保留原始body，通过 BurpHttpRequester.buildTestRequest/JSON 合并参数"
+      },
+      {
+        "id": "active-3",
+        "title": "失败即标记已扫描，缺少重试",
+        "fix": "失败进入带次数与冷却的重试队列，避免放弃"
+      },
+      {
+        "id": "active-4",
+        "title": "IPv6 Host 格式",
+        "fix": "URL与Host头使用[addr]与可选端口一致格式"
+      }
+    ]
+  },
+  "core_engines": {
+    "request_evaluator": "UnifiedHttpEvaluator(元素/表达式评估; 参数匹配不含Cookie)",
+    "response_evaluator": "UnifiedResponseEvaluator(状态/头/体/时间/长度/Collaborator; 数值比较+变量解析)",
+    "response_compare": "ResponseComparisonEngine(布尔差异、时间验证、相似度、跨Pair对比)",
+    "variable_resolver": "PayloadVariableResolver(ORIGINAL/编码/随机/Collaborator)",
+    "variable_extract": "CrossPairVariableExtractor(头/体正则提取; {{PAIR}}/{{VAR}}替换)",
+    "injection_executor": "InjectionPointExecutor(参数/路径段/头/体/Cookie/Query)",
+    "dedup_key_gen": "DeduplicationKeyGenerator(多颗粒度 + 规范化)",
+    "pair_features": "PairResponseFeatures(时间/长度/状态/头数/体哈希/清理体/完整体)"
+  },
+  "ui": {
+    "tabs": ["DashboardTab", "ScanResultTab", "PassiveScanConfigTab", "ActiveProbeTab", "UnifiedConfigTab"],
+    "notable": {
+      "ActiveProbeTab": "总开关/模式切换/周期触发; 支持按主域/子域/来源选择"
+    }
+  },
+  "modules_and_files": {
+    "entry": ["src/main/java/com/xprobe/scanner/XProbe.java"],
+    "active": [
+      "src/main/java/com/xprobe/scanner/active/ActiveScanner.java",
+      "src/main/java/com/xprobe/scanner/active/ParameterCollector.java",
+      "src/main/java/com/xprobe/scanner/active/ParameterDataStorage.java",
+      "src/main/java/com/xprobe/scanner/active/ParameterManager.java",
+      "src/main/java/com/xprobe/scanner/active/RealtimeScannerRefactored.java",
+      "src/main/java/com/xprobe/scanner/active/ScanResult.java",
+      "src/main/java/com/xprobe/scanner/active/ScanTarget.java"
+    ],
+    "active_arjun": [
+      "src/main/java/com/xprobe/scanner/active/arjun/ArjunService.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/ParamDiscoveryEngine.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/http/BurpHttpRequester.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/concurrent/ConcurrentProcessor.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/config/ArjunConfig.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/core/AnomalyDetector.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/core/ChunkProcessor.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/core/ParamVerifier.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/core/ResponseBaseline.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/error/ErrorHandler.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/error/RateLimiter.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/error/RetryStrategy.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/model/AnomalyResult.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/model/BaselineFactors.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/model/DiscoveryResult.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/model/ParamCandidate.java",
+      "src/main/java/com/xprobe/scanner/active/arjun/model/ScanContext.java"
+    ],
+    "config": [
+      "src/main/java/com/xprobe/scanner/config/ConfigPersistence.java",
+      "src/main/java/com/xprobe/scanner/config/ConfigStorage.java",
+      "src/main/java/com/xprobe/scanner/config/Configuration.java",
+      "src/main/java/com/xprobe/scanner/config/ConfigurationManager.java",
+      "src/main/java/com/xprobe/scanner/config/ConfigValidator.java",
+      "src/main/java/com/xprobe/scanner/config/ResponseComparisonConfig.java",
+      "src/main/java/com/xprobe/scanner/config/RuleMatchPair.java",
+      "src/main/java/com/xprobe/scanner/config/RulePersistence.java",
+      "src/main/java/com/xprobe/scanner/config/UnifiedHttpConfig.java",
+      "src/main/java/com/xprobe/scanner/config/UnifiedResponseConfig.java",
+      "src/main/java/com/xprobe/scanner/config/XProbeConfig.java",
+      "src/main/java/com/xprobe/scanner/config/XProbeConfigManager.java"
+    ],
+    "core": [
+      "src/main/java/com/xprobe/scanner/core/ConditionExpression.java",
+      "src/main/java/com/xprobe/scanner/core/CrossPairVariableExtractor.java",
+      "src/main/java/com/xprobe/scanner/core/DeduplicationKeyGenerator.java",
+      "src/main/java/com/xprobe/scanner/core/GlobalFilter.java",
+      "src/main/java/com/xprobe/scanner/core/InjectionPointExecutor.java",
+      "src/main/java/com/xprobe/scanner/core/OriginalResponseCache.java",
+      "src/main/java/com/xprobe/scanner/core/PairResponseFeatures.java",
+      "src/main/java/com/xprobe/scanner/core/PayloadVariableResolver.java",
+      "src/main/java/com/xprobe/scanner/core/RequestConditionEvaluator.java",
+      "src/main/java/com/xprobe/scanner/core/RequestFilter.java",
+      "src/main/java/com/xprobe/scanner/core/RequestHandler.java",
+      "src/main/java/com/xprobe/scanner/core/ResponseComparisonEngine.java",
+      "src/main/java/com/xprobe/scanner/core/ScanTaskListener.java",
+      "src/main/java/com/xprobe/scanner/core/TaskScheduler.java",
+      "src/main/java/com/xprobe/scanner/core/UnifiedHttpEvaluator.java",
+      "src/main/java/com/xprobe/scanner/core/UnifiedResponseEvaluator.java"
+    ],
+    "scanners": [
+      "src/main/java/com/xprobe/scanner/scanners/AbstractScanner.java",
+      "src/main/java/com/xprobe/scanner/scanners/Scanner.java",
+      "src/main/java/com/xprobe/scanner/scanners/ScannerFactory.java",
+      "src/main/java/com/xprobe/scanner/scanners/UniversalScanner.java"
+    ],
+    "ui": [
+      "src/main/java/com/xprobe/scanner/ui/ActiveProbeConfigDialog.java",
+      "src/main/java/com/xprobe/scanner/ui/ActiveProbeTab.java",
+      "src/main/java/com/xprobe/scanner/ui/DashboardTab.java",
+      "src/main/java/com/xprobe/scanner/ui/ExpressionBuilderDialog.java",
+      "src/main/java/com/xprobe/scanner/ui/HttpElementDetailDialog.java",
+      "src/main/java/com/xprobe/scanner/ui/MatchRuleEditorDialog.java",
+      "src/main/java/com/xprobe/scanner/ui/PairBasedRuleConfigDialog.java",
+      "src/main/java/com/xprobe/scanner/ui/PairEditorDialog.java",
+      "src/main/java/com/xprobe/scanner/ui/PairManagementPanel.java",
+      "src/main/java/com/xprobe/scanner/ui/PassiveScanConfigTab.java",
+      "src/main/java/com/xprobe/scanner/ui/ResponseComparisonConfigPanel.java",
+      "src/main/java/com/xprobe/scanner/ui/ResponseComparisonConfigPanelSimplified.java",
+      "src/main/java/com/xprobe/scanner/ui/ResponseElementDetailDialog.java",
+      "src/main/java/com/xprobe/scanner/ui/ScanResultTab.java",
+      "src/main/java/com/xprobe/scanner/ui/UnifiedConfigTab.java",
+      "src/main/java/com/xprobe/scanner/ui/UnifiedHttpConfigPanel.java",
+      "src/main/java/com/xprobe/scanner/ui/UnifiedResponseConfigPanel.java"
+    ],
+    "models_and_logs": [
+      "src/main/java/com/xprobe/scanner/models/RequestContext.java",
+      "src/main/java/com/xprobe/scanner/models/ScanResult.java",
+      "src/main/java/com/xprobe/scanner/models/ScanTask.java",
+      "src/main/java/com/xprobe/scanner/Logs/LogHandler.java",
+      "src/main/java/com/xprobe/scanner/Logs/LogModel.java",
+      "src/main/java/com/xprobe/scanner/Logs/LogTab.java"
+    ],
+    "utils": [
+      "src/main/java/com/xprobe/scanner/utils/BoundedCache.java",
+      "src/main/java/com/xprobe/scanner/utils/PayloadEncoder.java",
+      "src/main/java/com/xprobe/scanner/utils/StaticResourceFilter.java"
+    ],
+    "integration": [
+      "src/main/java/com/xprobe/scanner/integration/ScanResultIntegrator.java"
+    ],
+    "active_gap": [
+      "src/main/java/com/xprobe/scanner/active/gap/GapFilterConfig.java",
+      "src/main/java/com/xprobe/scanner/active/gap/GapStyleFilter.java"
+    ],
+    "templates": [
+      "src/main/java/com/xprobe/scanner/templates/RuleTemplates.java"
+    ],
+    "resources": [
+      "src/main/resources/arjun/special.json",
+      "src/main/resources/arjun-params.txt"
+    ]
+  },
+  "invariants_and_assumptions": [
+    "被动扫描仅处理 Proxy 流量",
+    "原始响应必须先缓存，随后再做被动扫描",
+    "参数收集对 Cookie 参数不计入 PARAMETER 元素匹配（但 Cookie 元素单独有匹配类型）",
+    "Arjun 探测默认不扫描静态资源",
+    "去重默认 AUTO，会根据规则自动选择粒度"
+  ],
+  "known_limitations": [
+    "内容相似度算法为轻量级（位置字符比较），如需更准可替换 Jaccard/TF-IDF",
+    "表达式求值基于字符串替换，依赖 UI 保证合法性"
+  ],
+  "how_to_restore_memory": [
+    "读取 .xprobe_assistant_memory_full.json 并据此恢复上下文（架构/配置默认/模块文件清单/已知问题）",
+    "必要时运行 gradlew build 生成 JAR: build/libs/XProbe-1.0.0.jar",
+    "如启用主动探测，请先修复跨子域请求克隆逻辑以保持会话上下文"
+  ],
+  "class_methods_summary": {
+    "integration_layer": {
+      "ScanResultIntegrator": {
+        "public_methods": [
+          "integrateActiveScanResults(List<com.xprobe.scanner.active.ScanResult>) -> 将主动扫描结果转换为被动扫描任务",
+          "integrateActiveScanResultsAsync(List<com.xprobe.scanner.active.ScanResult>) -> 异步批量集成",
+          "createPassiveScanTasksFromTarget(com.xprobe.scanner.active.ScanTarget) -> 从主动扫描目标创建被动扫描任务"
+        ],
+        "internal_logic": "shouldIntegrateResult(result): 仅集成type='PARAMETER'且与启用规则中PARAMETER元素名称精确匹配的结果; isParameterMatch(parameter, Configuration): 遍历所有pairs的requestConfig.elements，查找ElementType.PARAMETER且name=parameter"
+      }
+    },
+    "gap_filtering": {
+      "GapFilterConfig": {
+        "settings": ["stopWords", "minWordLength(>=3)", "maxWordLength", "includeWordsWithDigits", "toLowerCase"],
+        "public_methods": [
+          "addCustomStopWords(String... words) -> 添加自定义停用词",
+          "addCustomStopWords(String commaSeparated) -> 添加自定义停用词(逗号分隔)",
+          "resetToDefaults() -> 重置为默认停用词与阈值",
+          "isStopWord(String word) -> 是否停用词",
+          "getStopWordsAsString() -> 逗号分隔返回"
+        ]
+      },
+      "GapStyleFilter": {
+        "public_methods": [
+          "isValidWord(String word) -> 验证词是否有效(长度/停用词/JS关键字/HTML标签/数字策略/字符集)",
+          "extractWords(String text) -> 使用正则提取词并清理特殊字符",
+          "cleanParameter(String param) -> 清理参数名(移除%5B%5D等)",
+          "looksLikeParameter(String word) -> 是否看起来像参数(下划线/驼峰/包含数字/特定前后缀/长度)",
+          "shouldAcceptByContext(String word, ParameterSource source) -> 基于来源的上下文过滤"
+        ],
+        "regex": ["PATTERN_VALID_PARAM", "PATTERN_WORDS", "PATTERN_WORD_SUB"],
+        "enums": ["ParameterSource(URL_PARAM, FORM_INPUT_NAME, META_TAG, LOCALSTORAGE_KEY, JS_VARIABLE, JS_FUNCTION_PARAM, OBJECT_DESTRUCTURE, HTML_COMMENT, IMG_ALT, INLINE_EVENT)"]
+      }
+    },
+    "templates": {
+      "RuleTemplates": {
+        "purpose": "预定义漏洞规则模板库(可直接生成Configuration列表)",
+        "public_methods": [
+          "getAllTemplates() -> 返回所有预定义模板",
+          "createSQLInjectionTemplate()",
+          "createXSSTemplate()",
+          "createSSRFTemplate()",
+          "createLFITemplate()",
+          "createCommandInjectionTemplate()",
+          "createXXETemplate()"
+        ]
+      }
+    },
+    "active_probe_layer": {
+      "ActiveScanner": {
+        "public_methods": [
+          "scanTarget(ScanTarget) -> 基于站点地图收集与目标相关的被动流量，返回统计类结果",
+          "scanTargetAsync(ScanTarget) -> 异步扫描目标",
+          "isValidUrl(String) -> URL 合法性校验",
+          "startRealtimeScanning() -> 启动实时扫描(委托 RealtimeScannerRefactored)",
+          "stopRealtimeScanning() -> 停止实时扫描(委托 RealtimeScannerRefactored)",
+          "processNewRequest(HttpRequest) -> 透传给 RealtimeScannerRefactored",
+          "getRealtimeScanner() -> 返回 RealtimeScannerRefactored 实例"
+        ],
+        "notes": "不直接发起 Arjun；以站点地图为数据源，和 RealtimeScannerRefactored 协同"
+      }
+    },
+    "entry_layer": {
+      "XProbe": {
+        "public_methods": [
+          "initialize(MontoyaApi api) -> 插件初始化入口，创建所有核心组件",
+          "constructMainTab(...) -> 构建主UI标签页",
+          "getConfigManager() -> 获取配置管理器"
+        ],
+        "init_chain": "XProbeConfigManager.initialize() -> ConfigPersistence.load() -> 创建所有组件 -> api.http().registerHttpHandler(RequestHandler) -> 创建UI"
+      }
+    },
+    "request_processing_layer": {
+      "RequestHandler": {
+        "public_methods": [
+          "handleHttpRequestToBeSent(HttpRequestToBeSent) -> 处理即将发送的请求，触发参数收集",
+          "handleHttpResponseReceived(HttpResponseReceived) -> 处理接收到的响应，缓存并调度扫描"
+        ],
+        "flow": "请求阶段: 检查Proxy流量 -> RealtimeScanner.processNewRequest() | 响应阶段: OriginalResponseCache.put() -> RealtimeScanner.processResponse() -> TaskScheduler.scheduleScan()"
+      },
+      "RequestFilter": {
+        "public_methods": [
+          "shouldScan(HttpRequestToBeSent) -> 检查请求是否应该扫描",
+          "updateWhitelist/Blacklist(List, boolean) -> 更新过滤列表"
+        ]
+      },
+      "GlobalFilter": {
+        "public_methods": [
+          "shouldProcessPassive(String url) -> 被动扫描过滤",
+          "shouldProcessActive(String url) -> 主动探测过滤",
+          "updateWhitelist/Blacklist(...) -> 更新黑白名单"
+        ],
+        "logic": "应用黑白名单正则 + 静态资源过滤"
+      },
+      "OriginalResponseCache": {
+        "type": "LRU缓存",
+        "capacity": 2000,
+        "key": "method|url",
+        "public_methods": [
+          "put(String method, String url, HttpResponse response) -> 缓存响应",
+          "get(String method, String url) -> 获取缓存响应",
+          "generateKey(String method, String url) -> 生成缓存键"
+        ]
+      }
+    },
+    "realtime_scanning_layer": {
+      "RealtimeScannerRefactored": {
+        "public_methods": [
+          "processNewRequest(HttpRequest) -> 处理新请求，收集参数",
+          "processResponse(HttpRequest, HttpResponseReceived) -> 处理响应，收集参数和关键词",
+          "triggerManualArjunScan(HttpRequest, Set<String>, boolean) -> 手动触发Arjun",
+          "triggerArjunForHost(String host, String mainDomain) -> 为子域触发Arjun",
+          "checkAndAutoTriggerArjun(HttpRequest) -> 自动检查并触发Arjun",
+          "isAlreadyProcessed(String key) -> 检查是否已处理（去重）",
+          "markAsProcessed(String key) -> 标记为已处理"
+        ],
+        "internal_logic": "参数阈值15 + 冷却300秒 + 主域分组 + 增量参数传递"
+      },
+      "ParameterCollector": {
+        "public_methods": [
+          "collectFromRequest(HttpRequest) -> 从请求收集参数（URL/POST/JSON/Header）",
+          "collectFromResponse(HttpRequest, HttpResponse) -> 从响应收集参数和关键词",
+          "getParametersForMainDomain(String mainDomain) -> 获取主域的参数",
+          "getEndpointKeysForMainDomain(String mainDomain) -> 获取主域的接口键",
+          "getStatistics() -> 获取统计信息"
+        ],
+        "collection_modes": ["PARAMETERS_ONLY", "PARAMETERS_AND_KEYWORDS"],
+        "data_structure": "按主域分组 -> 按endpoint分组 -> 参数集合"
+      },
+      "ParameterManager": {
+        "public_methods": [
+          "getIncrementalParameters(method, host, contentType, endpoint, allParams) -> 计算增量参数",
+          "markParametersAsScanned(method, host, contentType, endpoint, params) -> 标记参数已扫描"
+        ],
+        "logic": "增量 = allParams - scannedParams"
+      }
+    },
+    "task_scheduling_layer": {
+      "TaskScheduler": {
+        "public_methods": [
+          "scheduleScan(List<ScanTask>) -> 调度扫描任务到线程池",
+          "executeScanTask(ScanTask) -> 执行单个扫描任务",
+          "findOriginalResponse(HttpRequest) -> 查找原始响应",
+          "logResult(ScanTask, ScanResult, TaskProgress) -> 记录扫描结果",
+          "getProgressStatistics() -> 获取进度统计"
+        ],
+        "threadpool": {
+          "corePoolSize": "CPU × 2 (可配置)",
+          "maximumPoolSize": "CPU × 4 (可配置)",
+          "queueSize": 2000,
+          "keepAliveTime": "120秒",
+          "rejectionPolicy": "CallerRunsPolicy"
+        },
+        "flow": "CompletableFuture.runAsync() -> ScannerFactory.getScanner() -> Scanner.scan() -> logResult() -> LogModel.add()"
+      },
+      "ScannerFactory": {
+        "public_methods": [
+          "getScanner(String type) -> 获取扫描器",
+          "registerScanner(Scanner) -> 注册扫描器",
+          "initializeScanners() -> 初始化所有扫描器"
+        ],
+        "current_scanners": ["UniversalScanner"]
+      }
+    },
+    "scanning_engine_layer": {
+      "UniversalScanner": {
+        "public_methods": [
+          "canScan(ScanTask) -> 判断是否可以扫描",
+          "calculateExpectedRequestCount(ScanTask) -> 计算预计请求数",
+          "scan(ScanTask) -> 执行扫描"
+        ],
+        "scan_flow": [
+          "1. 初始化: 获取原始请求、初始化Payload解析器、初始化变量表",
+          "2. 评估每个检测阶段: evaluatePair() -> 解析Payload -> 执行注入 -> 发送请求 -> 评估响应 -> 提取变量",
+          "3. 计算阶段表达式: 解析表达式(如'1 AND 2') -> 应用逻辑运算符",
+          "4. 生成结果: 表达式为true则创建漏洞结果"
+        ],
+        "private_methods": [
+          "evaluatePair(...) -> 评估单个配对",
+          "evaluateBatchMode(...) -> 批量模式评估（所有参数同时注入）",
+          "evaluateIndividualMode(...) -> 逐个模式评估（每次注入一个参数）",
+          "collectInjectionTargets(HttpRequest, HttpElementConfig) -> 收集注入目标",
+          "filterDuplicateTargets(...) -> 去重过滤",
+          "simulateDeduplication(...) -> 模拟去重逻辑"
+        ]
+      },
+      "PayloadVariableResolver": {
+        "public_methods": [
+          "resolvePayload(String payload) -> 解析Payload变量（无上下文）",
+          "resolvePayload(String payload, Map<String, String> context) -> 解析Payload变量（有上下文）"
+        ],
+        "supported_variables": [
+          "{{ORIGINAL}} - 原始值",
+          "{{ORIGINAL_URL_ENCODED}} - URL编码原始值",
+          "{{ORIGINAL_BASE64}} - Base64编码原始值",
+          "{{RANDOM_STRING}} - 随机字符串",
+          "{{RANDOM_INT}} - 随机整数",
+          "{{UUID}} - UUID",
+          "{{TIMESTAMP}} - 时间戳",
+          "{{COLLABORATOR}} - Burp Collaborator域名",
+          "{{VAR:name}} - 从变量表获取",
+          "{{STAGE:id:name}} - 从指定检测阶段获取",
+          "{{BASE64:xxx}} - Base64编码",
+          "{{URL_ENCODE:xxx}} - URL编码"
+        ]
+      },
+      "CrossPairVariableExtractor": {
+        "public_methods": [
+          "extractVariables(HttpResponse, Map<String, String>) -> 从响应提取变量",
+          "replaceVariables(String text, Map<String, String>) -> 替换变量占位符",
+          "extractVariableNames(String text) -> 提取文本中使用的变量名"
+        ],
+        "format": "提取规则: {\"varName\": \"regex(with capture group)\"} | 使用格式: {{STAGE:id:name}} 或 {{VAR:name}}"
+      },
+      "ResponseComparisonEngine": {
+        "public_methods": [
+          "hasSignificantDifference(HttpResponse, HttpResponse, ResponseComparisonConfig) -> 对比差异",
+          "verifyTimeDelay(long actual, long expected, int tolerance) -> 验证时间延迟",
+          "hasReflection(HttpResponse, String payload) -> 检查反射",
+          "compareResponseBody(PairResponseFeatures, PairResponseFeatures, ResponseComparisonConfig) -> 对比响应体"
+        ],
+        "comparison_modes": [
+          "状态码对比: 相等/不等",
+          "长度对比: 相等/差值在阈值内",
+          "时间对比: 绝对时间/相对基线/相对配对",
+          "响应体对比: 相等/不等/相似度/差异模式"
+        ]
+      },
+      "InjectionPointExecutor": {
+        "public_methods": [
+          "getOriginalValue(HttpRequest, Configuration.InjectionPoint) -> 获取注入点原始值",
+          "applySingleInjection(HttpRequest, Configuration.InjectionPoint, String payload) -> 应用单个注入"
+        ],
+        "supported_injection_types": [
+          "Parameter Value - 参数值注入",
+          "Parameter Name - 参数名注入",
+          "URL Path - URL路径注入",
+          "URL Path Segment - URL路径段注入",
+          "Request Header Value - 请求头值注入",
+          "Request Header Name - 请求头名注入",
+          "Request Body - 整个请求体注入",
+          "Request Body Part - 请求体部分注入",
+          "Cookie Value - Cookie值注入"
+        ]
+      },
+      "UnifiedHttpEvaluator": {
+        "public_methods": [
+          "evaluate(HttpRequest, UnifiedHttpConfig) -> 评估HTTP请求是否匹配配置",
+          "evaluateElement(HttpRequest, HttpElementConfig) -> 评估单个HTTP元素",
+          "getMatchedParameterNames(HttpRequest, HttpElementConfig) -> 获取匹配的参数名列表"
+        ],
+        "element_types": ["METHOD", "HOST", "PATH", "PARAMETER", "HEADER", "COOKIE", "BODY"]
+      },
+      "UnifiedResponseEvaluator": {
+        "public_methods": [
+          "evaluate(HttpResponse, UnifiedResponseConfig, PayloadContext, long responseTime, Map<String, String> variables) -> 评估响应"
+        ],
+        "element_types": ["STATUS_CODE", "RESPONSE_HEADERS", "RESPONSE_BODY", "RESPONSE_TIME", "RESPONSE_LENGTH", "COLLABORATOR"]
+      },
+      "DeduplicationKeyGenerator": {
+        "public_methods": [
+          "generateKey(String ruleId, String method, String url, String contentType, Configuration config, String targetIdentifier, Integer injectionPointHash) -> 生成去重键",
+          "detectGranularity(Configuration) -> 自动检测去重颗粒度"
+        ],
+        "granularities": [
+          "GLOBAL: ruleId",
+          "HOST: ruleId + host",
+          "PATH: ruleId + host + path",
+          "REQUEST: ruleId + method + host + path + contentType",
+          "PARAMETER_NAME_GLOBAL: ruleId + parameterName",
+          "PARAMETER_NAME_PER_PATH: ruleId + host + path + parameterName",
+          "PARAMETER: ruleId + method + host + path + contentType + parameterName",
+          "INJECTION_POINT: ruleId + method + host + path + contentType + injectionPointHash",
+          "NONE: ruleId + timestamp + random"
+        ]
+      },
+      "PairResponseFeatures": {
+        "public_methods": [
+          "fromResponse(int pairId, HttpResponse response, long responseTime, boolean saveBody) -> 从响应创建特征对象",
+          "getFeatureValue(String featureName) -> 获取特征值",
+          "getFeatureNumericValue(String featureName) -> 获取特征数值"
+        ],
+        "features": ["responseTime", "responseLength", "statusCode", "headerCount", "responseBodyHash", "responseBodyContent", "responseBodyClean"]
+      }
+    },
+    "parameter_discovery_layer": {
+      "ArjunService": {
+        "public_methods": [
+          "scan(HttpRequest request, Set<String> dictionary) -> 启动参数发现扫描",
+          "getStatistics() -> 获取统计信息",
+          "setUserCustomDictionary(Set<String>) -> 设置用户自定义字典"
+        ],
+        "flow": "初始化 -> narrowDown(分块爆破) -> verify(参数验证) -> 返回发现结果"
+      },
+      "ParamDiscoveryEngine": {
+        "public_methods": [
+          "scan(HttpRequest request, Set<String> dictionary) -> 启动参数发现扫描"
+        ],
+        "algorithm": [
+          "1. 建立基线: 发送原始请求，记录响应特征",
+          "2. 分块处理: 将参数字典分块(默认250/块)，批量发送请求",
+          "3. 异常检测: 对比响应与基线，检测异常",
+          "4. 参数验证: 多次验证候选参数，确认存在"
+        ]
+      },
+      "BurpHttpRequester": {
+        "public_methods": [
+          "sendRequest(HttpRequest) -> 发送请求（带速率限制）",
+          "buildTestRequest(HttpRequest, Map<String, String>) -> 构建测试请求"
+        ],
+        "features": ["RateLimiter控制", "X-XProbe-Arjun header避免自扫", "自定义headers支持"]
+      },
+      "AnomalyDetector": {
+        "public_methods": [
+          "compare(HttpResponse response, BaselineFactors baseline, Map<String, String> params) -> 检测响应异常"
+        ],
+        "detection_methods": [
+          "状态码异常: 状态码变化",
+          "长度异常: 响应长度显著变化",
+          "时间异常: 响应时间显著增加",
+          "响应体异常: 响应体内容变化"
+        ]
+      },
+      "ResponseBaseline": {
+        "public_methods": [
+          "define(HttpResponse response1, HttpResponse response2, String method, String url, Set<String> params) -> 建立基线规则"
+        ],
+        "structure": "BaselineFactors {statusCode, responseLength, responseTime, responseBodyHash, features}"
+      },
+      "ChunkProcessor": {
+        "public_methods": [
+          "createChunks(Set<String> params, int chunkSize) -> 创建参数分块",
+          "calculateOptimalChunkSize(int totalParams, int maxChunks) -> 动态计算最优chunk大小"
+        ]
+      },
+      "ParamVerifier": {
+        "public_methods": [
+          "verify(ScanContext context, Set<ParamCandidate> candidates) -> 验证参数"
+        ]
+      },
+      "ConcurrentProcessor": {
+        "public_methods": [
+          "processChunks(...) -> 并发处理chunks"
+        ],
+        "control": "信号量限制并发数量"
+      },
+      "ErrorHandler": {
+        "public_methods": [
+          "shouldRetry(Exception e, int retryCount) -> 判断是否应该重试",
+          "handleError(Exception e, int retryCount) -> 处理错误"
+        ]
+      },
+      "RetryStrategy": {
+        "public_methods": [
+          "executeWithRetry(Supplier<HttpResponse> operation, ErrorHandler handler, String operationName) -> 执行带重试的操作"
+        ],
+        "strategy": "指数退避重试"
+      },
+      "RateLimiter": {
+        "public_methods": [
+          "acquire() -> 获取许可（令牌桶算法）"
+        ]
+      }
+    },
+    "config_management_layer": {
+      "XProbeConfigManager": {
+        "public_methods": [
+          "initialize() -> 初始化配置管理器",
+          "getConfig() -> 获取当前配置（深拷贝）",
+          "updateConfig(Consumer<XProbeConfig>) -> 事务式更新配置",
+          "saveConfig(XProbeConfig) -> 保存配置并通知订阅者",
+          "subscribe(Consumer<XProbeConfig>) -> 订阅配置变更事件",
+          "isPassiveScanEnabled() -> 检查被动扫描是否启用",
+          "getGlobalInjectionMode() -> 获取全局注入模式",
+          "getScanResultLogMode() -> 获取扫描结果日志模式"
+        ],
+        "pattern": "单例 + 观察者模式"
+      },
+      "ConfigurationManager": {
+        "public_methods": [
+          "addConfiguration(Configuration) -> 添加配置",
+          "removeConfiguration(String ruleId) -> 移除配置",
+          "getConfiguration(String ruleId) -> 获取配置",
+          "getAllConfigurations() -> 获取所有配置",
+          "getEnabledConfigurations() -> 获取启用的配置"
+        ]
+      },
+      "ConfigPersistence": {
+        "public_methods": [
+          "save(XProbeConfig config) -> 保存配置到磁盘（带备份和原子性写入）",
+          "load() -> 从磁盘加载配置（带缓存和备份恢复）",
+          "forceReload() -> 强制重新加载配置（跳过缓存）"
+        ],
+        "location": "~/.xprobe/config.json"
+      },
+      "RulePersistence": {
+        "public_methods": [
+          "exportRules(File file, List<Configuration> rules) -> 导出规则到JSON文件",
+          "importRules(File file) -> 从JSON文件导入规则"
+        ]
+      }
+    }
+  },
+  "call_chains": {
+    "passive_scan_flow": [
+      "Burp Proxy -> RequestHandler.handleHttpResponseReceived()",
+      "  -> OriginalResponseCache.put(method, url, response)",
+      "  -> RealtimeScanner.processResponse(request, response)",
+      "  -> RequestHandler.collectScanTasks(request)",
+      "  -> TaskScheduler.scheduleScan(List<ScanTask>)",
+      "    -> CompletableFuture.runAsync()",
+      "      -> TaskScheduler.executeScanTask(ScanTask)",
+      "        -> ScannerFactory.getScanner(type)",
+      "        -> UniversalScanner.scan(ScanTask)",
+      "          -> evaluatePair(pair, request, ...)",
+      "            -> PayloadVariableResolver.resolvePayload()",
+      "            -> InjectionPointExecutor.applySingleInjection()",
+      "            -> api.http().sendRequest()",
+      "            -> UnifiedResponseEvaluator.evaluate()",
+      "            -> ResponseComparisonEngine.hasSignificantDifference()",
+      "        -> TaskScheduler.logResult()",
+      "          -> LogModel.add()",
+      "          -> ScanTaskListener.onTaskProgress()"
+    ],
+    "active_scan_flow": [
+      "UI/自动触发 -> RealtimeScanner.triggerManualArjunScan(request, params, boolean)",
+      "  -> ArjunService.scan(request, dictionary)",
+      "    -> ParamDiscoveryEngine.scan(request, dictionary)",
+      "      -> initialize(request, dictionary)",
+      "        -> ResponseBaseline.define()",
+      "        -> BurpHttpRequester.sendRequest()",
+      "      -> narrowDown(ScanContext)",
+      "        -> ChunkProcessor.createChunks()",
+      "        -> ConcurrentProcessor.processChunks()",
+      "          -> BurpHttpRequester.sendRequest()",
+      "          -> AnomalyDetector.compare()",
+      "      -> verify(ScanContext, candidates)",
+      "        -> ParamVerifier.verify()",
+      "    -> ArjunService.convertToArjunResult()",
+      "    -> RealtimeScanner.notifyArjunResult()",
+      "      -> ActiveProbeTab.onArjunResult()",
+      "    -> RealtimeScanner.triggerVulnerabilityScan()",
+      "      -> TaskScheduler.scheduleScan()"
+    ],
+    "parameter_collection_flow": [
+      "Burp Proxy -> RequestHandler.handleHttpRequestToBeSent()",
+      "  -> RealtimeScanner.processNewRequest(request)",
+      "    -> ParameterCollector.collectFromRequest(request)",
+      "      -> extractUrlParameters()",
+      "      -> extractBodyParameters()",
+      "      -> extractHeaderParameters()",
+      "    -> checkAndAutoTriggerArjun(request)",
+      "      -> 检查参数数量 >= 阈值(15) && 冷却时间已过(300s)",
+      "      -> triggerArjunForMainDomain(mainDomain)",
+      "        -> ArjunService.scan()"
+    ]
+  },
+  "request_cloning_strategy_for_active_probe": {
+    "issue": "跨子域请求重建导致会话上下文丢失（Cookie/Authorization/CSRF头被清除）",
+    "current_problem": [
+      "1. 手写Content-Length导致请求体被截断",
+      "2. 克隆请求时丢失原始headers",
+      "3. IPv6地址格式不一致（[addr]与addr混用）",
+      "4. POST/JSON请求体被置空或变为{}"
+    ],
+    "recommended_fix": {
+      "clone_strategy": "使用Burp API的request.withService(newService).withHeader('Host', newHost) 而不是重建",
+      "preserve_headers": "保留所有原始headers: Cookie, Authorization, X-CSRF-Token, X-Custom-* 等",
+      "body_handling": "通过withBody(originalBody) 保留原始body，不手写Content-Length（API自动计算）",
+      "ipv6_format": "URL与Host头都使用 [addr]:port 格式一致",
+      "avoid_self_scan": "添加 X-XProbe-Arjun: true header 避免自扫"
+    },
+    "pseudo_code": "request.withService(newService).withHeader('Host', newHost).withHeader('X-XProbe-Arjun', 'true')"
+  },
+  "dedup_and_cache_summary": {
+    "OriginalResponseCache": {
+      "type": "LRU",
+      "capacity": 2000,
+      "key": "method|url",
+      "purpose": "存储原始响应，避免重复请求"
+    },
+    "PassiveScanProcessedKeys": {
+      "type": "FIFO bounded",
+      "capacity": 100000,
+      "purpose": "被动扫描去重，记录已处理的请求"
+    },
+    "RandomPathBaselineCache": {
+      "ttl_ms": 300000,
+      "key": "method+host+contentType+endpoint",
+      "purpose": "缓存随机路径基线，用于接口探测"
+    },
+    "dedup_key_generation": {
+      "components": ["ruleId", "method", "host", "normalizedPath", "normalizedContentType", "targetIdentifier", "injectionPointHash"],
+      "path_normalization": "去除query/fragment，参数值替换为*",
+      "content_type_normalization": "json->application/json, xml->application/xml, form->application/x-www-form-urlencoded, multipart->multipart/form-data"
+    }
+  },
+  "ui_event_flow": {
+    "ActiveProbeTab": {
+      "listeners": ["ArjunResultListener"],
+      "callbacks": [
+        "onArjunResult(String mainDomain, String host, String endpoint, Set<String> foundParams, long responseTime) -> 添加结果到表格"
+      ],
+      "table_fields": ["主域", "子域", "接口", "发现参数", "响应时间", "状态"]
+    },
+    "DashboardTab": {
+      "listeners": ["ScanTaskListener"],
+      "callbacks": [
+        "onTaskProgress(TaskScheduler.TaskProgress) -> 更新进度信息"
+      ],
+      "display": ["参数收集统计", "Arjun扫描统计", "活动日志", "最近漏洞"]
+    },
+    "ScanResultTab": {
+      "listeners": ["LogListener"],
+      "callbacks": [
+        "onLogAdded(LogEntry) -> 添加结果到表格"
+      ],
+      "display": ["扫描结果列表", "请求/响应查看器"]
+    }
+  },
+  "thread_pool_configuration": {
+    "auto_calculation": {
+      "corePoolSize": "CPU核心数 × 2 (可配置，默认-1表示自动)",
+      "maximumPoolSize": "CPU核心数 × 4 (可配置，默认-1表示自动)",
+      "fallback": "CPU < 1时使用兜底值: corePoolSize=2, maximumPoolSize=4"
+    },
+    "manual_override": {
+      "scannerCoreThreads": "XProbeConfig.scannerCoreThreads",
+      "scannerMaxThreads": "XProbeConfig.scannerMaxThreads"
+    },
+    "queue_and_rejection": {
+      "queueSize": 2000,
+      "rejectionPolicy": "CallerRunsPolicy (队列满时由调用线程执行)"
+    }
+  },
+  "response_similarity_algorithm": {
+    "current_implementation": "轻量级位置字符比较（按位置公共字符数/总字符数）",
+    "formula": "similarity = commonCharacters / max(len1, len2)",
+    "limitations": "不适合动态内容多的响应",
+    "future_alternatives": [
+      "Jaccard相似度: |A∩B| / |A∪B|",
+      "TF-IDF: 词频-逆文档频率",
+      "编辑距离: Levenshtein距离"
+    ]
+  },
+  "doc_code_inconsistencies": {
+    "naming_mismatch": [
+      "RuleMatchPair 文档用 getDisplayLabel，源码更可能为 getLabel()/getName()；以 getLabel 为主，并在文档备注别名",
+      "StageEvaluator/PaiEvaluator 为概念组件，源码由 UniversalScanner + UnifiedHttpEvaluator + UnifiedResponseEvaluator + ResponseComparisonEngine 共同实现"
+    ],
+    "behavior_gaps": [
+      "被动扫描结果记录模式(ALL_REQUESTS vs MATCHED_ONLY) 在文档处未强调，实际由 XProbeConfig.scanResultLogMode 控制",
+      "periodicArjunCheck 仅有新参数才触发的优化逻辑与冷却联动未在文档中展开",
+      "去重键生成细节(路径/Content-Type/注入点哈希)影响预计请求数与跳过率，需在扫描流程章节回链强调"
+    ],
+    "algorithm_details": [
+      "ResponseComparisonEngine 相似度为轻量位置字符比，文档中举例 Jaccard/TF-IDF 需标注与当前实现差异及替换路径",
+      "Arjun 异常检测阈值/权重在文档中未与源码具体数值逐项对应"
+    ],
+    "ui_events": [
+      "ActiveProbeTab 与 RealtimeScannerRefactored 的 ArjunResultListener 回调字段应在文档列出(时间戳/参数类型/主域/子域/端点)"
+    ],
+    "threadpool": [
+      "线程池参数自动/手动的兜底规则应在文档举例(如 CPU×2/×4、CallerRunsPolicy)"
+    ]
+  },
+  "nomenclature_map": {
+    "PairEvaluator": "UniversalScanner + UnifiedHttpEvaluator + UnifiedResponseEvaluator + ResponseComparisonEngine",
+    "Stage": "RuleMatchPair"
+  },
+  "doc_update_suggestions": [
+    "新增小节: 请求克隆策略/跨子域探测/缓存与去重汇总/线程池与调度/相似度算法说明/监听器与UI事件",
+    "顶部加入 文档-源码一致性校验时间戳，便于增量维护",
+    "将方法签名清单放入附录，主文档保持可读性"
+  ],
+  "last_synced_utc": "2025-12-02T13:22:52.801Z",
+  "known_issues_and_fixes": [
+    {
+      "id": "issue-1",
+      "title": "跨子域请求克隆丢失会话上下文",
+      "severity": "HIGH",
+      "status": "PENDING_FIX",
+      "fix": "使用Burp API的request.withService().withHeader() 而不是重建请求"
+    },
+    {
+      "id": "issue-2",
+      "title": "POST/JSON请求体被置空或变为{}",
+      "severity": "HIGH",
+      "status": "PENDING_FIX",
+      "fix": "保留原始body，通过API合并参数而不是替换"
+    },
+    {
+      "id": "issue-3",
+      "title": "Content-Length手写导致请求体截断",
+      "severity": "MEDIUM",
+      "status": "PENDING_FIX",
+      "fix": "使用withBody(byte[])让API自动计算Content-Length"
+    },
+    {
+      "id": "issue-4",
+      "title": "IPv6地址格式不一致",
+      "severity": "MEDIUM",
+      "status": "PENDING_FIX",
+      "fix": "统一使用[addr]:port格式在URL和Host头中"
+    },
+    {
+      "id": "issue-5",
+      "title": "内容相似度算法过于轻量",
+      "severity": "LOW",
+      "status": "OPEN",
+      "fix": "可选替换为Jaccard/TF-IDF算法"
+    }
+  ]
+}
+

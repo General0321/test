@@ -152,7 +152,7 @@ public class ActiveProbeTab {
                 return c;
             }
         };
-        collectedDataTable.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        collectedDataTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         collectedDataTable.setRowHeight(28);
         collectedDataTable.getTableHeader().setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
         collectedDataTable.getColumnModel().getColumn(0).setPreferredWidth(200);  // 子域名
@@ -627,7 +627,7 @@ public class ActiveProbeTab {
         interfaceScanButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
         arjunScanButton.setPreferredSize(new Dimension(140, 32));
         arjunScanButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
-        stopAllTasksButton.setPreferredSize(new Dimension(110, 28));
+        stopAllTasksButton.setPreferredSize(new Dimension(160, 32));
         stopAllTasksButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
         group.add(interfaceScanButton);
         group.add(arjunScanButton);
@@ -849,7 +849,7 @@ public class ActiveProbeTab {
     
     private CompletableFuture<Void> runInterfacePhase(ActiveProbeConfigDialog.ExecutionConfig config) {
         return switch (config.getInterfaceSource()) {
-            case MANUAL -> processManualTargets(config.getManualEntries(), false, false);
+            case MANUAL -> processManualTargets(config.getManualEntries(), config.getSelectedHostsByDomain(), false, false, null);
             case AUTO -> {
                 // ✅ 目标子域保持勾选的，不扩展；接口范围传递给探测方法，决定使用哪些接口
                 Map<String, Set<String>> targets = config.getSelectedHostsByDomain();
@@ -875,26 +875,15 @@ public class ActiveProbeTab {
     private CompletableFuture<Void> runArjunPhase(ActiveProbeConfigDialog.ExecutionConfig config) {
         return switch (config.getInterfaceSource()) {
             case MANUAL -> {
-                // ✅ 手动输入模式下，接口探测使用手动输入的URL，但参数探测复用已收集数据的逻辑
-                // 参数探测按照勾选的目标范围和参数范围选项来处理
+                // 手动输入模式：直接对手动目标执行参数探测；若策略为“接口后参数”，则先进行接口验证
                 boolean interfaceFirst = config.getStrategy() == ActiveProbeConfigDialog.ProbeMode.INTERFACE_THEN_ARJUN;
-                
-                // 如果策略是先接口再参数，先执行接口探测
-                CompletableFuture<Void> interfacePhase = interfaceFirst
-                    ? processManualTargets(config.getManualEntries(), false, false)
-                    : CompletableFuture.completedFuture(null);
-                
-                // 参数探测：目标子域保持勾选的，不扩展；接口范围和参数范围都传递给探测方法
-                CompletableFuture<Void> arjunPhase = CompletableFuture.runAsync(() -> {
-                    Map<String, Set<String>> targets = config.getSelectedHostsByDomain();
-                    if (targets.isEmpty()) {
-                        api.logging().raiseInfoEvent("⚠️ 手动输入模式下没有可用子域可执行参数探测。");
-                        return;
-                    }
-                    runArjunOnTargets(targets, config.getInterfaceScope(), config.getParameterScope());
-                });
-                
-                yield interfacePhase.thenCompose(v -> arjunPhase);
+                yield processManualTargets(
+                    config.getManualEntries(),
+                    config.getSelectedHostsByDomain(),
+                    true,
+                    interfaceFirst,
+                    config.getParameterScope()
+                );
             }
             case AUTO -> {
                 // ✅ 自动采集模式下，接口探测使用自动采集逻辑，但参数探测复用已收集数据的逻辑
@@ -1025,16 +1014,35 @@ public class ActiveProbeTab {
         // ✅ 判断是否只使用选中子域的接口
         boolean useOnlyHostEndpoints = scope == ActiveProbeConfigDialog.ScopeOption.SELECTED_SUBDOMAINS;
 
-        targets.forEach((mainDomain, hosts) -> {
-            if (hosts == null || hosts.isEmpty()) {
-                api.logging().raiseDebugEvent(String.format(
-                    "自动接口采集跳过：主域名 %s 无可用子域（scope=%s）",
-                    mainDomain, scope));
-                return;
-            }
-
-            hosts.forEach(host -> triggerAutoInterfaceDiscovery(mainDomain, host, useOnlyHostEndpoints));
-        });
+        // ✅ 按设计：AUTO 从 SiteMap 获取，并按“接口来源范围”筛选（仅选中子域/主域所有子域）
+        try {
+            // 1) 从 SiteMap 按范围采集（仅修改 Collector，不写表）
+            realtimeScanner.triggerInterfaceDiscoveryForTargets(targets, useOnlyHostEndpoints).join();
+            
+            // 2) 进行存在性验证（使用已有逻辑，写入表格行）
+            targets.forEach((mainDomain, hosts) -> {
+                if (hosts == null || hosts.isEmpty()) return;
+                for (String host : hosts) {
+                    // 使用缓存接口，避免重复获取
+                    triggerInterfaceDiscoveryForHost(mainDomain, host, useOnlyHostEndpoints);
+                }
+            });
+            
+            SwingUtilities.invokeLater(() -> {
+                progressBar.setIndeterminate(false);
+                progressBar.setValue(0);
+                statusLabel.setText("✅ 自动接口采集+验证完成（" + (useOnlyHostEndpoints ? "仅选中子域" : "主域所有子域") + ")");
+                statusLabel.setForeground(new Color(39, 174, 96));
+            });
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("自动接口采集失败: " + e.getMessage());
+            SwingUtilities.invokeLater(() -> {
+                progressBar.setIndeterminate(false);
+                progressBar.setValue(0);
+                statusLabel.setText("❌ 自动接口采集失败: " + e.getMessage());
+                statusLabel.setForeground(new Color(231, 76, 60));
+            });
+        }
     }
 
     /**
@@ -1613,24 +1621,97 @@ public class ActiveProbeTab {
         return validUrls;
     }
     
-    private CompletableFuture<Void> processManualTargets(List<String> urls, boolean runArjun) {
-        return processManualTargets(urls, runArjun, false);
+    private CompletableFuture<Void> processManualTargets(List<String> entries, boolean runArjun) {
+        return processManualTargets(entries, runArjun, false);
     }
     
-    private CompletableFuture<Void> processManualTargets(List<String> urls, boolean runArjun, boolean interfaceDiscoveryFirst) {
-        if (urls == null || urls.isEmpty()) {
+    private CompletableFuture<Void> processManualTargets(List<String> entries, boolean runArjun, boolean interfaceDiscoveryFirst) {
+        // 兼容旧实现：无目标与范围信息，直接视为完整URL列表
+        return processManualTargets(entries, new LinkedHashMap<>(), runArjun, interfaceDiscoveryFirst, null);
+    }
+
+    // 新实现：支持按选中目标(主域→子域集)分发相对路径；并依据参数范围对不同来源参数集
+    private CompletableFuture<Void> processManualTargets(
+            List<String> entries,
+            Map<String, Set<String>> selectedHostsByDomain,
+            boolean runArjun,
+            boolean interfaceDiscoveryFirst,
+            ActiveProbeConfigDialog.ScopeOption parameterScope) {
+        if (entries == null || entries.isEmpty()) {
             return CompletableFuture.completedFuture(null);
         }
         
-        return CompletableFuture.runAsync(() -> {
-            for (String url : urls) {
-                if (runArjun) {
-                    activeScanner.getRealtimeScanner().triggerManualEndpointScan(url, true, interfaceDiscoveryFirst);
-                } else {
-                    activeScanner.getRealtimeScanner().triggerManualEndpointScan(url, false, false);
+        // 构建任务
+        List<CompletableFuture<Void>> tasks = new ArrayList<>();
+        ParameterCollector collector = realtimeScanner.getParameterCollector();
+        boolean useOnlyHostParameters = parameterScope == ActiveProbeConfigDialog.ScopeOption.SELECTED_SUBDOMAINS;
+        
+        // 如果没有选择目标，则将 entries 视为完整URL直接执行
+        if (selectedHostsByDomain == null || selectedHostsByDomain.isEmpty()) {
+            for (String entry : entries) {
+                String url = entry;
+                if (!entry.startsWith("http")) {
+                    // 无目标无法构建完整URL，跳过
+                    continue;
+                }
+                tasks.add(realtimeScanner.triggerManualEndpointScanAsync(url, runArjun, interfaceDiscoveryFirst, useOnlyHostParameters));
+            }
+            return CompletableFuture.allOf(tasks.toArray(new CompletableFuture[0]));
+        }
+        
+        // 针对每个被勾选的主域/子域，将相对路径拼成完整URL
+        selectedHostsByDomain.forEach((mainDomain, hosts) -> {
+            if (hosts == null || hosts.isEmpty()) return;
+            // 预取一次主域的端点键，用于推断scheme/port
+            Set<ParameterCollector.EndpointKey> allEndpointKeys = collector.getEndpointKeysForMainDomain(mainDomain);
+            hosts.forEach(host -> {
+                for (String entry : entries) {
+                    String url = buildUrlForHost(mainDomain, host, entry, allEndpointKeys, collector);
+                    if (url == null) continue;
+                    tasks.add(realtimeScanner.triggerManualEndpointScanAsync(url, runArjun, interfaceDiscoveryFirst, useOnlyHostParameters));
+                }
+            });
+        });
+        
+        return CompletableFuture.allOf(tasks.toArray(new CompletableFuture[0]));
+    }
+
+    // 将相对路径与 host 结合，优先从已收集模板推断 scheme/port，否则回退 https/443
+    private String buildUrlForHost(String mainDomain,
+                                   String host,
+                                   String entry,
+                                   Set<ParameterCollector.EndpointKey> allEndpointKeys,
+                                   ParameterCollector collector) {
+        try {
+            if (entry == null || entry.isBlank()) return null;
+            // 已是完整URL
+            if (entry.startsWith("http://") || entry.startsWith("https://")) {
+                return entry;
+            }
+            String path = entry.startsWith("/") ? entry : "/" + entry;
+            // 尝试从模板推断 scheme/port
+            String scheme = "https";
+            int port = 443;
+            if (allEndpointKeys != null && !allEndpointKeys.isEmpty()) {
+                for (ParameterCollector.EndpointKey epKey : allEndpointKeys) {
+                    if (host.equals(epKey.host)) {
+                        burp.api.montoya.http.message.requests.HttpRequest tmpl = collector.getEndpointTemplate(mainDomain, epKey);
+                        if (tmpl != null) {
+                            java.net.URI u = new java.net.URI(tmpl.url());
+                            if (u.getScheme() != null) scheme = u.getScheme();
+                            if (u.getPort() > 0) port = u.getPort();
+                            else port = "https".equalsIgnoreCase(scheme) ? 443 : 80;
+                            break;
+                        }
+                    }
                 }
             }
-        });
+            boolean defaultPort = ("https".equalsIgnoreCase(scheme) && port == 443) || ("http".equalsIgnoreCase(scheme) && port == 80);
+            return scheme + "://" + host + (defaultPort ? "" : (":" + port)) + path;
+        } catch (Exception e) {
+            api.logging().raiseDebugEvent("构建手动URL失败: " + e.getMessage());
+            return null;
+        }
     }
     
     private Boolean askInterfaceBeforeArjun(boolean manualSource) {
@@ -2154,8 +2235,16 @@ public class ActiveProbeTab {
      */
     private void stopAllTasks() {
         CompletableFuture.runAsync(() -> {
-            activeScanner.stopRealtimeScanning();
-            realtimeScanner.stopRealtimeScanning();
+            try {
+                // 停止实时触发定时器
+                if (realtimeArjunTimer != null && realtimeArjunTimer.isRunning()) {
+                    realtimeArjunTimer.stop();
+                }
+                // 停止实时触发并清空调度队列
+                realtimeScanner.stopAllTasksAndClear();
+            } catch (Exception ex) {
+                api.logging().raiseErrorEvent("停止所有任务失败: " + ex.getMessage());
+            }
         });
         SwingUtilities.invokeLater(() -> {
             statusLabel.setText("⏹️ 手动停止了所有任务");
@@ -2163,7 +2252,7 @@ public class ActiveProbeTab {
             progressBar.setIndeterminate(false);
             progressBar.setValue(0);
         });
-        api.logging().raiseInfoEvent("⏹️ 用户请求停止所有主动探测任务");
+        api.logging().raiseInfoEvent("⏹️ 用户请求停止所有主动探测任务（已停止触发并清空队列）");
     }
 
     /**
