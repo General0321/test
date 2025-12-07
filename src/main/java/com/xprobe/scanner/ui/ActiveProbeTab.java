@@ -26,11 +26,16 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 
 /**
  * 主动探测选项卡 - 支持实时监听和手动触发两种模式
  */
 public class ActiveProbeTab {
+        // ✅ 优化：使用线程安全的时间格式化器，避免每次创建SimpleDateFormat的开销
+    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
     private JPanel panel;
     private final MontoyaApi api;
     private final ActiveScanner activeScanner;
@@ -127,7 +132,9 @@ public class ActiveProbeTab {
             public boolean isCellEditable(int row, int column) {
                 return false;
             }
+    
         };
+
         collectedDataTable = new JTable(collectedDataTableModel) {
             // ✅ 修复：重写prepareRenderer确保选中行颜色正确显示（参考 arjunResultTable）
             @Override
@@ -798,6 +805,10 @@ public class ActiveProbeTab {
             ? CompletableFuture.completedFuture(null)
             : runInterfacePhase(config);
         
+        // ✅ 设置接口探测策略标志
+        boolean requireInterfaceFirst = config.getStrategy() == ActiveProbeConfigDialog.ProbeMode.INTERFACE_THEN_ARJUN;
+        realtimeScanner.setRequireInterfaceFirst(requireInterfaceFirst);
+        
         CompletableFuture<Void> pipeline;
         if (config.getStrategy() == ActiveProbeConfigDialog.ProbeMode.INTERFACE_THEN_ARJUN) {
             pipeline = interfacePhase.thenCompose(v -> runArjunPhase(config));
@@ -826,6 +837,8 @@ public class ActiveProbeTab {
                 disableActionButtons(false);
                 progressBar.setIndeterminate(false);
                 progressBar.setValue(throwable == null ? 100 : 0);
+                // ✅ 重置接口探测策略标志
+                realtimeScanner.setRequireInterfaceFirst(false);
                 if (throwable == null) {
                     String successText = switch (config.getStrategy()) {
                         case INTERFACE_ONLY -> "✅ 接口探测完成";
@@ -1014,35 +1027,37 @@ public class ActiveProbeTab {
         // ✅ 判断是否只使用选中子域的接口
         boolean useOnlyHostEndpoints = scope == ActiveProbeConfigDialog.ScopeOption.SELECTED_SUBDOMAINS;
 
-        // ✅ 按设计：AUTO 从 SiteMap 获取，并按“接口来源范围”筛选（仅选中子域/主域所有子域）
-        try {
-            // 1) 从 SiteMap 按范围采集（仅修改 Collector，不写表）
-            realtimeScanner.triggerInterfaceDiscoveryForTargets(targets, useOnlyHostEndpoints).join();
-            
-            // 2) 进行存在性验证（使用已有逻辑，写入表格行）
-            targets.forEach((mainDomain, hosts) -> {
-                if (hosts == null || hosts.isEmpty()) return;
-                for (String host : hosts) {
-                    // 使用缓存接口，避免重复获取
-                    triggerInterfaceDiscoveryForHost(mainDomain, host, useOnlyHostEndpoints);
-                }
-            });
-            
-            SwingUtilities.invokeLater(() -> {
-                progressBar.setIndeterminate(false);
-                progressBar.setValue(0);
-                statusLabel.setText("✅ 自动接口采集+验证完成（" + (useOnlyHostEndpoints ? "仅选中子域" : "主域所有子域") + ")");
-                statusLabel.setForeground(new Color(39, 174, 96));
-            });
-        } catch (Exception e) {
-            api.logging().raiseErrorEvent("自动接口采集失败: " + e.getMessage());
-            SwingUtilities.invokeLater(() -> {
-                progressBar.setIndeterminate(false);
-                progressBar.setValue(0);
-                statusLabel.setText("❌ 自动接口采集失败: " + e.getMessage());
-                statusLabel.setForeground(new Color(231, 76, 60));
-            });
-        }
+        // ✅ 修复：避免阻塞UI线程，使用异步方式处理
+        CompletableFuture.runAsync(() -> {
+            try {
+                // 1) 从 SiteMap 按范围采集（仅修改 Collector，不写表）
+                realtimeScanner.triggerInterfaceDiscoveryForTargets(targets, useOnlyHostEndpoints).join();
+                
+                // 2) 进行存在性验证（使用已有逻辑，写入表格行）
+                targets.forEach((mainDomain, hosts) -> {
+                    if (hosts == null || hosts.isEmpty()) return;
+                    for (String host : hosts) {
+                        // 使用缓存接口，避免重复获取
+                        triggerInterfaceDiscoveryForHost(mainDomain, host, useOnlyHostEndpoints);
+                    }
+                });
+                
+                SwingUtilities.invokeLater(() -> {
+                    progressBar.setIndeterminate(false);
+                    progressBar.setValue(0);
+                    statusLabel.setText("✅ 自动接口采集+验证完成（" + (useOnlyHostEndpoints ? "仅选中子域" : "主域所有子域") + ")");
+                    statusLabel.setForeground(new Color(39, 174, 96));
+                });
+            } catch (Exception e) {
+                api.logging().raiseErrorEvent("自动接口采集失败: " + e.getMessage());
+                SwingUtilities.invokeLater(() -> {
+                    progressBar.setIndeterminate(false);
+                    progressBar.setValue(0);
+                    statusLabel.setText("❌ 自动接口采集失败: " + e.getMessage());
+                    statusLabel.setForeground(new Color(231, 76, 60));
+                });
+            }
+        });
     }
 
     /**
@@ -1266,8 +1281,8 @@ public class ActiveProbeTab {
      * 开始自动刷新（每3秒更新一次收集数据）
      */
     private void startAutoRefresh() {
-        // ✅ 参考dev18实现：每3秒刷新一次
-        refreshTimer = new javax.swing.Timer(3000, e -> refreshCollectedData());
+        // ✅ 优化：缩短刷新间隔到1秒，实现更实时的数据更新
+        refreshTimer = new javax.swing.Timer(1000, e -> refreshCollectedData());
         refreshTimer.start();
         
         // 初始加载
@@ -2573,42 +2588,205 @@ public class ActiveProbeTab {
             @Override
             public void onArjunResultFound(String mainDomain, String host, String endpoint, Set<String> foundParameters,
                                           String parameterType, long timestamp) {
-                // 在UI线程中更新表格
-                SwingUtilities.invokeLater(() -> {
-                    addArjunResultToTable(mainDomain, host, endpoint, foundParameters, parameterType, timestamp);
-                });
+                // ✅ 修复：使用invokeAndWait确保立即更新，实现真正的实时显示
+                // 时间戳已在收到响应时立即生成，这里需要立即更新UI
+                try {
+                    if (SwingUtilities.isEventDispatchThread()) {
+                        // 如果已经在EDT线程，直接更新
+                        addOrUpdateArjunResultToTable(mainDomain, host, endpoint, foundParameters, parameterType, timestamp);
+                    } else {
+                        // 如果不在EDT线程，使用invokeAndWait确保立即更新
+                        SwingUtilities.invokeAndWait(() -> {
+                            addOrUpdateArjunResultToTable(mainDomain, host, endpoint, foundParameters, parameterType, timestamp);
+                        });
+                    }
+                } catch (Exception e) {
+                    api.logging().raiseErrorEvent("更新Arjun结果表格失败: " + e.getMessage());
+                }
             }
         });
     }
     
-    /**
-     * ✅ 添加接口探测结果到表格
-     */
-    public void addInterfaceDiscoveryResult(String mainDomain, String host, String endpoint, String method, 
-                                           String contentType, boolean exists, long timestamp) {
+    // 在发包瞬间插入"进行中"的占位行，满足"发包的同时表格就要有"的需求
+    public void addArjunProgress(String mainDomain, String host, String endpoint, String parameterType, long timestamp) {
+        // 要求在EDT调用；由调用方确保（notifyArjunProgress中使用invokeAndWait）
+        // ✅ 优化：使用线程安全的时间格式化器，更快
+        String timeStr = TIME_FORMATTER.format(Instant.ofEpochMilli(timestamp));
+        String targetDisplay = (host != null && !host.isBlank()) ? host : mainDomain;
+        arjunResultTableModel.addRow(new Object[]{
+            "参数探测",
+            targetDisplay,
+            endpoint,
+            "-",
+            parameterType,
+            "⏳ 探测中",
+            timeStr
+        });
+        
+        // ✅ 立即触发表格重绘，确保占位行即时显示
+        arjunResultTable.repaint();
+    }
+    
+    // 有结果时优先更新"⏳ 探测中"的占位行；若未找到占位行则追加新行
+    // ✅ 修复：移除内部的invokeLater，因为调用方已经确保在EDT中执行
+    private void addOrUpdateArjunResultToTable(String mainDomain, String host, String endpoint, Set<String> foundParameters, 
+                                               String parameterType, long timestamp) {
+        // 要求在EDT调用；由调用方确保（监听器中使用invokeAndWait或直接调用）
+        // ✅ 优化：使用线程安全的时间格式化器，更快
+        String timeStr = TIME_FORMATTER.format(Instant.ofEpochMilli(timestamp));
+        String targetDisplay = (host != null && !host.isBlank()) ? host : mainDomain;
+        String paramsStr = (foundParameters == null || foundParameters.isEmpty()) ? "" : String.join(", ", foundParameters);
+        int paramCount = foundParameters == null ? 0 : foundParameters.size();
+        String displayParams;
+        if (paramCount == 0) {
+            displayParams = "-";
+        } else if (paramCount <= 5) {
+            displayParams = paramsStr;
+        } else {
+            displayParams = paramsStr.substring(0, Math.min(50, paramsStr.length())) + "... (共" + paramCount + "个)";
+        }
+        String verifyStatus = paramCount > 0 ? "✅ 已验证" : "⚠️ 未发现参数";
+        // 从底部开始找最近的一条"进行中"占位行
+        int toUpdate = -1;
+        for (int i = arjunResultTableModel.getRowCount() - 1; i >= 0; i--) {
+            Object type = arjunResultTableModel.getValueAt(i, 0);
+            Object tDisplay = arjunResultTableModel.getValueAt(i, 1);
+            Object ep = arjunResultTableModel.getValueAt(i, 2);
+            Object pType = arjunResultTableModel.getValueAt(i, 4);
+            Object status = arjunResultTableModel.getValueAt(i, 5);
+            if ("参数探测".equals(type)
+                && targetDisplay.equals(tDisplay)
+                && endpoint.equals(ep)
+                && parameterType.equals(pType)
+                && status != null
+                && status.toString().contains("⏳")) {
+                toUpdate = i;
+                break;
+            }
+        }
+        if (toUpdate >= 0) {
+            // ✅ 优化：立即更新表格数据，确保即时显示
+            arjunResultTableModel.setValueAt(displayParams, toUpdate, 3); // 发现参数
+            arjunResultTableModel.setValueAt(verifyStatus, toUpdate, 5); // 验证状态
+            arjunResultTableModel.setValueAt(timeStr, toUpdate, 6); // 时间
+            
+            // ✅ 立即触发表格重绘，确保数据即时显示
+            arjunResultTable.repaint();
+        } else {
+            // 占位行不存在则追加一行
+            addArjunResultToTable(mainDomain, host, endpoint, foundParameters, parameterType, timestamp);
+            return;
+        }
+        // ✅ 优化：延迟更新统计，避免阻塞UI更新（使用invokeLater异步更新）
         SwingUtilities.invokeLater(() -> {
-            // 格式化时间
+            int paramScanCount = 0;
+            for (int i = 0; i < arjunResultTableModel.getRowCount(); i++) {
+                Object type = arjunResultTableModel.getValueAt(i, 0);
+                if ("参数探测".equals(type)) {
+                    paramScanCount++;
+                }
+            }
+            arjunResultsLabel.setText("发现参数: " + paramScanCount);
+        });
+    }
+    
+    /**
+     * 在发起接口探测时添加"进行中"占位
+     * ✅ 修复：移除内部的invokeLater，因为调用方已经确保在EDT中执行
+     */
+    public void addInterfaceProgress(String mainDomain, String host, String endpoint, String method,
+                                     String contentType, long timestamp) {
+        // 要求在EDT调用；由调用方确保（notifyInterfaceProgress中使用invokeAndWait）
+        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("HH:mm:ss");
+        String timeStr = sdf.format(new java.util.Date(timestamp));
+        String targetDisplay = (host != null && !host.isBlank()) ? host : mainDomain;
+        String displayContentType = contentType != null ? contentType : "N/A";
+        String interfaceInfo = String.format("%s %s (%s)", method, endpoint, displayContentType);
+        arjunResultTableModel.addRow(new Object[]{
+            "接口探测",
+            targetDisplay,
+            interfaceInfo,
+            "-",
+            "-",
+            "⏳ 接口探测中",
+            timeStr
+        });
+    }
+
+    /**
+     * ✅ 添加/更新 接口探测结果到表格（优先更新占位行）
+     */
+    public void addOrUpdateInterfaceDiscoveryResult(String mainDomain, String host, String endpoint, String method,
+                                                    String contentType, boolean exists, long timestamp) {
+        Runnable r = () -> {
             java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("HH:mm:ss");
             String timeStr = sdf.format(new java.util.Date(timestamp));
             String targetDisplay = (host != null && !host.isBlank()) ? host : mainDomain;
-            
-            // 格式化接口信息
             String displayContentType = contentType != null ? contentType : "N/A";
             String interfaceInfo = String.format("%s %s (%s)", method, endpoint, displayContentType);
-            
-            // 验证状态
             String verifyStatus = exists ? "✅ 接口存在" : "❌ 接口不存在";
-            
-            // 添加到表格：探测类型, 目标域名, 接口, 发现参数, 参数类型, 验证状态, 探测时间
-            arjunResultTableModel.addRow(new Object[]{
-                "接口探测",  // 探测类型
-                targetDisplay,
-                interfaceInfo,
-                "-",  // 发现参数（接口探测无参数）
-                "-",  // 参数类型（接口探测无参数类型）
-                verifyStatus,
-                timeStr
-            });
+
+            // 从底部向上寻找最近的“接口探测中”占位行
+            int toUpdate = -1;
+            for (int i = arjunResultTableModel.getRowCount() - 1; i >= 0; i--) {
+                Object type = arjunResultTableModel.getValueAt(i, 0);
+                Object tDisplay = arjunResultTableModel.getValueAt(i, 1);
+                Object info = arjunResultTableModel.getValueAt(i, 2);
+                Object status = arjunResultTableModel.getValueAt(i, 5);
+                if ("接口探测".equals(type)
+                    && targetDisplay.equals(tDisplay)
+                    && interfaceInfo.equals(info)
+                    && status != null
+                    && status.toString().contains("⏳")) {
+                    toUpdate = i;
+                    break;
+                }
+            }
+
+            if (toUpdate >= 0) {
+                // 只更新状态，不覆盖时间（时间沿用占位行插入的发送时刻）
+                arjunResultTableModel.setValueAt(verifyStatus, toUpdate, 5);
+            } else {
+                // 未找到占位行则追加（使用传入的发送时刻）
+                arjunResultTableModel.addRow(new Object[]{
+                    "接口探测",
+                    targetDisplay,
+                    interfaceInfo,
+                    "-",
+                    "-",
+                    verifyStatus,
+                    timeStr
+                });
+            }
+            // 立即重绘
+            arjunResultTable.repaint();
+        };
+        if (SwingUtilities.isEventDispatchThread()) r.run();
+        else {
+            try { SwingUtilities.invokeAndWait(r); } catch (Exception ignored) {}
+        }
+    }
+    
+    /**
+     * ✅ 添加接口探测结果到表格（无需占位，逐条即时更新）
+     */
+    public void addInterfaceDiscoveryResult(String mainDomain, String host, String endpoint, String method,
+                                           String contentType, boolean exists, long timestamp) {
+        // 要求在EDT调用；由调用方确保（notifyInterfaceResult中使用invokeAndWait）
+        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("HH:mm:ss");
+        String timeStr = sdf.format(new java.util.Date(timestamp));
+        String targetDisplay = (host != null && !host.isBlank()) ? host : mainDomain;
+        String displayContentType = contentType != null ? contentType : "N/A";
+        String interfaceInfo = String.format("%s %s (%s)", method, endpoint, displayContentType);
+        String verifyStatus = exists ? "✅ 接口存在" : "❌ 接口不存在";
+        arjunResultTableModel.addRow(new Object[]{
+            "接口探测",
+            targetDisplay,
+            interfaceInfo,
+            "-",
+            "-",
+            verifyStatus,
+            timeStr
         });
     }
     
@@ -2650,15 +2828,20 @@ public class ActiveProbeTab {
             timeStr
         });
         
-        // ✅ 更新统计：只统计参数探测的结果（包括未发现参数的）
-        int paramScanCount = 0;
-        for (int i = 0; i < arjunResultTableModel.getRowCount(); i++) {
-            Object type = arjunResultTableModel.getValueAt(i, 0);
-            if ("参数探测".equals(type)) {
-                paramScanCount++;
+        // ✅ 立即触发表格重绘，确保数据即时显示
+        arjunResultTable.repaint();
+        
+        // ✅ 优化：延迟更新统计，避免阻塞UI更新（使用invokeLater异步更新）
+        SwingUtilities.invokeLater(() -> {
+            int paramScanCount = 0;
+            for (int i = 0; i < arjunResultTableModel.getRowCount(); i++) {
+                Object type = arjunResultTableModel.getValueAt(i, 0);
+                if ("参数探测".equals(type)) {
+                    paramScanCount++;
+                }
             }
-        }
-        arjunResultsLabel.setText("发现参数: " + paramScanCount);
+            arjunResultsLabel.setText("发现参数: " + paramScanCount);
+        });
         
         // 日志
         if (paramCount > 0) {

@@ -159,12 +159,28 @@ public class ParameterManager {
     }
     
     /**
-     * 检查指定endpoint是否已被扫描过（任意method和contentType组合）
+     * 检查指定端点在给定 method/host/contentType 维度是否已被扫描过（参数已完全覆盖）
      */
+    public boolean hasBeenScanned(String method, String host, String contentType, String endpoint, Set<String> candidateParams) {
+        String key = generateKey(method, host, contentType, endpoint);
+        Set<String> scanned = arjunScannedParameters.get(key);
+        if (scanned == null || scanned.isEmpty()) {
+            return false;
+        }
+        if (candidateParams == null || candidateParams.isEmpty()) {
+            // 若无候选参数，认为未扫描完，返回false以便后续流程自行决定
+            return false;
+        }
+        return scanned.containsAll(candidateParams);
+    }
+    
+    /**
+     * 兼容旧接口（不建议使用）：只按 host+endpoint 判断是否扫描过任意组合
+     */
+    @Deprecated
     public boolean hasBeenScanned(String host, String endpoint) {
         String prefix = host + "|";
         String suffix = "|" + endpoint;
-        
         for (String key : arjunScannedParameters.keySet()) {
             if (key.contains(prefix) && key.endsWith(suffix)) {
                 return true;

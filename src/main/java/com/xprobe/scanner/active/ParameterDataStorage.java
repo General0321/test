@@ -127,6 +127,7 @@ public class ParameterDataStorage {
                                 try {
                                     HttpRequest request = buildRequestFromEndpointData(epData, api);
                                     if (request != null) {
+                                        // ✅ 直接调用 collectFromRequest，它现在会即使没有参数也添加接口
                                         collector.collectFromRequest(request);
                                         restoredEndpoints++;
                                     }
@@ -172,6 +173,7 @@ public class ParameterDataStorage {
                         try {
                             HttpRequest request = buildRequestFromEndpointData(epData, api);
                             if (request != null) {
+                                // ✅ 直接调用 collectFromRequest，它现在会即使没有参数也添加接口
                                 collector.collectFromRequest(request);
                                 restoredEndpoints++;
                             }
@@ -192,6 +194,9 @@ public class ParameterDataStorage {
                 "✅ 参数收集数据恢复完成: 恢复了 %d 个接口, %d 个参数, %d 个关键词", 
                 restoredEndpoints, restoredParameters, restoredKeywords
             ));
+            
+            // ✅ 修复：恢复数据时不应该修改原文件，移除自动保存逻辑
+            // 如果需要规范化数据，应该由用户手动触发保存操作
             
             // ✅ 诊断：检查恢复后的参数是否正确填充到主域参数集合中
             for (MainDomainData mainDomainData : model.mainDomains.values()) {
@@ -345,10 +350,22 @@ public class ParameterDataStorage {
             // ✅ 按子域名组织数据
             Map<String, HostData> hostDataMap = new HashMap<>();
             
+            // ✅ 修复：使用 Map 去重，确保同一个 endpoint（相同 method+host+contentType+path）只保存一次
+            Map<String, EndpointData> endpointMap = new HashMap<>();
+            
             for (ParameterCollector.EndpointKey epKey : endpointKeys) {
                 HttpRequest template = collector.getEndpointTemplate(mainDomain, epKey);
                 if (template != null) {
                     String host = epKey.host;
+                    
+                    // ✅ 生成去重 key（method|host|contentType|endpoint，endpoint 已不包含 query）
+                    String endpointKey = epKey.method + "|" + host + "|" + 
+                                       (epKey.contentType != null ? epKey.contentType : "N/A") + "|" + epKey.endpoint;
+                    
+                    // ✅ 如果已存在相同的 endpoint，跳过（不重复保存）
+                    if (endpointMap.containsKey(endpointKey)) {
+                        continue;
+                    }
                     
                     // 获取或创建该子域名的数据
                     HostData hostData = hostDataMap.computeIfAbsent(host, k -> {
@@ -363,19 +380,71 @@ public class ParameterDataStorage {
                     // 添加接口信息
                     EndpointData epData = new EndpointData();
                     epData.host = epKey.host;
-                    epData.endpoint = epKey.endpoint;
+                    epData.endpoint = epKey.endpoint;  // ✅ endpoint 已不包含 query（在 ParameterCollector 中已处理）
                     epData.method = epKey.method;
                     epData.contentType = epKey.contentType;
                     
-                    // ✅ 保存完整的URL（用于恢复时构建HttpService）
-                    epData.url = template.url();
+                    // ✅ 保存"干净"的URL（去掉query，避免二次拼接）
+                    // 优先使用 epKey 的信息构建 URL，而不是依赖 template.url()，避免 URL 格式问题
+                    String cleanUrl;
+                    try {
+                        String rawUrl = template.url();
+                        cleanUrl = stripQuery(rawUrl);
+                        // ✅ 验证：如果 stripQuery 返回的 URL 格式有问题（host 为 null），使用 epKey 信息手动构建
+                        if (cleanUrl != null && !cleanUrl.isEmpty()) {
+                            java.net.URI testUri = new java.net.URI(cleanUrl);
+                            if (testUri.getHost() == null || testUri.getHost().isEmpty() || "null".equals(testUri.getHost())) {
+                                // URL 格式有问题，手动构建
+                                String scheme = rawUrl.startsWith("https://") ? "https" : "http";
+                                int port = template.httpService().port();
+                                boolean isSecure = template.httpService().secure();
+                                String portStr = (port > 0 && !(isSecure && port == 443) && !(!isSecure && port == 80)) ? (":" + port) : "";
+                                cleanUrl = scheme + "://" + epKey.host + portStr + epKey.endpoint;
+                            }
+                        } else {
+                            // cleanUrl 为空，手动构建
+                            String scheme = template.httpService().secure() ? "https" : "http";
+                            int port = template.httpService().port();
+                            boolean isSecure = template.httpService().secure();
+                            String portStr = (port > 0 && !(isSecure && port == 443) && !(!isSecure && port == 80)) ? (":" + port) : "";
+                            cleanUrl = scheme + "://" + epKey.host + portStr + epKey.endpoint;
+                        }
+                    } catch (Exception e) {
+                        // 如果解析失败，手动构建
+                        String scheme = template.httpService().secure() ? "https" : "http";
+                        int port = template.httpService().port();
+                        boolean isSecure = template.httpService().secure();
+                        String portStr = (port > 0 && !(isSecure && port == 443) && !(!isSecure && port == 80)) ? (":" + port) : "";
+                        cleanUrl = scheme + "://" + epKey.host + portStr + epKey.endpoint;
+                    }
+                    epData.url = cleanUrl;
                     
-                    // ✅ 保存完整的请求字符串（包含所有header和body）
+                    // ✅ 修复：保存完整的原始请求，包括所有 URL 参数，以便恢复时能正确解析所有参数
                     StringBuilder requestStr = new StringBuilder();
-                    requestStr.append(template.method()).append(" ").append(template.path());
-                    String query = template.query();
-                    if (query != null && !query.isEmpty()) {
-                        requestStr.append("?").append(query);
+                    String requestPath = template.path();
+                    
+                    // ✅ 修复：去掉 requestPath 中可能包含的 query 参数，避免重复
+                    int queryIndex = requestPath.indexOf('?');
+                    if (queryIndex > 0) {
+                        requestPath = requestPath.substring(0, queryIndex);
+                    }
+                    
+                    // ✅ 收集所有 URL 参数，构建完整的请求行
+                    // 注意：直接使用原始参数值，不进行编码，因为恢复时会正确处理
+                    // 注意：如果同一个参数名有多个值，template.parameters() 会返回多个 HttpParameter 对象，这里会全部保存
+                    java.util.List<String> urlParams = new java.util.ArrayList<>();
+                    for (var param : template.parameters()) {
+                        if (param.type() == burp.api.montoya.http.message.params.HttpParameterType.URL) {
+                            // ✅ 直接使用原始值，不编码（恢复时会通过 parseQueryToList 正确处理，保留所有参数值）
+                            urlParams.add(param.name() + "=" + param.value());
+                        }
+                    }
+                    
+                    // 构建请求行：如果有 URL 参数，添加到 path 后面
+                    if (!urlParams.isEmpty()) {
+                        requestStr.append(template.method()).append(" ").append(requestPath).append("?").append(String.join("&", urlParams));
+                    } else {
+                        requestStr.append(template.method()).append(" ").append(requestPath);
                     }
                     requestStr.append(" HTTP/1.1\r\n");
                     
@@ -392,6 +461,8 @@ public class ParameterDataStorage {
                     
                     epData.requestTemplate = requestStr.toString();
                     
+                    // ✅ 添加到去重 Map 和 hostData
+                    endpointMap.put(endpointKey, epData);
                     hostData.endpoints.add(epData);
                 }
             }
@@ -411,51 +482,274 @@ public class ParameterDataStorage {
      */
     private HttpRequest buildRequestFromEndpointData(EndpointData epData, MontoyaApi api) {
         try {
-            if (epData.requestTemplate == null || epData.requestTemplate.isEmpty()) {
-                return null;
-            }
-            
-            // ✅ 解析URL获取scheme和port信息
-            String url = epData.url;
-            if (url == null || url.isEmpty()) {
-                // 如果URL为空，尝试从host和endpoint构建URL
-                url = "https://" + epData.host + epData.endpoint;
-            }
-            
-            java.net.URI uri;
-            try {
-                uri = new java.net.URI(url);
-            } catch (java.net.URISyntaxException e) {
-                // 如果URL格式不正确，尝试构建一个简单的URL
-                url = "https://" + epData.host + epData.endpoint;
-                uri = new java.net.URI(url);
-            }
-            
+            // ✅ 简化逻辑：直接使用 epData.host 和 epData.endpoint，不依赖 URL 解析
+            // 1. 确定 host（优先使用 epData.host）
             String host = epData.host;
-            String scheme = uri.getScheme();
-            if (scheme == null) {
-                scheme = "https"; // 默认使用https
+            if (host == null || host.isEmpty() || "null".equals(host)) {
+                // 如果 epData.host 无效，尝试从 epData.url 解析
+                if (epData.url != null && !epData.url.isEmpty()) {
+                    try {
+                        String cleanUrl = stripQuery(epData.url);
+                        java.net.URI uri = new java.net.URI(cleanUrl);
+                        host = uri.getHost();
+                        if (host == null || host.isEmpty() || "null".equals(host)) {
+                            api.logging().raiseErrorEvent("恢复接口失败: 无法确定 host - url=" + epData.url + ", host=" + epData.host);
+                            return null;
+                        }
+                    } catch (Exception e) {
+                        api.logging().raiseErrorEvent("恢复接口失败: 解析 URL 失败 - url=" + epData.url + ", error=" + e.getMessage());
+                        return null;
+                    }
+                } else {
+                    api.logging().raiseErrorEvent("恢复接口失败: host 为空且无 url - endpoint=" + epData.endpoint);
+                    return null;
+                }
             }
-            int port = uri.getPort();
-            boolean isSecure = "https".equalsIgnoreCase(scheme);
             
-            // ✅ 如果没有指定port，使用默认端口
-            if (port == -1) {
-                port = isSecure ? 443 : 80;
+            // 2. 确定 path（优先使用 epData.endpoint）
+            String cleanPath = "/";
+            if (epData.endpoint != null && !epData.endpoint.isEmpty()) {
+                int qIdx = epData.endpoint.indexOf('?');
+                cleanPath = qIdx > 0 ? epData.endpoint.substring(0, qIdx) : epData.endpoint;
+                if (cleanPath.isEmpty()) cleanPath = "/";
+            } else if (epData.url != null && !epData.url.isEmpty()) {
+                // 如果 epData.endpoint 为空，从 URL 解析 path
+                try {
+                    String cleanUrl = stripQuery(epData.url);
+                    java.net.URI uri = new java.net.URI(cleanUrl);
+                    String uriPath = uri.getPath();
+                    if (uriPath != null && !uriPath.isEmpty() && !uriPath.contains("/null/")) {
+                        cleanPath = uriPath;
+                    }
+                } catch (Exception ignored) {}
             }
             
-            // ✅ 构建HttpService
-            burp.api.montoya.http.HttpService httpService = 
-                burp.api.montoya.http.HttpService.httpService(host, port, isSecure);
+            // 3. 确定 scheme 和 port（从 epData.url 解析，如果 URL 无效则使用默认值）
+            String scheme = "https";
+            int port = 443;
+            boolean isSecure = true;
+            if (epData.url != null && !epData.url.isEmpty()) {
+                try {
+                    String cleanUrl = stripQuery(epData.url);
+                    java.net.URI uri = new java.net.URI(cleanUrl);
+                    scheme = uri.getScheme() == null ? "https" : uri.getScheme();
+                    isSecure = "https".equalsIgnoreCase(scheme);
+                    port = uri.getPort();
+                    if (port == -1) port = isSecure ? 443 : 80;
+                } catch (Exception ignored) {
+                    // 使用默认值
+                }
+            }
             
-            // ✅ 从请求字符串构建HttpRequest
-            HttpRequest request = HttpRequest.httpRequest(httpService, epData.requestTemplate);
+            // 4. ✅ 修复：从 requestTemplate 中解析所有参数（URL 和 Body），而不仅仅是从 query string 中提取
+            // 首先尝试从 requestTemplate 解析完整的请求
+            HttpRequest restoredRequest = null;
+            if (epData.requestTemplate != null && !epData.requestTemplate.isEmpty()) {
+                try {
+                    // 解析 requestTemplate 字符串
+                    String[] lines = epData.requestTemplate.split("\r\n");
+                    if (lines.length > 0) {
+                        // 解析请求行：METHOD PATH HTTP/1.1
+                        String requestLine = lines[0];
+                        String[] requestParts = requestLine.split("\\s+");
+                        if (requestParts.length >= 2) {
+                            String templateMethod = requestParts[0];
+                            String templatePath = requestParts[1];
+                            
+                            // 从 templatePath 提取 query 参数
+                            String templateQuery = null;
+                            int queryIdx = templatePath.indexOf('?');
+                            if (queryIdx > 0) {
+                                templateQuery = templatePath.substring(queryIdx + 1);
+                                templatePath = templatePath.substring(0, queryIdx);
+                            }
+                            
+                            // 构建基础请求
+                            StringBuilder requestBuilder = new StringBuilder();
+                            requestBuilder.append(templateMethod).append(" ").append(templatePath).append(" HTTP/1.1\r\n");
+                            
+                            // 添加 headers（跳过第一行请求行）
+                            for (int i = 1; i < lines.length; i++) {
+                                String line = lines[i];
+                                if (line.isEmpty()) {
+                                    // 空行表示 headers 结束
+                                    break;
+                                }
+                                requestBuilder.append(line).append("\r\n");
+                            }
+                            requestBuilder.append("\r\n");
+                            
+                            // 添加 body（如果有）
+                            boolean foundEmptyLine = false;
+                            StringBuilder bodyBuilder = new StringBuilder();
+                            for (int i = 1; i < lines.length; i++) {
+                                if (lines[i].isEmpty()) {
+                                    foundEmptyLine = true;
+                                    continue;
+                                }
+                                if (foundEmptyLine) {
+                                    bodyBuilder.append(lines[i]);
+                                    if (i < lines.length - 1) {
+                                        bodyBuilder.append("\r\n");
+                                    }
+                                }
+                            }
+                            
+                            burp.api.montoya.http.HttpService httpService = burp.api.montoya.http.HttpService.httpService(host, port, isSecure);
+                            String requestString = requestBuilder.toString();
+                            if (bodyBuilder.length() > 0) {
+                                restoredRequest = HttpRequest.httpRequest(httpService, requestString + bodyBuilder.toString());
+                            } else {
+                                restoredRequest = HttpRequest.httpRequest(httpService, requestString);
+                            }
+                            
+                            // ✅ 修复：添加 URL 参数（从 templatePath 的 query 部分），保留所有参数值（包括同名参数）
+                            if (templateQuery != null && !templateQuery.isEmpty()) {
+                                java.util.List<java.util.AbstractMap.SimpleEntry<String, String>> urlParams = parseQueryToList(templateQuery);
+                                for (java.util.AbstractMap.SimpleEntry<String, String> e : urlParams) {
+                                    restoredRequest = restoredRequest.withAddedParameters(
+                                        burp.api.montoya.http.message.params.HttpParameter.urlParameter(e.getKey(), e.getValue())
+                                    );
+                                }
+                            }
+                            
+                            // ✅ 修复：添加 Body 参数（从 body 中解析，如果是表单格式），保留所有参数值（包括同名参数）
+                            if (bodyBuilder.length() > 0) {
+                                String bodyStr = bodyBuilder.toString();
+                                // 检查 Content-Type
+                                String contentType = null;
+                                for (var header : restoredRequest.headers()) {
+                                    if ("Content-Type".equalsIgnoreCase(header.name())) {
+                                        contentType = header.value();
+                                        break;
+                                    }
+                                }
+                                
+                                // 如果是表单格式，解析 body 参数
+                                if (contentType != null && contentType.contains("application/x-www-form-urlencoded")) {
+                                    java.util.List<java.util.AbstractMap.SimpleEntry<String, String>> bodyParams = parseQueryToList(bodyStr);
+                                    for (java.util.AbstractMap.SimpleEntry<String, String> e : bodyParams) {
+                                        restoredRequest = restoredRequest.withAddedParameters(
+                                            burp.api.montoya.http.message.params.HttpParameter.bodyParameter(e.getKey(), e.getValue())
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    api.logging().raiseDebugEvent("从 requestTemplate 解析请求失败，使用简化方式: " + e.getMessage());
+                }
+            }
             
-            return request;
+            // 如果从 requestTemplate 解析失败，使用简化方式
+            if (restoredRequest == null) {
+                // 构建 HttpService
+                burp.api.montoya.http.HttpService httpService = burp.api.montoya.http.HttpService.httpService(host, port, isSecure);
+                
+                // 构建一个"纯净"的请求行与基础头（不拼接 ?query）
+                StringBuilder sb = new StringBuilder();
+                String method = epData.method != null ? epData.method : "GET";
+                sb.append(method).append(" ").append(cleanPath).append(" HTTP/1.1\r\n");
+                sb.append("Host: ").append(host);
+                if (!((isSecure && port == 443) || (!isSecure && port == 80))) {
+                    sb.append(":").append(port);
+                }
+                sb.append("\r\n");
+                sb.append("User-Agent: XProbe-Restore\r\n");
+                sb.append("Accept: */*\r\n\r\n");
+                restoredRequest = HttpRequest.httpRequest(httpService, sb.toString());
+                
+                // 从 epData.url 或 epData.endpoint 提取 query 参数（作为后备）
+                String rawQuery = null;
+                if (epData.url != null && !epData.url.isEmpty()) {
+                    int queryStart = epData.url.indexOf('?');
+                    if (queryStart > 0) {
+                        rawQuery = epData.url.substring(queryStart + 1);
+                    }
+                } else if (epData.endpoint != null && !epData.endpoint.isEmpty()) {
+                    int queryStart = epData.endpoint.indexOf('?');
+                    if (queryStart > 0) {
+                        rawQuery = epData.endpoint.substring(queryStart + 1);
+                    }
+                }
+                
+                // ✅ 修复：从 epData.url 或 epData.endpoint 提取 query 参数，保留所有参数值（包括同名参数）
+                if (rawQuery != null && !rawQuery.isEmpty()) {
+                    java.util.List<java.util.AbstractMap.SimpleEntry<String, String>> q = parseQueryToList(rawQuery);
+                    for (java.util.AbstractMap.SimpleEntry<String, String> e : q) {
+                        restoredRequest = restoredRequest.withAddedParameters(
+                            burp.api.montoya.http.message.params.HttpParameter.urlParameter(e.getKey(), e.getValue())
+                        );
+                    }
+                }
+            }
             
+            return restoredRequest;
         } catch (Exception e) {
-            api.logging().raiseDebugEvent("从端点数据构建请求失败: " + epData.host + " " + epData.endpoint + " - " + e.getMessage());
+            api.logging().raiseErrorEvent("从端点数据构建请求失败: " + epData.host + " " + epData.endpoint + " - " + e.getMessage());
+            e.printStackTrace();
             return null;
+        }
+    }
+
+    private Map<String,String> parseQueryToMap(String query) {
+        Map<String,String> map = new LinkedHashMap<>();
+        if (query == null || query.isEmpty()) return map;
+        // 将后续出现的 '?' 也作为分隔符处理，避免把 '?k=v' 落入 value 造成再次注入
+        String normalized = query.replace('?', '&');
+        for (String part : normalized.split("&")) {
+            if (part == null || part.isEmpty()) continue;
+            String[] kv = part.split("=", 2);
+            String k = urlDecode(kv[0]);
+            String v = kv.length > 1 ? urlDecode(kv[1]) : "";
+            if (k != null && !k.isEmpty()) map.put(k, v);
+        }
+        return map;
+    }
+    
+    /**
+     * ✅ 修复：解析 query string，保留所有参数值（包括同名参数）
+     * 返回参数对列表，每个参数都会保留，即使参数名相同
+     */
+    private java.util.List<java.util.AbstractMap.SimpleEntry<String, String>> parseQueryToList(String query) {
+        java.util.List<java.util.AbstractMap.SimpleEntry<String, String>> list = new java.util.ArrayList<>();
+        if (query == null || query.isEmpty()) return list;
+        // 将后续出现的 '?' 也作为分隔符处理，避免把 '?k=v' 落入 value 造成再次注入
+        String normalized = query.replace('?', '&');
+        for (String part : normalized.split("&")) {
+            if (part == null || part.isEmpty()) continue;
+            String[] kv = part.split("=", 2);
+            String k = urlDecode(kv[0]);
+            String v = kv.length > 1 ? urlDecode(kv[1]) : "";
+            if (k != null && !k.isEmpty()) {
+                list.add(new java.util.AbstractMap.SimpleEntry<>(k, v));
+            }
+        }
+        return list;
+    }
+    private String urlDecode(String s) {
+        try { return java.net.URLDecoder.decode(s, java.nio.charset.StandardCharsets.UTF_8.name()); }
+        catch (Exception e) { return s; }
+    }
+
+    // 去掉URL中的查询串，保存/恢复时统一用干净的path
+    private String stripQuery(String url) {
+        if (url == null || url.isEmpty()) return url;
+        try {
+            java.net.URI uri = new java.net.URI(url);
+            String scheme = uri.getScheme();
+            String host = uri.getHost();
+            String path = uri.getPath();
+            int port = uri.getPort();
+            boolean https = "https".equalsIgnoreCase(scheme);
+            if (path == null || path.isEmpty()) path = "/";
+            if (host == null) return url; // 兜底
+            String portStr = (port > 0 && !(https && port == 443) && !(!https && port == 80)) ? (":" + port) : "";
+            return scheme + "://" + host + portStr + path;
+        } catch (Exception e) {
+            int idx = url.indexOf('?');
+            return idx > 0 ? url.substring(0, idx) : url;
         }
     }
     

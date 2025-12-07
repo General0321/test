@@ -20,6 +20,7 @@ import java.net.URI;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.regex.Pattern;
+import javax.swing.SwingUtilities;
 
 /**
  * 实时扫描器（重构版） - 使用 ParameterCollector 和 ParameterManager
@@ -101,6 +102,20 @@ public class RealtimeScannerRefactored {
     // ✅ 修复：触发模式（手动 vs 实时）
     private volatile boolean isRealtimeMode = false;  // 默认手动模式
     
+    // ✅ 新增：参数扫描挂起开关（用于"先接口后参数"期间阻断后台Arjun）
+    private volatile boolean paramScanSuspended = false;
+    public void suspendRealtimeParamScan(boolean suspend) {
+        this.paramScanSuspended = suspend;
+        api.logging().raiseDebugEvent("参数扫描挂起状态: " + suspend);
+    }
+    
+    // ✅ 新增：接口探测策略标志（true=接口探测后做Arjun，false=直接Arjun）
+    private volatile boolean requireInterfaceFirst = false;
+    public void setRequireInterfaceFirst(boolean require) {
+        this.requireInterfaceFirst = require;
+        api.logging().raiseDebugEvent("接口探测策略: " + (require ? "接口探测后做Arjun" : "直接Arjun"));
+    }
+    
     public RealtimeScannerRefactored(MontoyaApi api, ConfigurationManager configManager, 
                                     GlobalFilter globalFilter, LogModel logModel, 
                                     com.xprobe.scanner.config.XProbeConfig xprobeConfig) {
@@ -170,9 +185,13 @@ public class RealtimeScannerRefactored {
                 }
             }
             
-            // 检查全局过滤器
-            if (!globalFilter.shouldProcessActive(url)) {
-                return;
+            // ✅ 修复：参数收集应该一直工作，只检查静态资源过滤，不检查黑白名单
+            // 参数收集是基础功能，不应该被主动探测的过滤器限制
+            if (globalFilter != null && globalFilter.isStaticResourceFilterEnabled()) {
+                // 只检查静态资源，不检查黑白名单
+                if (com.xprobe.scanner.utils.StaticResourceFilter.isStaticResource(url)) {
+                    return;
+                }
             }
             
             // ✅ 只收集响应参数（请求参数已在 processNewRequest 中收集）
@@ -180,7 +199,16 @@ public class RealtimeScannerRefactored {
             
             // 可选：根据请求参数触发智能扫描
             URI uri = new URI(url);
-            String mainDomain = extractMainDomain(uri.getHost());
+            String host = uri.getHost();
+            // ✅ 修复：如果 host 为 null，跳过处理
+            if (host == null || host.isEmpty() || "null".equals(host)) {
+                return;
+            }
+            String mainDomain = extractMainDomain(host);
+            // ✅ 修复：如果 mainDomain 为 null，跳过处理
+            if (mainDomain == null || mainDomain.isEmpty()) {
+                return;
+            }
             api.logging().raiseDebugEvent("处理主域名: " + mainDomain + " 的响应");
             
         } catch (Exception e) {
@@ -199,13 +227,17 @@ public class RealtimeScannerRefactored {
                 }
             }
             
-            // 检查全局过滤器
-            if (!globalFilter.shouldProcessActive(url)) {
-                api.logging().raiseDebugEvent("URL 被过滤器阻止: " + url);
-                return;
+            // ✅ 修复：参数收集应该一直工作，只检查静态资源过滤，不检查黑白名单
+            // 参数收集是基础功能，不应该被主动探测的过滤器限制
+            // 只检查静态资源，让参数收集更宽松
+            if (globalFilter != null && globalFilter.isStaticResourceFilterEnabled()) {
+                // 只检查静态资源，不检查黑白名单
+                if (com.xprobe.scanner.utils.StaticResourceFilter.isStaticResource(url)) {
+                    return;
+                }
             }
             
-            // 委托给参数收集器
+            // 委托给参数收集器（参数收集器内部也会检查静态资源，这里是双重保险）
             boolean hasNewParameters = parameterCollector.collectFromRequest(request);
             
             if (hasNewParameters) {
@@ -545,32 +577,41 @@ public class RealtimeScannerRefactored {
             ));
             
             for (ParameterCollector.EndpointKey epKey : endpointKeysToScan) {
+                // ✅ 检查是否已停止（在循环开始时检查，避免处理已停止的任务）
+                if (!arjunEnabled) {
+                    api.logging().raiseInfoEvent("⏹️ 主动探测已停止，中断扫描: " + targetHost);
+                    break;
+                }
+                
+                // ✅ 修复：如果执行策略是接口探测成功后做 Arjun 探测，只对接口探测成功的接口做 Arjun 探测
+                // 只有在 requireInterfaceFirst=true 时才检查接口存在性
+                if (requireInterfaceFirst) {
+                    String endpointKey = buildEndpointKey(epKey.method, targetHost, epKey.contentType, epKey.endpoint);
+                    Boolean endpointExists = endpointExistenceCache.get(endpointKey);
+                    if (endpointExists != null && !endpointExists) {
+                        api.logging().raiseDebugEvent(String.format(
+                            "⚠️ 跳过接口 %s %s (%s) %s：接口探测结果为不存在",
+                            epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
+                        ));
+                        continue;
+                    }
+                    // 如果 endpointExists == null，说明还没有探测过，跳过（接口探测策略要求先探测接口）
+                    if (endpointExists == null) {
+                        api.logging().raiseDebugEvent(String.format(
+                            "⚠️ 跳过接口 %s %s (%s) %s：接口探测策略要求先探测接口，但该接口尚未探测",
+                            epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
+                        ));
+                        continue;
+                    }
+                }
+                // 如果 requireInterfaceFirst=false，直接进行Arjun扫描，不检查接口存在性
+                
                 api.logging().raiseInfoEvent(String.format(
                     "处理接口: %s %s (%s) %s",
                     epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
                 ));
                 
-                // ✅ 计算增量参数（未扫描过的）
-                Set<String> incrementalParams = parameterManager.getIncrementalParameters(
-                    epKey.method, targetHost, epKey.contentType, epKey.endpoint, collectedParams
-                );
-                
-                api.logging().raiseInfoEvent(String.format(
-                    "增量参数数: %d (总参数数: %d)",
-                    incrementalParams.size(), collectedParams.size()
-                ));
-                
-                if (incrementalParams.isEmpty()) {
-                    skippedEmptyParams++;
-                    api.logging().raiseInfoEvent(String.format(
-                        "⚠️ 跳过接口 %s %s (%s) %s：所有参数已扫描过（总参数数: %d）",
-                        epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint,
-                        collectedParams.size()
-                    ));
-                    continue;
-                }
-                
-                // ✅ 获取原始请求模板，但修改host为目标子域名
+                // ✅ 获取原始请求模板
                 HttpRequest originalTemplate = parameterCollector.getEndpointTemplate(mainDomain, epKey);
                 if (originalTemplate == null) {
                     skippedNoTemplate++;
@@ -581,93 +622,163 @@ public class RealtimeScannerRefactored {
                     continue;
                 }
                 
+                // ✅ 定义三形态组合（所有模板都尝试三形态）
+                String[][] combinations = new String[][]{
+                    {"GET", null},
+                    {"POST", "application/x-www-form-urlencoded"},
+                    {"POST", "application/json"}
+                };
                 api.logging().raiseInfoEvent(String.format(
-                    "✅ 找到请求模板: %s %s (%s) %s",
+                    "✅ 模板将尝试三形态: %s %s (%s) %s",
                     epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
                 ));
                 
-                // ✅ 修改请求的host为目标子域名
-                HttpRequest modifiedRequest = modifyRequestHost(originalTemplate, targetHost);
-                if (modifiedRequest == null) {
-                    skippedModifyFailed++;
-                    api.logging().raiseInfoEvent(String.format(
-                        "⚠️ 跳过接口 %s %s (%s) %s：修改host失败",
-                        epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
-                    ));
-                    continue;
-                }
-                
-                api.logging().raiseInfoEvent(String.format(
-                    "✅ 请求修改成功: %s %s (%s) %s, 准备发送 Arjun 扫描",
-                    epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
-                ));
-                
-                final HttpRequest finalRequest = modifiedRequest;
-                final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
-                
-                // ✅ 检查 arjunService 是否可用
-                if (arjunService == null) {
-                    api.logging().raiseErrorEvent("❌ arjunService 为 null，无法执行 Arjun 扫描");
-                    continue;
-                }
-                
-                api.logging().raiseInfoEvent(String.format(
-                    "🚀 调用 Arjun 扫描: %s %s (%s) %s, 参数数=%d",
-                    epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint,
-                    finalIncrementalParams.size()
-                ));
-                
-                // 异步调用 Arjun
-                arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
-                    if (result.isSuccess()) {
-                        String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
-                        
-                        if (!result.getFoundParameters().isEmpty()) {
-                            api.logging().raiseInfoEvent(String.format(
-                                "✅ Arjun 发现 %d 个参数: %s %s (%s) %s - %s",
-                                result.getFoundParameters().size(),
-                                epKey.method, targetHost, epKey.contentType, epKey.endpoint, 
-                                result.getFoundParameters()
-                            ));
-                            
-                            // ✅ 通知UI显示结果
-                            notifyArjunResult(mainDomain, targetHost, epKey.endpoint, result.getFoundParameters(), paramType);
-                            
-                            // ✅ 将发现的参数传递给漏洞扫描器
-                            triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
-                        } else {
-                            api.logging().raiseDebugEvent(String.format(
-                                "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
-                                epKey.method, targetHost, epKey.contentType, epKey.endpoint
-                            ));
-                            notifyArjunResult(mainDomain, targetHost, epKey.endpoint, new HashSet<>(), paramType);
-                        }
-                        
-                        parameterManager.markParametersAsScanned(
-                            epKey.method, targetHost, epKey.contentType, epKey.endpoint, 
-                            finalIncrementalParams
-                        );
-                    } else {
-                        parameterManager.markParametersAsScanned(
-                            epKey.method, targetHost, epKey.contentType, epKey.endpoint, 
-                            finalIncrementalParams
-                        );
+                // ✅ 对每个形态进行扫描
+                for (String[] combo : combinations) {
+                    // ✅ 再次检查是否已停止（在内层循环中也检查）
+                    if (!arjunEnabled) {
+                        api.logging().raiseInfoEvent("⏹️ 主动探测已停止，中断形态扫描");
+                        break;
                     }
-                }).exceptionally(ex -> {
-                    api.logging().raiseErrorEvent("Arjun扫描异常: " + ex.getMessage());
-                    parameterManager.markParametersAsScanned(
-                        epKey.method, targetHost, epKey.contentType, epKey.endpoint, 
-                        finalIncrementalParams
+                    String method = combo[0];
+                    String contentType = combo[1];
+                    String contentTypeForKey = ("GET".equalsIgnoreCase(method)) ? null : contentType;
+                    
+                    // ✅ 计算增量参数（未扫描过的）
+                    Set<String> incrementalParams = parameterManager.getIncrementalParameters(
+                        method, targetHost, contentTypeForKey, epKey.endpoint, collectedParams
                     );
-                    return null;
-                });
-                
-                scanned++;
-                api.logging().raiseInfoEvent(String.format(
-                    "✅ 已提交 Arjun 扫描任务: %s %s (%s) %s, scanned计数=%d",
-                    epKey.method, targetHost, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint,
-                    scanned
-                ));
+                    
+                    // ✅ 即使无增量参数，也回退到当前参数来源范围的集合
+                    if (incrementalParams.isEmpty()) {
+                        api.logging().raiseDebugEvent(String.format(
+                            "无增量参数，回退到当前参数来源集合: %s %s (%s) %s (参数数=%d)",
+                            method, targetHost, (contentTypeForKey != null ? contentTypeForKey : "N/A"), epKey.endpoint, collectedParams.size()
+                        ));
+                        incrementalParams = new HashSet<>(collectedParams);
+                    }
+                    
+                    if (incrementalParams.isEmpty()) {
+                        skippedEmptyParams++;
+                        api.logging().raiseInfoEvent(String.format(
+                            "⚠️ 跳过接口 %s %s (%s) %s：无可用参数",
+                            method, targetHost, contentTypeForKey != null ? contentTypeForKey : "N/A", epKey.endpoint
+                        ));
+                        continue;
+                    }
+                    
+                    // ✅ 构建完整URL（保留原始URL参数，用于GET请求）
+                    String fullUrl = buildUrlFromTemplate(originalTemplate, targetHost, stripQuery(epKey.endpoint));
+                    if (fullUrl == null) {
+                        skippedModifyFailed++;
+                        api.logging().raiseInfoEvent(String.format(
+                            "⚠️ 跳过接口 %s %s (%s) %s：构建URL失败",
+                            method, targetHost, contentTypeForKey != null ? contentTypeForKey : "N/A", epKey.endpoint
+                        ));
+                        continue;
+                    }
+                    
+                    // ✅ 构建带参数的请求（形态转换：原始参数+新参数都按目标形态放置）
+                    java.util.Set<String> sanitizedParams = sanitizeParamNames(collectedParams);
+                    HttpRequest baseRequest = buildRequestWithParamsAndTransform(fullUrl, method, contentType, originalTemplate, sanitizedParams);
+                    if (baseRequest == null) {
+                        skippedModifyFailed++;
+                        continue;
+                    }
+                    
+                    // ✅ 修改host为目标子域名
+                    HttpRequest modifiedRequest = modifyRequestHost(baseRequest, targetHost);
+                    if (modifiedRequest == null) {
+                        skippedModifyFailed++;
+                        continue;
+                    }
+                    
+                    // ✅ 复制关键会话头（Cookie/Authorization等）
+                    modifiedRequest = copyCriticalSessionHeaders(originalTemplate, modifiedRequest);
+                    
+                    final HttpRequest finalRequest = modifiedRequest;
+                    final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
+                    final String finalMethod = method;
+                    final String finalContentType = contentTypeForKey;
+                    final String finalDisplayContentType = contentTypeForKey != null ? contentTypeForKey : "N/A";
+                    
+                    // ✅ 检查 arjunService 是否可用
+                    if (arjunService == null) {
+                        api.logging().raiseErrorEvent("❌ arjunService 为 null，无法执行 Arjun 扫描");
+                        continue;
+                    }
+                    
+                    api.logging().raiseInfoEvent(String.format(
+                        "🚀 调用 Arjun 扫描: %s %s (%s) %s, 参数数=%d",
+                        finalMethod, targetHost, finalDisplayContentType, epKey.endpoint,
+                        finalIncrementalParams.size()
+                    ));
+                    
+                    // 异步调用 Arjun（先在表格插入“进行中”占位）
+                    {
+                        String paramTypeProgress = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                        notifyArjunProgress(mainDomain, targetHost, epKey.endpoint, paramTypeProgress);
+                    }
+                    arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                        // ✅ 修复：在收到响应时立即生成时间戳，避免延迟
+                        long timestamp = System.currentTimeMillis();
+                        
+                        if (result.isSuccess()) {
+                            String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                            
+                            if (!result.getFoundParameters().isEmpty()) {
+                                api.logging().raiseInfoEvent(String.format(
+                                    "✅ Arjun 发现 %d 个参数: %s %s (%s) %s - %s",
+                                    result.getFoundParameters().size(),
+                                    finalMethod, targetHost, finalContentType, epKey.endpoint, 
+                                    result.getFoundParameters()
+                                ));
+                                
+                                // ✅ 通知UI显示结果（传入立即生成的时间戳）
+                                notifyArjunResult(mainDomain, targetHost, epKey.endpoint, result.getFoundParameters(), paramType, timestamp);
+                                
+                                // ✅ 将发现的参数传递给漏洞扫描器
+                                triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                            } else {
+                                api.logging().raiseDebugEvent(String.format(
+                                    "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
+                                    finalMethod, targetHost, finalContentType, epKey.endpoint
+                                ));
+                                notifyArjunResult(mainDomain, targetHost, epKey.endpoint, new HashSet<>(), paramType, timestamp);
+                            }
+                            
+                            parameterManager.markParametersAsScanned(
+                                finalMethod, targetHost, finalContentType, epKey.endpoint, 
+                                finalIncrementalParams
+                            );
+                        } else {
+                            // ✅ 修复：失败时也通知UI，显示扫描失败的结果
+                            String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                            notifyArjunResult(mainDomain, targetHost, epKey.endpoint, new HashSet<>(), paramType, timestamp);
+                            
+                            parameterManager.markParametersAsScanned(
+                                finalMethod, targetHost, finalContentType, epKey.endpoint, 
+                                finalIncrementalParams
+                            );
+                        }
+                    }).exceptionally(ex -> {
+                        // ✅ 修复：异常时也立即生成时间戳
+                        long timestamp = System.currentTimeMillis();
+                        api.logging().raiseErrorEvent("Arjun扫描异常: " + ex.getMessage());
+                        
+                        // ✅ 修复：异常时也通知UI，显示扫描异常的结果
+                        String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                        notifyArjunResult(mainDomain, targetHost, epKey.endpoint, new HashSet<>(), paramType, timestamp);
+                        
+                        parameterManager.markParametersAsScanned(
+                            finalMethod, targetHost, finalContentType, epKey.endpoint, 
+                            finalIncrementalParams
+                        );
+                        return null;
+                    });
+                    
+                    scanned++;
+                }
             }
             
             // ✅ 详细的统计日志
@@ -781,9 +892,17 @@ public class RealtimeScannerRefactored {
                 
                 final HttpRequest finalRequest = templateRequest;
                 final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
+                // 秒显：先插入“参数探测中”占位
+                {
+                    String paramTypeProgress = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
+                    notifyArjunProgress(mainDomain, epKey.host, epKey.endpoint, paramTypeProgress);
+                }
                 
                 // 异步调用 Arjun
                 arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                    // ✅ 修复：在收到响应时立即生成时间戳，避免延迟
+                    long timestamp = System.currentTimeMillis();
+                    
                     if (result.isSuccess()) {
                         // ✅ 优化日志：区分找到参数和未找到参数的情况
                         String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
@@ -795,8 +914,8 @@ public class RealtimeScannerRefactored {
                                 epKey, result.getFoundParameters()
                             ));
                             
-                            // ✅ 通知UI显示结果
-                            notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, result.getFoundParameters(), paramType);
+                            // ✅ 通知UI显示结果（传入立即生成的时间戳）
+                            notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, result.getFoundParameters(), paramType, timestamp);
                             
                             triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
                         } else {
@@ -805,21 +924,31 @@ public class RealtimeScannerRefactored {
                                 "Arjun 扫描完成，未发现隐藏参数: %s",
                                 epKey
                             ));
-                            notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType);
+                            notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType, timestamp);
                         }
                         parameterManager.markParametersAsScanned(
                             epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
                             finalIncrementalParams
                         );
                     } else {
+                        // ✅ 修复：失败时也立即生成时间戳并通知UI
+                        String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
+                        notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType, timestamp);
+                        
                         parameterManager.markParametersAsScanned(
                             epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
                             finalIncrementalParams
                         );
                     }
                 }).exceptionally(ex -> {
+                    // ✅ 修复：异常时也立即生成时间戳
+                    long timestamp = System.currentTimeMillis();
                     // ✅ P0修复：添加异常处理，避免无限重试
                     api.logging().raiseErrorEvent("Arjun扫描异常: " + ex.getMessage());
+                    
+                    String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
+                    notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType, timestamp);
+                    
                     parameterManager.markParametersAsScanned(
                         epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
                         finalIncrementalParams
@@ -998,19 +1127,8 @@ public class RealtimeScannerRefactored {
         try {
             api.logging().raiseInfoEvent("开始对手动添加的端点进行 Arjun 探测: " + url);
 
-            // 检查是否已被扫描过（任意method和contentType组合）
-            URI uri = new URI(url);
-            String host = uri.getHost();
-            String endpoint = uri.getPath().isEmpty() ? "/" : uri.getPath();
-
-            if (parameterManager.hasBeenScanned(host, endpoint)) {
-                api.logging().raiseInfoEvent(String.format(
-                    "端点 %s %s 已经被扫描过，跳过",
-                    host, endpoint
-                ));
-                return CompletableFuture.completedFuture(null);
-            }
-
+            // 直接进入增量扫描流程（让 ParameterManager 统一控制增量/缓存）
+            // 提示：重复触发也不会重复扫描，增量逻辑会返回空集并跳过
             return CompletableFuture.runAsync(() -> {
                 try {
                     performIncrementalArjunScan(true, url, runArjun, interfaceDiscoveryFirst, useOnlyHostParameters);
@@ -1249,18 +1367,34 @@ public class RealtimeScannerRefactored {
                     
                     // 对每个接口组合进行增量扫描
                     for (ParameterCollector.EndpointKey epKey : endpointKeys) {
-                        // 计算增量参数（未扫描过的）
-                        Set<String> incrementalParams = parameterManager.getIncrementalParameters(
-                            epKey.method, epKey.host, epKey.contentType, epKey.endpoint, collectedParams
-                        );
-                        
-                        if (incrementalParams.isEmpty()) {
-                            totalSkipped++;
-                            api.logging().raiseDebugEvent(String.format(
-                                "跳过 %s (无新参数)", epKey
-                            ));
-                            continue;
+                        // ✅ 检查是否已停止（在循环开始时检查）
+                        if (!arjunEnabled) {
+                            api.logging().raiseInfoEvent("⏹️ 主动探测已停止，中断扫描: " + mainDomain);
+                            break;
                         }
+                        
+                        // ✅ 修复：如果执行策略是接口探测成功后做 Arjun 探测，只对接口探测成功的接口做 Arjun 探测
+                        // 只有在 requireInterfaceFirst=true 时才检查接口存在性
+                        if (requireInterfaceFirst) {
+                            String endpointKey = buildEndpointKey(epKey.method, epKey.host, epKey.contentType, epKey.endpoint);
+                            Boolean endpointExists = endpointExistenceCache.get(endpointKey);
+                            if (endpointExists != null && !endpointExists) {
+                                api.logging().raiseDebugEvent(String.format(
+                                    "⚠️ 跳过接口 %s %s (%s) %s：接口探测结果为不存在",
+                                    epKey.method, epKey.host, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
+                                ));
+                                continue;
+                            }
+                            // 如果 endpointExists == null，说明还没有探测过，跳过（接口探测策略要求先探测接口）
+                            if (endpointExists == null) {
+                                api.logging().raiseDebugEvent(String.format(
+                                    "⚠️ 跳过接口 %s %s (%s) %s：接口探测策略要求先探测接口，但该接口尚未探测",
+                                    epKey.method, epKey.host, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
+                                ));
+                                continue;
+                            }
+                        }
+                        // 如果 requireInterfaceFirst=false，直接进行Arjun扫描，不检查接口存在性
                         
                         // 获取该接口的请求模板
                         HttpRequest templateRequest = parameterCollector.getEndpointTemplate(mainDomain, epKey);
@@ -1269,73 +1403,152 @@ public class RealtimeScannerRefactored {
                             continue;
                         }
                         
-                        final HttpRequest finalRequest = templateRequest;
-                        final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
-                        totalIncrementalParams += incrementalParams.size();
+                        // ✅ 定义三形态组合（所有模板都尝试三形态）
+                        String[][] combinations = new String[][]{
+                            {"GET", null},
+                            {"POST", "application/x-www-form-urlencoded"},
+                            {"POST", "application/json"}
+                        };
                         
-                        api.logging().raiseInfoEvent(String.format(
-                            "扫描 %s, 增量参数: %d",
-                            epKey, incrementalParams.size()
-                        ));
-                        
-                        // 异步调用 Arjun
-                        arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
-                            if (result.isSuccess()) {
-                                // ✅ 优化日志：区分找到参数和未找到参数的情况
-                                String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
-                                
-                                if (!result.getFoundParameters().isEmpty()) {
-                                    api.logging().raiseInfoEvent(String.format(
-                                        "✅ Arjun 发现 %d 个参数: %s - %s",
-                                        result.getFoundParameters().size(),
-                                        epKey, result.getFoundParameters()
-                                    ));
-                                    
-                                    // ✅ 通知UI显示结果
-                                    notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, result.getFoundParameters(), paramType);
-                                    
-                                    // ✅ 将发现的参数传递给漏洞扫描器
-                                    triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
-                                } else {
-                                    // ✅ 修复：即使没有发现参数，也添加到表格中
-                                    api.logging().raiseDebugEvent(String.format(
-                                        "Arjun 扫描完成，未发现隐藏参数: %s",
-                                        epKey
-                                    ));
-                                    notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType);
-                                }
-                                
-                                // 标记参数为已扫描
-                                parameterManager.markParametersAsScanned(
-                                    epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
-                                    finalIncrementalParams
-                                );
-                            } else {
-                                api.logging().raiseErrorEvent(
-                                    "Arjun 扫描失败: " + result.getErrorMessage()
-                                );
-                                
-                                // 🔴 优化：即使失败也标记（避免无限重试）
-                                parameterManager.markParametersAsScanned(
-                                    epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
-                                    finalIncrementalParams
-                                );
-                                api.logging().raiseDebugEvent(String.format(
-                                    "已标记失败的扫描参数，避免重复尝试: %s", epKey
-                                ));
+                        // ✅ 对每个形态进行扫描
+                        for (String[] combo : combinations) {
+                            // ✅ 再次检查是否已停止（在内层循环中也检查）
+                            if (!arjunEnabled) {
+                                api.logging().raiseInfoEvent("⏹️ 主动探测已停止，中断形态扫描");
+                                break;
                             }
-                        }).exceptionally(ex -> {
-                            api.logging().raiseErrorEvent("Arjun 异步执行失败: " + ex.getMessage());
+                            String method = combo[0];
+                            String contentType = combo[1];
+                            String contentTypeForKey = ("GET".equalsIgnoreCase(method)) ? null : contentType;
                             
-                            // 🔴 优化：异常时也标记
-                            parameterManager.markParametersAsScanned(
-                                epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
-                                finalIncrementalParams
+                            // 计算增量参数（未扫描过的）
+                            Set<String> incrementalParams = parameterManager.getIncrementalParameters(
+                                method, epKey.host, contentTypeForKey, epKey.endpoint, collectedParams
                             );
-                            return null;
-                        });
-                        
-                        totalScanned++;
+                            
+                            // ✅ 即使无增量参数，也回退到当前参数来源范围的集合
+                            if (incrementalParams.isEmpty()) {
+                                api.logging().raiseDebugEvent(String.format(
+                                    "无增量参数，回退到当前参数来源集合: %s %s (%s) %s (参数数=%d)",
+                                    method, epKey.host, (contentTypeForKey != null ? contentTypeForKey : "N/A"), epKey.endpoint, collectedParams.size()
+                                ));
+                                incrementalParams = new HashSet<>(collectedParams);
+                            }
+                            
+                            if (incrementalParams.isEmpty()) {
+                                totalSkipped++;
+                                api.logging().raiseDebugEvent(String.format(
+                                    "跳过 %s %s (%s) %s (无可用参数)", 
+                                    method, epKey.host, contentTypeForKey != null ? contentTypeForKey : "N/A", epKey.endpoint
+                                ));
+                                continue;
+                            }
+                            
+                            // ✅ 构建完整URL（保留原始URL参数，用于GET请求）
+                            String fullUrl = buildUrlFromTemplate(templateRequest, epKey.host, stripQuery(epKey.endpoint));
+                            if (fullUrl == null) {
+                                api.logging().raiseDebugEvent("构建URL失败: " + epKey);
+                                continue;
+                            }
+                            
+                            // ✅ 构建带参数的请求（形态转换：原始参数+新参数都按目标形态放置）
+                            java.util.Set<String> sanitizedParams = sanitizeParamNames(collectedParams);
+                            HttpRequest baseRequest = buildRequestWithParamsAndTransform(fullUrl, method, contentType, templateRequest, sanitizedParams);
+                            if (baseRequest == null) {
+                                continue;
+                            }
+                            
+                            // ✅ 复制关键会话头（Cookie/Authorization等）
+                            HttpRequest requestToScan = copyCriticalSessionHeaders(templateRequest, baseRequest);
+                            final HttpRequest finalRequest = requestToScan;
+                            final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
+                            final String finalMethod = method;
+                            final String finalContentType = contentTypeForKey;
+                            totalIncrementalParams += incrementalParams.size();
+                            
+                            api.logging().raiseInfoEvent(String.format(
+                                "扫描 %s %s (%s) %s, 增量参数: %d",
+                                finalMethod, epKey.host, finalContentType != null ? finalContentType : "N/A", epKey.endpoint, incrementalParams.size()
+                            ));
+                            
+                            // 秒显：先插入“参数探测中”占位
+                            {
+                                String paramTypeProgress = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                notifyArjunProgress(mainDomain, epKey.host, epKey.endpoint, paramTypeProgress);
+                            }
+                            // 异步调用 Arjun
+                            arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                                // ✅ 修复：在收到响应时立即生成时间戳，避免延迟
+                                long timestamp = System.currentTimeMillis();
+                                
+                                if (result.isSuccess()) {
+                                    // ✅ 优化日志：区分找到参数和未找到参数的情况
+                                    String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                    
+                                    if (!result.getFoundParameters().isEmpty()) {
+                                        api.logging().raiseInfoEvent(String.format(
+                                            "✅ Arjun 发现 %d 个参数: %s %s (%s) %s - %s",
+                                            result.getFoundParameters().size(),
+                                            finalMethod, epKey.host, finalContentType, epKey.endpoint, result.getFoundParameters()
+                                        ));
+                                        
+                                        // ✅ 通知UI显示结果（传入立即生成的时间戳）
+                                        notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, result.getFoundParameters(), paramType, timestamp);
+                                        
+                                        // ✅ 将发现的参数传递给漏洞扫描器
+                                        triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                                    } else {
+                                        // ✅ 修复：即使没有发现参数，也添加到表格中
+                                        api.logging().raiseDebugEvent(String.format(
+                                            "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
+                                            finalMethod, epKey.host, finalContentType, epKey.endpoint
+                                        ));
+                                        notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType, timestamp);
+                                    }
+                                    
+                                    // 标记参数为已扫描
+                                    parameterManager.markParametersAsScanned(
+                                        finalMethod, epKey.host, finalContentType, epKey.endpoint, 
+                                        finalIncrementalParams
+                                    );
+                                } else {
+                                    api.logging().raiseErrorEvent(
+                                        "Arjun 扫描失败: " + result.getErrorMessage()
+                                    );
+                                    
+                                    // ✅ 修复：失败时也通知UI，显示扫描失败的结果
+                                    String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                    notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType, timestamp);
+                                    
+                                    // 🔴 优化：即使失败也标记（避免无限重试）
+                                    parameterManager.markParametersAsScanned(
+                                        finalMethod, epKey.host, finalContentType, epKey.endpoint, 
+                                        finalIncrementalParams
+                                    );
+                                    api.logging().raiseDebugEvent(String.format(
+                                        "已标记失败的扫描参数，避免重复尝试: %s %s (%s) %s", 
+                                        finalMethod, epKey.host, finalContentType, epKey.endpoint
+                                    ));
+                                }
+                            }).exceptionally(ex -> {
+                                // ✅ 修复：异常时也立即生成时间戳
+                                long timestamp = System.currentTimeMillis();
+                                api.logging().raiseErrorEvent("Arjun 异步执行失败: " + ex.getMessage());
+                                
+                                // ✅ 修复：异常时也通知UI，显示扫描异常的结果
+                                String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType, timestamp);
+                                
+                                // 🔴 优化：异常时也标记
+                                parameterManager.markParametersAsScanned(
+                                    finalMethod, epKey.host, finalContentType, epKey.endpoint, 
+                                    finalIncrementalParams
+                                );
+                                return null;
+                            });
+                            
+                            totalScanned++;
+                        }
                     }
                 }
                 
@@ -1389,72 +1602,156 @@ public class RealtimeScannerRefactored {
                 
                 // 对每个接口组合进行增量扫描
                 for (ParameterCollector.EndpointKey epKey : endpointKeys) {
-                    Set<String> incrementalParams = parameterManager.getIncrementalParameters(
-                        epKey.method, epKey.host, epKey.contentType, epKey.endpoint, collectedParams
-                    );
-                    
-                    if (incrementalParams.isEmpty()) {
-                        totalSkipped++;
-                        continue;
+                    // ✅ 检查是否已停止（在循环开始时检查）
+                    if (!arjunEnabled) {
+                        api.logging().raiseInfoEvent("⏹️ 主动探测已停止，中断扫描: " + mainDomain);
+                        break;
                     }
+                    
+                    // ✅ 修复：如果执行策略是接口探测成功后做 Arjun 探测，只对接口探测成功的接口做 Arjun 探测
+                    // 只有在 requireInterfaceFirst=true 时才检查接口存在性
+                    if (requireInterfaceFirst) {
+                        String endpointKey = buildEndpointKey(epKey.method, epKey.host, epKey.contentType, epKey.endpoint);
+                        Boolean endpointExists = endpointExistenceCache.get(endpointKey);
+                        if (endpointExists != null && !endpointExists) {
+                            api.logging().raiseDebugEvent(String.format(
+                                "⚠️ 跳过接口 %s %s (%s) %s：接口探测结果为不存在",
+                                epKey.method, epKey.host, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
+                            ));
+                            continue;
+                        }
+                        // 如果 endpointExists == null，说明还没有探测过，跳过（接口探测策略要求先探测接口）
+                        if (endpointExists == null) {
+                            api.logging().raiseDebugEvent(String.format(
+                                "⚠️ 跳过接口 %s %s (%s) %s：接口探测策略要求先探测接口，但该接口尚未探测",
+                                epKey.method, epKey.host, epKey.contentType != null ? epKey.contentType : "N/A", epKey.endpoint
+                            ));
+                            continue;
+                        }
+                    }
+                    // 如果 requireInterfaceFirst=false，直接进行Arjun扫描，不检查接口存在性
                     
                     HttpRequest templateRequest = parameterCollector.getEndpointTemplate(mainDomain, epKey);
                     if (templateRequest == null) {
                         continue;
                     }
                     
-                    final HttpRequest finalRequest = templateRequest;
-                    final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
-                    totalIncrementalParams += incrementalParams.size();
+                    // ✅ 检查模板是否同时有URL和Body参数（特殊例外：保持原状）
+                    // ✅ 定义三形态组合（所有模板都尝试三形态）
+                    String[][] combinations = new String[][]{
+                        {"GET", null},
+                        {"POST", "application/x-www-form-urlencoded"},
+                        {"POST", "application/json"}
+                    };
                     
-                    // 异步调用 Arjun（与SiteMap模式相同的逻辑）
-                    arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
-                        if (result.isSuccess()) {
-                            // ✅ 优化日志：区分找到参数和未找到参数的情况
-                            String paramType = epKey.contentType != null && epKey.contentType.contains("json") ? "JSON" : epKey.method;
-                            
-                            if (!result.getFoundParameters().isEmpty()) {
-                                api.logging().raiseInfoEvent(String.format(
-                                    "✅ Arjun 发现 %d 个参数: %s - %s",
-                                    result.getFoundParameters().size(),
-                                    epKey, result.getFoundParameters()
-                                ));
-                                
-                                // ✅ 通知UI显示结果
-                                notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, result.getFoundParameters(), paramType);
-                                
-                                // ✅ 将发现的参数传递给漏洞扫描器
-                                triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
-                            } else {
-                                // ✅ 修复：即使没有发现参数，也添加到表格中
-                                api.logging().raiseDebugEvent(String.format(
-                                    "Arjun 扫描完成，未发现隐藏参数: %s",
-                                    epKey
-                                ));
-                                notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType);
-                            }
-                            
-                            parameterManager.markParametersAsScanned(
-                                epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
-                                finalIncrementalParams
-                            );
-                        } else {
-                            // 🔴 优化2：失败也标记（避免无限重试）
-                            parameterManager.markParametersAsScanned(
-                                epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
-                                finalIncrementalParams
-                            );
+                    // ✅ 对每个形态进行扫描
+                    for (String[] combo : combinations) {
+                        // ✅ 再次检查是否已停止（在内层循环中也检查）
+                        if (!arjunEnabled) {
+                            api.logging().raiseInfoEvent("⏹️ 主动探测已停止，中断形态扫描");
+                            break;
                         }
-                    }).exceptionally(ex -> {
-                        // 🔴 优化2：异常也标记
-                        parameterManager.markParametersAsScanned(
-                            epKey.method, epKey.host, epKey.contentType, epKey.endpoint, 
-                            finalIncrementalParams
+                        String method = combo[0];
+                        String contentType = combo[1];
+                        String contentTypeForKey = ("GET".equalsIgnoreCase(method)) ? null : contentType;
+                        
+                        Set<String> incrementalParams = parameterManager.getIncrementalParameters(
+                            method, epKey.host, contentTypeForKey, epKey.endpoint, collectedParams
                         );
-                        return null;
-                    });
-                    
-                    totalScanned++;
+                        
+                        // ✅ 即使无增量参数，也回退到当前参数来源范围的集合
+                        if (incrementalParams.isEmpty()) {
+                            incrementalParams = new HashSet<>(collectedParams);
+                        }
+                        
+                        if (incrementalParams.isEmpty()) {
+                            totalSkipped++;
+                            continue;
+                        }
+                        
+                        // ✅ 构建完整URL（保留原始URL参数，用于GET请求）
+                        String fullUrl = buildUrlFromTemplate(templateRequest, epKey.host, stripQuery(epKey.endpoint));
+                        if (fullUrl == null) {
+                            continue;
+                        }
+                        
+                        // ✅ 构建带参数的请求（形态转换：原始参数+新参数都按目标形态放置）
+                        java.util.Set<String> sanitizedParams = sanitizeParamNames(collectedParams);
+                            HttpRequest baseRequest = buildRequestWithParamsAndTransform(fullUrl, method, contentType, templateRequest, sanitizedParams);
+                        if (baseRequest == null) {
+                            continue;
+                        }
+                        
+                        // ✅ 复制关键会话头（Cookie/Authorization等）
+                        HttpRequest requestToScan = copyCriticalSessionHeaders(templateRequest, baseRequest);
+                        final HttpRequest finalRequest = requestToScan;
+                        final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
+                        final String finalMethod = method;
+                        final String finalContentType = contentTypeForKey;
+                        totalIncrementalParams += incrementalParams.size();
+                        
+                        // 异步调用 Arjun（与SiteMap模式相同的逻辑）
+                        arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                            // ✅ 修复：在收到响应时立即生成时间戳，避免延迟
+                            long timestamp = System.currentTimeMillis();
+                            
+                            if (result.isSuccess()) {
+                                // ✅ 优化日志：区分找到参数和未找到参数的情况
+                                String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                
+                                if (!result.getFoundParameters().isEmpty()) {
+                                    api.logging().raiseInfoEvent(String.format(
+                                        "✅ Arjun 发现 %d 个参数: %s %s (%s) %s - %s",
+                                        result.getFoundParameters().size(),
+                                        finalMethod, epKey.host, finalContentType, epKey.endpoint, result.getFoundParameters()
+                                    ));
+                                    
+                                    // ✅ 通知UI显示结果（传入立即生成的时间戳）
+                                    notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, result.getFoundParameters(), paramType, timestamp);
+                                    
+                                    // ✅ 将发现的参数传递给漏洞扫描器
+                                    triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                                } else {
+                                    // ✅ 修复：即使没有发现参数，也添加到表格中
+                                    api.logging().raiseDebugEvent(String.format(
+                                        "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
+                                        finalMethod, epKey.host, finalContentType, epKey.endpoint
+                                    ));
+                                    notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType, timestamp);
+                                }
+                                
+                                parameterManager.markParametersAsScanned(
+                                    finalMethod, epKey.host, finalContentType, epKey.endpoint, 
+                                    finalIncrementalParams
+                                );
+                            } else {
+                                // ✅ 修复：失败时也通知UI，显示扫描失败的结果
+                                String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType, timestamp);
+                                
+                                // 🔴 优化2：失败也标记（避免无限重试）
+                                parameterManager.markParametersAsScanned(
+                                    finalMethod, epKey.host, finalContentType, epKey.endpoint, 
+                                    finalIncrementalParams
+                                );
+                            }
+                        }).exceptionally(ex -> {
+                            // ✅ 修复：异常时也立即生成时间戳
+                            long timestamp = System.currentTimeMillis();
+                            // ✅ 修复：异常时也通知UI，显示扫描异常的结果
+                            String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                            notifyArjunResult(mainDomain, epKey.host, epKey.endpoint, new HashSet<>(), paramType, timestamp);
+                            
+                            // 🔴 优化2：异常也标记
+                            parameterManager.markParametersAsScanned(
+                                finalMethod, epKey.host, finalContentType, epKey.endpoint, 
+                                finalIncrementalParams
+                            );
+                            return null;
+                        });
+                        
+                        totalScanned++;
+                    }
                 }
             }
             
@@ -1479,8 +1776,22 @@ public class RealtimeScannerRefactored {
         try {
             URI uri = new URI(url);
             String host = uri.getHost();
-            String endpoint = uri.getPath().isEmpty() ? "/" : uri.getPath();
+            // ✅ 修复：如果 host 为 null 或 "null"，直接返回
+            if (host == null || host.isEmpty() || "null".equals(host)) {
+                api.logging().raiseErrorEvent("手动端点扫描失败: 无法确定 host - url=" + url);
+                return 0;
+            }
+            String endpointPath = uri.getPath();
+            if (endpointPath == null || endpointPath.isEmpty()) {
+                endpointPath = "/";
+            }
+            final String endpoint = endpointPath; // ✅ 修复：声明为 final，供 lambda 使用
             String mainDomain = extractMainDomain(host);
+            // ✅ 修复：如果 mainDomain 为 null，直接返回
+            if (mainDomain == null || mainDomain.isEmpty()) {
+                api.logging().raiseErrorEvent("手动端点扫描失败: 无法确定 mainDomain - host=" + host);
+                return 0;
+            }
             
             // 获取参数集合：根据参数范围决定使用主域参数合集或目标子域参数
             Set<String> collectedParams = useOnlyHostParameters
@@ -1493,20 +1804,52 @@ public class RealtimeScannerRefactored {
                 collectedParams.addAll(keywords);
             }
             
-            // 定义最常见的 HTTP 方法和 Content-Type 组合
-            // 只测试最常见的3种组合，覆盖大多数场景
-            String[][] combinations = {
-                {"GET", "application/x-www-form-urlencoded"},                                    // GET请求（无Content-Type）
-                {"POST", "application/x-www-form-urlencoded"},     // POST表单提交
-                {"POST", "application/json"}                      // POST JSON API
+            // ✅ 定义三形态组合（所有手动端点都尝试三形态）
+            String[][] combinations = new String[][]{
+                {"GET", null},
+                {"POST", "application/x-www-form-urlencoded"},
+                {"POST", "application/json"}
             };
             
             int scannedCount = 0;
             
             api.logging().raiseInfoEvent(String.format(
-                "手动端点 %s: 将尝试 %d 个最常见的组合",
+                "手动端点 %s: 将尝试 %d 个形态组合",
                 url, combinations.length
             ));
+            
+            // ✅ 从URL中直接提取参数（如果URL包含查询参数）
+            HttpRequest tempTemplate = null;
+            try {
+                // 尝试从URL中解析参数（使用新的变量名避免冲突）
+                java.net.URI urlUri = new java.net.URI(url);
+                String query = urlUri.getQuery();
+                if (query != null && !query.isEmpty()) {
+                    // URL中包含查询参数，构建一个临时请求来提取这些参数
+                    // 使用Burp API的httpRequest方法，它会自动解析URL参数
+                    burp.api.montoya.http.HttpService httpService = burp.api.montoya.http.HttpService.httpService(
+                        urlUri.getHost(), 
+                        urlUri.getPort() > 0 ? urlUri.getPort() : ("https".equalsIgnoreCase(urlUri.getScheme()) ? 443 : 80),
+                        "https".equalsIgnoreCase(urlUri.getScheme())
+                    );
+                    String path = urlUri.getPath();
+                    if (path == null || path.isEmpty()) path = "/";
+                    tempTemplate = burp.api.montoya.http.message.requests.HttpRequest.httpRequest(
+                        httpService, 
+                        "GET " + path + "?" + query + " HTTP/1.1\r\nHost: " + urlUri.getHost() + "\r\n\r\n"
+                    );
+                } else {
+                    // URL中没有查询参数，构建一个基础请求
+                    tempTemplate = buildRequest(url, "GET", null);
+                }
+            } catch (Exception e) {
+                // 如果解析失败，尝试使用buildRequest
+                try {
+                    tempTemplate = buildRequest(url, "GET", null);
+                } catch (Exception e2) {
+                    // 忽略错误
+                }
+            }
             
             // 尝试所有组合
             for (String[] combo : combinations) {
@@ -1530,8 +1873,9 @@ public class RealtimeScannerRefactored {
                         incrementalParams = new HashSet<>(collectedParams);
                     }
                     
-                    // 构建请求
-                    HttpRequest request = buildRequest(url, method, contentType);
+                    // ✅ 构建请求（形态转换：URL中的参数+新参数都按目标形态放置）
+                    java.util.Set<String> sanitizedParams2 = sanitizeParamNames(collectedParams);
+                    HttpRequest request = buildRequestWithParamsAndTransform(url, method, contentType, tempTemplate, sanitizedParams2);
                     if (request == null) {
                         continue;
                     }
@@ -1550,17 +1894,239 @@ public class RealtimeScannerRefactored {
                     
                     // ✅ 如果runArjun=true，根据interfaceDiscoveryFirst决定是否先探测接口
                     if (runArjun) {
-                        // ✅ 如果需要先探测接口，先进行接口探测
+                        // ✅ 如果需要先探测接口，先进行接口探测（异步执行，不阻塞循环）
                         if (interfaceDiscoveryFirst) {
-                            try {
-                                // 1. 先发送原始路径请求
-                                // ✅ 修复：检查HTTP服务是否可用
-                                if (api.http() == null) {
-                                    api.logging().raiseErrorEvent("HTTP服务不可用，无法发送接口探测请求");
-                                    continue;
+                            // ✅ 异步接口探测：避免阻塞循环，让多个接口探测并发执行
+                            CompletableFuture.supplyAsync(() -> {
+                                try {
+                                    // 先秒显接口探测占位
+                                    notifyInterfaceProgress(mainDomain, host, endpoint, finalMethod, finalContentType);
+                                    
+                                    // ✅ 检查HTTP服务是否可用
+                                    if (api.http() == null) {
+                                        api.logging().raiseErrorEvent("HTTP服务不可用，无法发送接口探测请求");
+                                        return false;
+                                    }
+                                    
+                                    // 1. 发送原始路径请求（不携带探测参数，去掉URL查询串）
+                                    HttpRequest validationRequest = buildRequest(stripQuery(url), finalMethod, finalContentType);
+                                    HttpRequestResponse originalResponse = api.http().sendRequest(validationRequest);
+                                    int originalStatusCode = -1;
+                                    String originalResponseBody = null;
+                                    if (originalResponse != null && originalResponse.response() != null) {
+                                        originalStatusCode = originalResponse.response().statusCode();
+                                        originalResponseBody = originalResponse.response().bodyToString();
+                                    }
+                                    
+                                    // ✅ 如果原始路径返回404，直接断定不存在，跳过Arjun扫描
+                                    if (originalStatusCode == 404) {
+                                        api.logging().raiseDebugEvent(String.format(
+                                            "接口不存在: %s %s (%s) %s - 状态码 404，跳过Arjun扫描",
+                                            finalMethod, host, finalDisplayContentType, endpoint
+                                        ));
+                                        return false;  // 接口不存在
+                                    }
+                                    
+                                    // 2. ✅ 如果原始路径返回非404，需要和随机路径的响应码和响应体对比
+                                    boolean endpointExists = false;
+                                    if (originalStatusCode != 404 && originalStatusCode != -1) {
+                                        // ✅ 统一处理：2xx、3xx、其他4xx都需要验证
+                                        // ✅ 优化：使用缓存的随机路径响应，避免重复发送请求
+                                        // ✅ 修复：接口探测阶段应使用不带参数的 validationRequest，避免收集到探测参数
+                                        endpointExists = validateEndpointWithRandomPath(
+                                            url, validationRequest, originalResponse, 
+                                            originalStatusCode, originalResponseBody,
+                                            finalMethod, host, finalContentType, endpoint, mainDomain
+                                        );
+                                    } else if (originalStatusCode >= 500) {
+                                        // 5xx服务器错误，可能是临时问题，保守处理为接口存在
+                                        api.logging().raiseInfoEvent(String.format(
+                                            "接口探测: %s %s (%s) %s - 状态码 %d (服务器错误)，继续Arjun扫描",
+                                            finalMethod, host, finalDisplayContentType, endpoint, originalStatusCode
+                                        ));
+                                        endpointExists = true;
+                                    } else if (originalStatusCode == -1) {
+                                        // 原始请求无响应，跳过
+                                        api.logging().raiseDebugEvent(String.format(
+                                            "接口探测: %s %s (%s) %s - 无响应，跳过Arjun扫描",
+                                            finalMethod, host, finalDisplayContentType, endpoint
+                                        ));
+                                        return false;
+                                    }
+                                    
+                                    // ✅ 如果接口不存在，跳过Arjun扫描
+                                    if (!endpointExists) {
+                                        return false;  // 接口不存在
+                                    }
+                                    
+                                    // ✅ 接口存在，继续进行Arjun参数探测
+                                    api.logging().raiseInfoEvent(String.format(
+                                        "接口验证通过，开始Arjun参数探测: %s %s (%s) %s",
+                                        finalMethod, host, finalDisplayContentType, endpoint
+                                    ));
+                                    
+                                    return true;  // 接口存在
+                                    
+                                } catch (Exception sendError) {
+                                    // 接口探测失败，保守处理，继续Arjun扫描
+                                    api.logging().raiseDebugEvent(String.format(
+                                        "接口探测失败: %s，继续Arjun扫描: %s",
+                                        sendError.getMessage(), endpoint
+                                    ));
+                                    return true; // 保守处理：继续扫描
+                                }
+                            }).thenAccept(endpointExists -> {
+                                // ✅ 先同步写入接口探测结果到表格
+                                notifyInterfaceResult(mainDomain, host, endpoint, finalMethod, finalContentType, endpointExists);
+                                
+                                // ✅ 如果接口不存在，跳过Arjun扫描
+                                if (!endpointExists) {
+                                    return; // 接口不存在，跳过
                                 }
                                 
-                                HttpRequestResponse originalResponse = api.http().sendRequest(finalRequest);
+                                // ✅ 接口存在：先同步插入“参数探测中”占位，再发起扫描
+                                String paramTypeProgress = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                notifyArjunProgress(mainDomain, host, endpoint, paramTypeProgress);
+                                
+                                // ✅ 进行Arjun参数探测（接口已验证存在）
+                                arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                                    // ✅ 修复：在收到响应时立即生成时间戳，避免延迟
+                                    long timestamp = System.currentTimeMillis();
+                                    
+                                    if (result.isSuccess()) {
+                                        String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                        
+                                        if (!result.getFoundParameters().isEmpty()) {
+                                            api.logging().raiseInfoEvent(String.format(
+                                                "✅ Arjun 发现 %d 个参数: %s %s (%s) %s - %s",
+                                                result.getFoundParameters().size(),
+                                                finalMethod, host, finalContentType, endpoint, 
+                                                result.getFoundParameters()
+                                            ));
+                                            
+                                            notifyArjunResult(mainDomain, host, endpoint, result.getFoundParameters(), paramType, timestamp);
+                                            triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                                        } else {
+                                            api.logging().raiseDebugEvent(String.format(
+                                                "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
+                                                finalMethod, host, finalContentType, endpoint
+                                            ));
+                                            notifyArjunResult(mainDomain, host, endpoint, new HashSet<>(), paramType, timestamp);
+                                        }
+                                        
+                                        parameterManager.markParametersAsScanned(
+                                            finalMethod, host, finalContentType, endpoint, 
+                                            finalIncrementalParams
+                                        );
+                                    } else {
+                                        // ✅ 修复：失败时也通知UI，显示扫描失败的结果
+                                        String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                        notifyArjunResult(mainDomain, host, endpoint, new HashSet<>(), paramType, timestamp);
+                                        
+                                        parameterManager.markParametersAsScanned(
+                                            finalMethod, host, finalContentType, endpoint, 
+                                            finalIncrementalParams
+                                        );
+                                    }
+                                }).exceptionally(ex -> {
+                                    // ✅ 修复：异常时也立即生成时间戳
+                                    long timestamp = System.currentTimeMillis();
+                                    api.logging().raiseErrorEvent("Arjun扫描异常: " + ex.getMessage());
+                                    
+                                    // ✅ 修复：异常时也通知UI，显示扫描异常的结果
+                                    String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                    notifyArjunResult(mainDomain, host, endpoint, new HashSet<>(), paramType, timestamp);
+                                    
+                                    parameterManager.markParametersAsScanned(
+                                        finalMethod, host, finalContentType, endpoint, 
+                                        finalIncrementalParams
+                                    );
+                                    return null;
+                                });
+                            });  // 闭合外层的thenAccept
+                        } else {
+                            // ✅ 直接进行Arjun参数探测（不先探测接口）
+                            // 秒显：先插入“参数探测中”占位
+                            {
+                                String paramTypeProgress = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                notifyArjunProgress(mainDomain, host, endpoint, paramTypeProgress);
+                            }
+                            arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                                // ✅ 修复：在收到响应时立即生成时间戳，避免延迟
+                                long timestamp = System.currentTimeMillis();
+                                
+                                if (result.isSuccess()) {
+                                    String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                    
+                                    if (!result.getFoundParameters().isEmpty()) {
+                                        api.logging().raiseInfoEvent(String.format(
+                                            "✅ Arjun 发现 %d 个参数: %s %s (%s) %s - %s",
+                                            result.getFoundParameters().size(),
+                                            finalMethod, host, finalContentType, endpoint, 
+                                            result.getFoundParameters()
+                                        ));
+                                        
+                                        notifyArjunResult(mainDomain, host, endpoint, result.getFoundParameters(), paramType, timestamp);
+                                        triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
+                                    } else {
+                                        // ✅ 修复：即使没有发现参数，也添加到表格中
+                                        api.logging().raiseDebugEvent(String.format(
+                                            "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
+                                            finalMethod, host, finalContentType, endpoint
+                                        ));
+                                        notifyArjunResult(mainDomain, host, endpoint, new HashSet<>(), paramType, timestamp);
+                                    }
+                                    
+                                    parameterManager.markParametersAsScanned(
+                                        finalMethod, host, finalContentType, endpoint, 
+                                        finalIncrementalParams
+                                    );
+                                } else {
+                                    api.logging().raiseErrorEvent(
+                                        "Arjun 扫描失败: " + result.getErrorMessage()
+                                    );
+                                    
+                                    // ✅ 修复：失败时也通知UI，显示扫描失败的结果
+                                    String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                    notifyArjunResult(mainDomain, host, endpoint, new HashSet<>(), paramType, timestamp);
+                                    
+                                    parameterManager.markParametersAsScanned(
+                                        finalMethod, host, finalContentType, endpoint, 
+                                        finalIncrementalParams
+                                    );
+                                }
+                            }).exceptionally(ex -> {
+                                // ✅ 修复：异常时也立即生成时间戳
+                                long timestamp = System.currentTimeMillis();
+                                api.logging().raiseErrorEvent("Arjun 异步执行失败: " + ex.getMessage());
+                                
+                                // ✅ 修复：异常时也通知UI，显示扫描异常的结果
+                                String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
+                                notifyArjunResult(mainDomain, host, endpoint, new HashSet<>(), paramType, timestamp);
+                            
+                            parameterManager.markParametersAsScanned(
+                                finalMethod, host, finalContentType, endpoint, 
+                                finalIncrementalParams
+                            );
+                            return null;
+                        });
+                        }
+                    } else {
+                        // ✅ 接口探测：使用随机路径对比验证接口是否存在（异步并发执行）
+                        // 目的：避免泛解析、反射等导致的误判
+                        // ✅ 优化：异步并发执行，不阻塞循环，确保速度，结果实时显示
+                        CompletableFuture.runAsync(() -> {
+                            try {
+                                // ✅ 检查HTTP服务是否可用
+                                if (api.http() == null) {
+                                    api.logging().raiseErrorEvent("HTTP服务不可用，无法发送接口探测请求");
+                                    return;
+                                }
+                                
+                                // ✅ 修复：接口探测应该不带参数，使用干净的请求
+                                // 1. 先发送原始路径请求（不携带探测参数，去掉URL查询串）
+                                HttpRequest validationRequest = buildRequest(stripQuery(url), finalMethod, finalContentType);
+                                HttpRequestResponse originalResponse = api.http().sendRequest(validationRequest);
                                 int originalStatusCode = -1;
                                 String originalResponseBody = null;
                                 if (originalResponse != null && originalResponse.response() != null) {
@@ -1568,196 +2134,78 @@ public class RealtimeScannerRefactored {
                                     originalResponseBody = originalResponse.response().bodyToString();
                                 }
                                 
-                                // ✅ 如果原始路径返回404，直接断定不存在，跳过Arjun扫描
+                                // ✅ 如果原始路径返回404，直接断定不存在
                                 if (originalStatusCode == 404) {
                                     api.logging().raiseDebugEvent(String.format(
-                                        "接口不存在: %s %s (%s) %s - 状态码 404，跳过Arjun扫描",
+                                        "接口不存在: %s %s (%s) %s - 状态码 404",
                                         finalMethod, host, finalDisplayContentType, endpoint
                                     ));
-                                    continue;  // 跳过此接口
+                                    
+                                    // ✅ 通知UI接口探测结果（仅当runArjun=false时，即纯接口探测模式）
+                                    if (!runArjun && activeProbeTab != null) {
+                                        notifyInterfaceResult(mainDomain, host, endpoint, finalMethod, finalContentType, false);
+                                    }
+                                    
+                                    return;  // 接口不存在
                                 }
                                 
-                                // 2. ✅ 如果原始路径返回非404，需要和随机路径的响应码和响应体对比
-                                boolean endpointExists = false;
+                                // 2. ✅ 如果原始路径返回非404（包括其他4xx、2xx、3xx），需要和随机路径的响应码和响应体对比
                                 if (originalStatusCode != 404 && originalStatusCode != -1) {
                                     // ✅ 统一处理：2xx、3xx、其他4xx都需要验证
                                     // ✅ 优化：使用缓存的随机路径响应，避免重复发送请求
-                                    endpointExists = validateEndpointWithRandomPath(
-                                        url, finalRequest, originalResponse, 
+                                    boolean endpointExists = validateEndpointWithRandomPath(
+                                        url, validationRequest, originalResponse, 
                                         originalStatusCode, originalResponseBody,
                                         finalMethod, host, finalContentType, endpoint, mainDomain
                                     );
-                                } else if (originalStatusCode >= 500) {
-                                    // 5xx服务器错误，可能是临时问题，保守处理为接口存在
-                                    api.logging().raiseInfoEvent(String.format(
-                                        "接口探测: %s %s (%s) %s - 状态码 %d (服务器错误)，继续Arjun扫描",
-                                        finalMethod, host, finalDisplayContentType, endpoint, originalStatusCode
-                                    ));
-                                    endpointExists = true;
-                                } else if (originalStatusCode == -1) {
-                                    // 原始请求无响应，跳过
-                                    api.logging().raiseDebugEvent(String.format(
-                                        "接口探测: %s %s (%s) %s - 无响应，跳过Arjun扫描",
-                                        finalMethod, host, finalDisplayContentType, endpoint
-                                    ));
-                                    continue;
-                                }
-                                
-                                // ✅ 如果接口不存在，跳过Arjun扫描
-                                if (!endpointExists) {
-                                    continue;  // 接口不存在，跳过
-                                }
-                                
-                                // ✅ 接口存在，继续进行Arjun参数探测
-                                api.logging().raiseInfoEvent(String.format(
-                                    "接口验证通过，开始Arjun参数探测: %s %s (%s) %s",
-                                    finalMethod, host, finalDisplayContentType, endpoint
-                                ));
-                                
-                            } catch (Exception sendError) {
-                                // 接口探测失败，保守处理，继续Arjun扫描
-                                api.logging().raiseDebugEvent(String.format(
-                                    "接口探测失败: %s，继续Arjun扫描: %s",
-                                    sendError.getMessage(), endpoint
-                                ));
-                            }
-                        }
-                        
-                        // ✅ 进行Arjun参数探测
-                        // 如果interfaceDiscoveryFirst=true，此时接口已验证存在
-                        // 如果interfaceDiscoveryFirst=false，直接进行参数探测（不先探测接口）
-                        arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
-                            if (result.isSuccess()) {
-                                String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
-                                
-                                if (!result.getFoundParameters().isEmpty()) {
-                                    api.logging().raiseInfoEvent(String.format(
-                                        "✅ Arjun 发现 %d 个参数: %s %s (%s) %s - %s",
-                                        result.getFoundParameters().size(),
-                                        finalMethod, host, finalContentType, endpoint, 
-                                        result.getFoundParameters()
-                                    ));
                                     
-                                    notifyArjunResult(mainDomain, host, endpoint, result.getFoundParameters(), paramType);
-                                    triggerVulnerabilityScan(finalRequest, result.getFoundParameters());
-                                } else {
-                                    // ✅ 修复：即使没有发现参数，也添加到表格中
-                                    api.logging().raiseDebugEvent(String.format(
-                                        "Arjun 扫描完成，未发现隐藏参数: %s %s (%s) %s",
-                                        finalMethod, host, finalContentType, endpoint
-                                    ));
-                                    notifyArjunResult(mainDomain, host, endpoint, new HashSet<>(), paramType);
-                                }
-                                
-                                parameterManager.markParametersAsScanned(
-                                    finalMethod, host, finalContentType, endpoint, 
-                                    finalIncrementalParams
-                                );
-                            } else {
-                                api.logging().raiseErrorEvent(
-                                    "Arjun 扫描失败: " + result.getErrorMessage()
-                                );
-                            }
-                        }).exceptionally(ex -> {
-                            api.logging().raiseErrorEvent("Arjun 异步执行失败: " + ex.getMessage());
-                            return null;
-                        });
-                    } else {
-                        // ✅ 接口探测：使用随机路径对比验证接口是否存在
-                        // 目的：避免泛解析、反射等导致的误判
-                        // ✅ 优化：随机路径由validateEndpointWithRandomPath内部缓存管理，每种类型只发送一次
-                        try {
-                            // 1. 先发送原始路径请求
-                            // ✅ 修复：检查HTTP服务是否可用
-                            if (api.http() == null) {
-                                api.logging().raiseErrorEvent("HTTP服务不可用，无法发送接口探测请求");
-                                continue;
-                            }
-                            
-                            HttpRequestResponse originalResponse = api.http().sendRequest(finalRequest);
-                            int originalStatusCode = -1;
-                            String originalResponseBody = null;
-                            if (originalResponse != null && originalResponse.response() != null) {
-                                originalStatusCode = originalResponse.response().statusCode();
-                                originalResponseBody = originalResponse.response().bodyToString();
-                            }
-                            
-                            // ✅ 如果原始路径返回404，直接断定不存在
-                            if (originalStatusCode == 404) {
-                                api.logging().raiseDebugEvent(String.format(
-                                    "接口不存在: %s %s (%s) %s - 状态码 404",
-                                    finalMethod, host, finalDisplayContentType, endpoint
-                                ));
-                                
-                                // ✅ 通知UI接口探测结果（仅当runArjun=false时，即纯接口探测模式）
-                                if (!runArjun && activeProbeTab != null) {
-                                    try {
-                                        // ✅ 修复：使用已定义的mainDomain变量，不重复声明
-                                        activeProbeTab.addInterfaceDiscoveryResult(mainDomain, host, endpoint, finalMethod, finalContentType, false, System.currentTimeMillis());
-                                    } catch (Exception e) {
-                                        // 忽略错误
-                                    }
-                                }
-                                
-                                continue;  // 跳过此接口
-                            }
-                            
-                            // 2. ✅ 如果原始路径返回非404（包括其他4xx、2xx、3xx），需要和随机路径的响应码和响应体对比
-                            if (originalStatusCode != 404 && originalStatusCode != -1) {
-                                // ✅ 统一处理：2xx、3xx、其他4xx都需要验证
-                                // ✅ 优化：使用缓存的随机路径响应，避免重复发送请求
-                                boolean endpointExists = validateEndpointWithRandomPath(
-                                    url, finalRequest, originalResponse, 
-                                    originalStatusCode, originalResponseBody,
-                                    finalMethod, host, finalContentType, endpoint, mainDomain
-                                );
-                                
-                                if (!endpointExists) {
                                     // ✅ 通知UI接口探测结果（仅当runArjun=false时，即纯接口探测模式）
                                     if (!runArjun && activeProbeTab != null) {
-                                        try {
-                                            // ✅ 修复：使用已定义的mainDomain变量，不重复声明
-                                            activeProbeTab.addInterfaceDiscoveryResult(mainDomain, host, endpoint, finalMethod, finalContentType, false, System.currentTimeMillis());
-                                        } catch (Exception e) {
-                                            // 忽略错误
+                                        notifyInterfaceResult(mainDomain, host, endpoint, finalMethod, finalContentType, endpointExists);
+                                    }
+                                } else if (originalStatusCode >= 500) {
+                                    // 5xx服务器错误，可能是临时问题
+                                    api.logging().raiseInfoEvent(String.format(
+                                        "接口探测: %s %s (%s) %s - 状态码 %d (服务器错误)",
+                                        finalMethod, host, finalDisplayContentType, endpoint, originalStatusCode
+                                    ));
+                                    // 继续处理，但标记为不确定
+                                    if (originalResponse != null) {
+                                        // ✅ 修复：使用不带参数的 validationRequest 进行参数收集
+                                        parameterCollector.collectFromRequest(validationRequest);
+                                        if (originalResponse.response() != null) {
+                                            parameterCollector.collectFromResponse(validationRequest, originalResponse.response());
                                         }
                                     }
-                                    continue;  // 接口不存在，跳过
+                                    // ✅ 通知UI接口探测结果（5xx视为存在）
+                                    if (!runArjun && activeProbeTab != null) {
+                                        notifyInterfaceResult(mainDomain, host, endpoint, finalMethod, finalContentType, true);
+                                    }
+                                } else {
+                                    // 原始请求无响应
+                                    api.logging().raiseDebugEvent(String.format(
+                                        "接口探测: %s %s (%s) %s - 无响应",
+                                        finalMethod, host, finalDisplayContentType, endpoint
+                                    ));
+                                    // ✅ 通知UI接口探测结果（无响应视为不存在）
+                                    if (!runArjun && activeProbeTab != null) {
+                                        notifyInterfaceResult(mainDomain, host, endpoint, finalMethod, finalContentType, false);
+                                    }
                                 }
-                                
-                                // ✅ 通知UI接口探测结果（仅当runArjun=false时，即纯接口探测模式）
+                            } catch (Exception sendError) {
+                                api.logging().raiseErrorEvent("接口探测失败: " + sendError.getMessage());
+                                // ✅ 通知UI接口探测结果（异常视为失败）
                                 if (!runArjun && activeProbeTab != null) {
                                     try {
-                                        // ✅ 修复：使用已定义的mainDomain变量，不重复声明
-                                        activeProbeTab.addInterfaceDiscoveryResult(mainDomain, host, endpoint, finalMethod, finalContentType, true, System.currentTimeMillis());
+                                        SwingUtilities.invokeLater(() -> {
+                                            activeProbeTab.addInterfaceDiscoveryResult(mainDomain, host, endpoint, finalMethod, finalContentType, false, System.currentTimeMillis());
+                                        });
                                     } catch (Exception e) {
                                         // 忽略错误
                                     }
                                 }
-                            } else if (originalStatusCode >= 500) {
-                                // 5xx服务器错误，可能是临时问题
-                                api.logging().raiseInfoEvent(String.format(
-                                    "接口探测: %s %s (%s) %s - 状态码 %d (服务器错误)",
-                                    finalMethod, host, finalDisplayContentType, endpoint, originalStatusCode
-                                ));
-                                // 继续处理，但标记为不确定
-                                if (originalResponse != null) {
-                                    parameterCollector.collectFromRequest(finalRequest);
-                                    if (originalResponse.response() != null) {
-                                        parameterCollector.collectFromResponse(finalRequest, originalResponse.response());
-                                    }
-                                }
-                            } else if (originalStatusCode == -1) {
-                                // 原始请求无响应
-                                api.logging().raiseDebugEvent(String.format(
-                                    "接口探测: %s %s (%s) %s - 无响应",
-                                    finalMethod, host, finalDisplayContentType, endpoint
-                                ));
                             }
-                            
-                        } catch (Exception sendError) {
-                            api.logging().raiseErrorEvent("接口探测失败: " + sendError.getMessage());
-                        }
+                        });  // 异步并发执行，不阻塞循环
                     }
                     
                 scannedCount++;
@@ -1938,6 +2386,21 @@ public class RealtimeScannerRefactored {
     }
     
     /**
+     * ✅ 异步验证接口是否存在（通过双随机路径对比建立基准）
+     * ✅ 优化：异步执行，避免阻塞
+     */
+    private CompletableFuture<Boolean> validateEndpointWithRandomPathAsync(
+            String url, HttpRequest originalRequest, 
+            HttpRequestResponse originalResponse, int originalStatusCode, 
+            String originalResponseBody, String method, String host, 
+            String contentType, String endpoint, String mainDomain) {
+        return CompletableFuture.supplyAsync(() -> {
+            return validateEndpointWithRandomPath(url, originalRequest, originalResponse, 
+                originalStatusCode, originalResponseBody, method, host, contentType, endpoint, mainDomain);
+        });
+    }
+    
+    /**
      * ✅ 验证接口是否存在（通过双随机路径对比建立基准）
      * ✅ 优化：使用双随机路径建立"不存在"的基准响应，更准确地区分泛解析、反射和真实接口
      * 
@@ -1966,6 +2429,13 @@ public class RealtimeScannerRefactored {
             HttpRequestResponse originalResponse, int originalStatusCode, 
             String originalResponseBody, String method, String host, 
             String contentType, String endpoint, String mainDomain) {
+        // ✅ 优先使用接口结果缓存，减少重复验证
+        String cacheKeyEndpoint = buildEndpointKey(method, host, contentType, endpoint);
+        Boolean cachedExist = endpointExistenceCache.get(cacheKeyEndpoint);
+        if (cachedExist != null) {
+            notifyInterfaceResult(mainDomain, host, endpoint, method, contentType, cachedExist);
+            return cachedExist;
+        }
         
         // ✅ 提取原始路径（用于去除反射）
         String originalPath = extractPathFromUrl(url);
@@ -2118,25 +2588,13 @@ public class RealtimeScannerRefactored {
         }
         
         try {
-            // ✅ 发送第一个随机路径请求
+            // ✅ 并发发送两个随机路径请求
             HttpRequest randomPathRequest1 = buildRequestWithRandomPath(url, method, contentType, randomPath1);
             if (randomPathRequest1 == null) {
                 api.logging().raiseDebugEvent("无法构建第一个随机路径请求，保守处理为接口存在");
                 collectAndNotify(originalRequest, originalResponse, mainDomain, host, endpoint, method, contentType, true);
                 return true;
             }
-            
-            HttpRequestResponse randomResponse1 = api.http().sendRequest(randomPathRequest1);
-            if (randomResponse1 == null || randomResponse1.response() == null) {
-                api.logging().raiseDebugEvent("第一个随机路径请求无响应，保守处理为接口存在");
-                collectAndNotify(originalRequest, originalResponse, mainDomain, host, endpoint, method, contentType, true);
-                return true;
-            }
-            
-            int randomStatusCode1 = randomResponse1.response().statusCode();
-            String randomResponseBody1 = randomResponse1.response().bodyToString();
-            
-            // ✅ 发送第二个随机路径请求
             HttpRequest randomPathRequest2 = buildRequestWithRandomPath(url, method, contentType, randomPath2);
             if (randomPathRequest2 == null) {
                 api.logging().raiseDebugEvent("无法构建第二个随机路径请求，保守处理为接口存在");
@@ -2144,13 +2602,36 @@ public class RealtimeScannerRefactored {
                 return true;
             }
             
-            HttpRequestResponse randomResponse2 = api.http().sendRequest(randomPathRequest2);
+            java.util.concurrent.CompletableFuture<HttpRequestResponse> f1 = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                try {
+                    return api.http().sendRequest(randomPathRequest1);
+                } catch (Exception e) {
+                    return null;
+                }
+            });
+            java.util.concurrent.CompletableFuture<HttpRequestResponse> f2 = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                try {
+                    return api.http().sendRequest(randomPathRequest2);
+                } catch (Exception e) {
+                    return null;
+                }
+            });
+            
+            HttpRequestResponse randomResponse1 = f1.join();
+            if (randomResponse1 == null || randomResponse1.response() == null) {
+                api.logging().raiseDebugEvent("第一个随机路径请求无响应，保守处理为接口存在");
+                collectAndNotify(originalRequest, originalResponse, mainDomain, host, endpoint, method, contentType, true);
+                return true;
+            }
+            HttpRequestResponse randomResponse2 = f2.join();
             if (randomResponse2 == null || randomResponse2.response() == null) {
                 api.logging().raiseDebugEvent("第二个随机路径请求无响应，保守处理为接口存在");
                 collectAndNotify(originalRequest, originalResponse, mainDomain, host, endpoint, method, contentType, true);
                 return true;
             }
             
+            int randomStatusCode1 = randomResponse1.response().statusCode();
+            String randomResponseBody1 = randomResponse1.response().bodyToString();
             int randomStatusCode2 = randomResponse2.response().statusCode();
             String randomResponseBody2 = randomResponse2.response().bodyToString();
             
@@ -2225,14 +2706,139 @@ public class RealtimeScannerRefactored {
         notifyInterfaceResult(mainDomain, host, endpoint, method, contentType, exists);
     }
     
+    // ===== 接口探测时间戳缓存（首包发送时刻） =====
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> interfaceSendTs = new java.util.concurrent.ConcurrentHashMap<>();
+    private String buildEndpointKey(String method, String host, String contentType, String endpoint) {
+        return (method == null ? "" : method.toUpperCase()) + "|" +
+               (host == null ? "" : host) + "|" +
+               normalizeContentType(contentType) + "|" +
+               (endpoint == null || endpoint.isEmpty() ? "/" : endpoint);
+    }
+    
+    // 接口结果去重与缓存
+    private final java.util.concurrent.ConcurrentHashMap<String, Boolean> endpointExistenceCache = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> displayedInterfaceKeys = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> pendingInterfaceKeys = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private String normalizeContentType(String contentType) {
+        if (contentType == null || contentType.isBlank()) return "application/x-www-form-urlencoded";
+        String lower = contentType.toLowerCase().trim();
+        int p = lower.indexOf(';');
+        if (p > 0) lower = lower.substring(0, p).trim();
+        if (lower.contains("json")) return "application/json";
+        if (lower.contains("xml")) return "application/xml";
+        if (lower.contains("multipart")) return "multipart/form-data";
+        if (lower.contains("form")) return "application/x-www-form-urlencoded";
+        return lower;
+    }
+
+    // 去掉URL中的查询串（?后面的部分）
+    private String stripQuery(String url) {
+        if (url == null || url.isEmpty()) return url;
+        try {
+            java.net.URI uri = new java.net.URI(url);
+            String scheme = uri.getScheme();
+            String host = uri.getHost();
+            String path = uri.getPath();
+            int port = uri.getPort();
+            // ✅ 修复：如果 host 为 null 或 "null"，使用手动解析
+            if (host == null || host.isEmpty() || "null".equals(host)) {
+                // 手动解析 URL，去掉查询参数
+                int idx = url.indexOf('?');
+                return idx > 0 ? url.substring(0, idx) : url;
+            }
+            boolean defaultPort = ("https".equalsIgnoreCase(scheme) && port == 443) ||
+                                  ("http".equalsIgnoreCase(scheme) && port == 80);
+            String portStr = (port > 0 && !defaultPort) ? (":" + port) : "";
+            return scheme + "://" + host + portStr + (path != null && !path.isEmpty() ? path : "/");
+        } catch (Exception e) {
+            int idx = url.indexOf('?');
+            return idx > 0 ? url.substring(0, idx) : url;
+        }
+    }
+
+    // 过滤无效参数名，确保只保留 [a-zA-Z0-9_-]，并去重
+    private java.util.Set<String> sanitizeParamNames(java.util.Set<String> names) {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        if (names == null) return out;
+        for (String n : names) {
+            if (n == null) continue;
+            String t = n.trim();
+            if (t.isEmpty()) continue;
+            // 只保留合法参数名，避免注入到 URL/Body 时污染请求
+            if (t.matches("[a-zA-Z0-9_-]+")) {
+                out.add(t);
+            }
+        }
+        return out;
+    }
+
     /**
      * ✅ 通知UI接口探测结果
      */
     private void notifyInterfaceResult(String mainDomain, String host, String endpoint, String method,
                                       String contentType, boolean exists) {
+        String key = buildEndpointKey(method, host, contentType, endpoint);
+        endpointExistenceCache.put(key, exists);
+        pendingInterfaceKeys.remove(key);
+        
+        // 去重：同一结果只展示一次
+        if (!displayedInterfaceKeys.add(key)) {
+            return;
+        }
         if (activeProbeTab != null) {
             try {
-                activeProbeTab.addInterfaceDiscoveryResult(mainDomain, host, endpoint, method, contentType, exists, System.currentTimeMillis());
+                Long tsObj = interfaceSendTs.remove(key);
+                long ts = tsObj != null ? tsObj : System.currentTimeMillis();
+                if (SwingUtilities.isEventDispatchThread()) {
+                    activeProbeTab.addOrUpdateInterfaceDiscoveryResult(mainDomain, host, endpoint, method, contentType, exists, ts);
+                } else {
+                    SwingUtilities.invokeAndWait(() -> activeProbeTab.addOrUpdateInterfaceDiscoveryResult(mainDomain, host, endpoint, method, contentType, exists, ts));
+                }
+            } catch (Exception e) {
+                // 忽略错误
+            }
+        }
+    }
+    
+    // ✅ 在发起 Arjun 扫描前，向表格插入"⏳ 探测中"的占位行（秒显）
+    private void notifyArjunProgress(String mainDomain, String host, String endpoint, String parameterType) {
+        if (activeProbeTab != null) {
+            try {
+                long ts = System.currentTimeMillis();
+                if (SwingUtilities.isEventDispatchThread()) {
+                    activeProbeTab.addArjunProgress(mainDomain, host, endpoint, parameterType, ts);
+                } else {
+                    SwingUtilities.invokeAndWait(() -> activeProbeTab.addArjunProgress(mainDomain, host, endpoint, parameterType, ts));
+                }
+            } catch (Exception e) {
+                // 忽略错误
+            }
+        }
+    }
+
+    // ✅ 接口探测占位：秒显
+    private void notifyInterfaceProgress(String mainDomain, String host, String endpoint, String method, String contentType) {
+        String key = buildEndpointKey(method, host, contentType, endpoint);
+        // 若已有缓存结果，直接用缓存更新UI，避免重复占位与发包
+        Boolean cached = endpointExistenceCache.get(key);
+        if (cached != null) {
+            notifyInterfaceResult(mainDomain, host, endpoint, method, contentType, cached);
+            return;
+        }
+        // 若已在进行中，直接返回
+        if (!pendingInterfaceKeys.add(key)) {
+            return;
+        }
+        if (activeProbeTab != null) {
+            try {
+                long ts = System.currentTimeMillis();
+                // 记录首包发送时刻，后续结果沿用该时间，避免时间跳变
+                interfaceSendTs.put(key, ts);
+                if (SwingUtilities.isEventDispatchThread()) {
+                    activeProbeTab.addInterfaceProgress(mainDomain, host, endpoint, method, contentType, ts);
+                } else {
+                    SwingUtilities.invokeAndWait(() -> activeProbeTab.addInterfaceProgress(mainDomain, host, endpoint, method, contentType, ts));
+                }
             } catch (Exception e) {
                 // 忽略错误
             }
@@ -2335,8 +2941,19 @@ public class RealtimeScannerRefactored {
             }
             
             try {
-                String host = new URI(url).getHost();
+                URI uri = new URI(url);
+                String host = uri.getHost();
+                // ✅ 修复：如果 host 为 null 或 "null"，跳过
+                if (host == null || host.isEmpty() || "null".equals(host)) {
+                    api.logging().raiseDebugEvent("跳过请求：无法确定 host - url=" + url);
+                    continue;
+                }
                 String mainDomain = extractMainDomain(host);
+                // ✅ 修复：如果 mainDomain 为 null，跳过
+                if (mainDomain == null || mainDomain.isEmpty()) {
+                    api.logging().raiseDebugEvent("跳过请求：无法确定 mainDomain - host=" + host);
+                    continue;
+                }
                 domainToRequests.computeIfAbsent(mainDomain, k -> new ArrayList<>()).add(req);
             } catch (Exception e) {
                 api.logging().raiseDebugEvent("解析 URL 失败: " + url);
@@ -2412,10 +3029,37 @@ public class RealtimeScannerRefactored {
     
     /**
      * ✅ 清空Arjun扫描缓存
-     * 功能：清空已扫描的参数记录，允许重新扫描之前扫描过的端点
+     * 功能：清空所有主动探测相关的缓存，包括：
+     * 1. 已扫描的参数记录（ParameterManager）
+     * 2. 随机路径基准缓存（randomPathBaselineCache）
+     * 3. 基准锁（baselineLocks）
+     * 允许重新扫描之前扫描过的端点
      */
     public void clearArjunCache() {
+        // 1. 清空已扫描的参数记录
         parameterManager.clearScannedParameters();
+        
+        // 2. 清空随机路径基准缓存
+        int baselineCacheSize = randomPathBaselineCache.size();
+        randomPathBaselineCache.clear();
+        
+        // 3. 清空基准锁
+        baselineLocks.clear();
+        
+        // 4. ✅ 清空接口探测相关缓存（确保UI与缓存状态一致）
+        int endpointCacheSize = endpointExistenceCache.size();
+        int pendingSize = pendingInterfaceKeys.size();
+        int displayedSize = displayedInterfaceKeys.size();
+        int timestampSize = interfaceSendTs.size();
+        endpointExistenceCache.clear();
+        pendingInterfaceKeys.clear();
+        displayedInterfaceKeys.clear();
+        interfaceSendTs.clear();
+        
+        api.logging().raiseInfoEvent(String.format(
+            "✅ 清空所有主动探测缓存: 参数记录已清空, 随机路径基准缓存 %d 条已清空, 接口探测缓存 %d 条已清空 (pending: %d, displayed: %d, timestamp: %d)",
+            baselineCacheSize, endpointCacheSize, pendingSize, displayedSize, timestampSize
+        ));
     }
     
     /**
@@ -2612,28 +3256,43 @@ public class RealtimeScannerRefactored {
         }
         
         try {
+            // ✅ 提取原始请求的参数值
+            java.util.Map<String, String> originalUrlParams = new java.util.HashMap<>();
+            java.util.Map<String, String> originalBodyParams = new java.util.HashMap<>();
+            for (var p : originalRequest.parameters()) {
+                if (p.type() == burp.api.montoya.http.message.params.HttpParameterType.URL) {
+                    originalUrlParams.put(p.name(), p.value());
+                } else if (p.type() == burp.api.montoya.http.message.params.HttpParameterType.BODY) {
+                    originalBodyParams.put(p.name(), p.value());
+                }
+            }
+            
             // 获取Content-Type
             String contentType = getContentType(originalRequest);
             
-            // ✅ 1. 基于原始请求，添加Arjun发现的参数
+            // ✅ 1. 基于原始请求，添加Arjun发现的参数，✅ 使用原参数值
             HttpRequest requestWithParams = originalRequest;
             
             // 根据请求类型添加参数
             if ("GET".equalsIgnoreCase(originalRequest.method())) {
-                // GET: 添加URL参数
+                // GET: 添加URL参数，✅ 使用原参数值
                 for (String paramName : foundParams) {
+                    String value = originalUrlParams.containsKey(paramName) ? originalUrlParams.get(paramName) : 
+                                  (originalBodyParams.containsKey(paramName) ? originalBodyParams.get(paramName) : "xprobe_test");
                     requestWithParams = requestWithParams.withAddedParameters(
-                        HttpParameter.urlParameter(paramName, "xprobe_test")
+                        HttpParameter.urlParameter(paramName, value)
                     );
                 }
             } else if (contentType != null && contentType.contains("application/json")) {
-                // JSON: 需要合并到JSON body（使用Arjun的方式）
-                requestWithParams = buildJsonRequestWithParams(originalRequest, foundParams);
+                // JSON: 需要合并到JSON body（使用Arjun的方式），✅ 使用原参数值
+                requestWithParams = buildJsonRequestWithParams(originalRequest, foundParams, originalUrlParams, originalBodyParams);
             } else {
-                // POST表单: 添加body参数
+                // POST表单: 添加body参数，✅ 使用原参数值
                 for (String paramName : foundParams) {
+                    String value = originalUrlParams.containsKey(paramName) ? originalUrlParams.get(paramName) : 
+                                  (originalBodyParams.containsKey(paramName) ? originalBodyParams.get(paramName) : "xprobe_test");
                     requestWithParams = requestWithParams.withAddedParameters(
-                        HttpParameter.bodyParameter(paramName, "xprobe_test")
+                        HttpParameter.bodyParameter(paramName, value)
                     );
                 }
             }
@@ -2682,10 +3341,20 @@ public class RealtimeScannerRefactored {
     }
     
     /**
-     * ✅ 构建包含参数的JSON请求
+     * ✅ 构建包含参数的JSON请求（重载：无原参数值）
      */
     @SuppressWarnings("unchecked")
     private HttpRequest buildJsonRequestWithParams(HttpRequest originalRequest, Set<String> paramNames) {
+        return buildJsonRequestWithParams(originalRequest, paramNames, null, null);
+    }
+    
+    /**
+     * ✅ 构建包含参数的JSON请求，✅ 使用原参数值
+     */
+    @SuppressWarnings("unchecked")
+    private HttpRequest buildJsonRequestWithParams(HttpRequest originalRequest, Set<String> paramNames,
+                                                   java.util.Map<String, String> originalUrlParams,
+                                                   java.util.Map<String, String> originalBodyParams) {
         try {
             com.fasterxml.jackson.databind.ObjectMapper jsonMapper = 
                 new com.fasterxml.jackson.databind.ObjectMapper();
@@ -2700,9 +3369,21 @@ public class RealtimeScannerRefactored {
                 jsonMap = jsonMapper.readValue(originalBody, Map.class);
             }
             
-            // 添加发现的参数（使用测试值）
+            // ✅ 添加发现的参数，使用原参数值
             for (String paramName : paramNames) {
-                jsonMap.put(paramName, "xprobe_test");
+                String value = "xprobe_test";
+                if (originalUrlParams != null && originalUrlParams.containsKey(paramName)) {
+                    value = originalUrlParams.get(paramName);
+                } else if (originalBodyParams != null && originalBodyParams.containsKey(paramName)) {
+                    value = originalBodyParams.get(paramName);
+                } else if (jsonMap.containsKey(paramName)) {
+                    // 如果原JSON中已有该参数，使用原值
+                    Object existingValue = jsonMap.get(paramName);
+                    if (existingValue != null) {
+                        value = existingValue.toString();
+                    }
+                }
+                jsonMap.put(paramName, value);
             }
             
             // 序列化回JSON
@@ -2871,10 +3552,10 @@ public class RealtimeScannerRefactored {
     
     /**
      * 通知所有监听器Arjun发现了参数
+     * ✅ 修复：时间戳由调用方在收到响应时立即生成，避免延迟
      */
     private void notifyArjunResult(String mainDomain, String host, String endpoint, Set<String> foundParameters, 
-                                   String parameterType) {
-        long timestamp = System.currentTimeMillis();
+                                   String parameterType, long timestamp) {
         for (ArjunResultListener listener : arjunResultListeners) {
             try {
                 listener.onArjunResultFound(mainDomain, host, endpoint, foundParameters, parameterType, timestamp);
@@ -2902,24 +3583,297 @@ public class RealtimeScannerRefactored {
         return false;
     }
 
+    /**
+     * 构建请求并转换参数形态（原始参数+新参数都按目标形态放置）
+     * @param url 目标URL（可能包含原始URL参数）
+     * @param method 目标HTTP方法
+     * @param contentType 目标Content-Type
+     * @param originalTemplate 原始模板请求（用于提取原始参数）
+     * @param newParamNames 新参数名称集合
+     */
+    private burp.api.montoya.http.message.requests.HttpRequest buildRequestWithParamsAndTransform(
+            String url, String method, String contentType, HttpRequest originalTemplate, java.util.Set<String> newParamNames) {
+        try {
+            // ✅ 修复：提取原始请求的所有参数（URL和Body），使用 List 保留所有参数值（包括同名参数）
+            // 注意：虽然 Burp API 的 parameters() 可能不会返回同名参数，但为了完整性，我们使用 List
+            java.util.Map<String, String> originalUrlParams = new java.util.HashMap<>();
+            java.util.Map<String, String> originalBodyParams = new java.util.HashMap<>();
+            
+            if (originalTemplate != null) {
+                // ✅ 遍历所有参数，如果同名参数有多个值，保留最后一个（这是 Burp API 的行为）
+                // 但更重要的是确保所有参数名都被提取
+                for (var p : originalTemplate.parameters()) {
+                    if (p.type() == burp.api.montoya.http.message.params.HttpParameterType.URL) {
+                        originalUrlParams.put(p.name(), p.value());
+                    } else if (p.type() == burp.api.montoya.http.message.params.HttpParameterType.BODY) {
+                        originalBodyParams.put(p.name(), p.value());
+                    }
+                }
+            }
+            
+            // ✅ 修复：如果参数在当前接口模板中不存在，尝试从同一主域的其他接口模板中查找参数值
+            // 这样可以确保跨接口的参数也能使用原始值，而不是 xprobe_test
+            // 注意：必须在合并 allParamNames 之前查找，这样查找到的值才能被使用
+            if (newParamNames != null && parameterCollector != null && !newParamNames.isEmpty()) {
+                // 从 URL 中提取 host，然后查找对应的主域
+                String mainDomainToSearch = null;
+                try {
+                    java.net.URI uri = new java.net.URI(url);
+                    String host = uri.getHost();
+                    if (host != null && !host.isEmpty()) {
+                        // 遍历所有主域，找到包含该 host 的主域
+                        java.util.Set<String> allMainDomains = parameterCollector.getAllMainDomains();
+                        for (String md : allMainDomains) {
+                            java.util.Set<String> hosts = parameterCollector.getHostsForMainDomain(md);
+                            if (hosts != null && hosts.contains(host)) {
+                                mainDomainToSearch = md;
+                                break;
+                            }
+                        }
+                        // 如果没找到，host 本身可能就是主域（IP地址的情况）
+                        if (mainDomainToSearch == null) {
+                            mainDomainToSearch = host;
+                        }
+                    }
+                } catch (Exception e) {
+                    api.logging().raiseDebugEvent("提取主域失败: " + e.getMessage());
+                }
+                
+                if (mainDomainToSearch != null) {
+                    // ✅ 对 newParamNames 中的每个参数，如果不在当前模板中，从其他接口模板中查找
+                    for (String paramName : newParamNames) {
+                        if (!originalUrlParams.containsKey(paramName) && !originalBodyParams.containsKey(paramName)) {
+                            // 尝试从同一主域的所有接口模板中查找该参数
+                            java.util.Set<ParameterCollector.EndpointKey> allEndpoints = parameterCollector.getEndpointKeysForMainDomain(mainDomainToSearch);
+                            if (allEndpoints != null && !allEndpoints.isEmpty()) {
+                                boolean found = false;
+                                for (ParameterCollector.EndpointKey otherEpKey : allEndpoints) {
+                                    HttpRequest otherTemplate = parameterCollector.getEndpointTemplate(mainDomainToSearch, otherEpKey);
+                                    if (otherTemplate != null) {
+                                        for (var p : otherTemplate.parameters()) {
+                                            if (p.name().equals(paramName)) {
+                                                if (p.type() == burp.api.montoya.http.message.params.HttpParameterType.URL) {
+                                                    originalUrlParams.put(paramName, p.value());
+                                                    found = true;
+                                                    api.logging().raiseDebugEvent(String.format(
+                                                        "✅ 从其他接口模板中找到参数值: %s=%s (来自 %s %s)",
+                                                        paramName, p.value(), otherEpKey.method, otherEpKey.endpoint
+                                                    ));
+                                                } else if (p.type() == burp.api.montoya.http.message.params.HttpParameterType.BODY) {
+                                                    originalBodyParams.put(paramName, p.value());
+                                                    found = true;
+                                                    api.logging().raiseDebugEvent(String.format(
+                                                        "✅ 从其他接口模板中找到参数值: %s=%s (来自 %s %s)",
+                                                        paramName, p.value(), otherEpKey.method, otherEpKey.endpoint
+                                                    ));
+                                                }
+                                                break; // 找到第一个值就使用
+                                            }
+                                        }
+                                        // 如果已经找到该参数的值，就不需要继续查找其他接口
+                                        if (found) {
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (!found) {
+                                    api.logging().raiseDebugEvent(String.format(
+                                        "⚠️ 未找到参数值: %s (主域: %s, 接口数: %d)",
+                                        paramName, mainDomainToSearch, allEndpoints.size()
+                                    ));
+                                }
+                            } else {
+                                api.logging().raiseDebugEvent(String.format(
+                                    "⚠️ 主域 %s 没有接口模板", mainDomainToSearch
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    api.logging().raiseDebugEvent("⚠️ 无法确定主域，跳过跨接口参数查找");
+                }
+            }
+            
+            // ✅ 合并所有参数（原始参数+新参数）
+            java.util.Set<String> allParamNames = new java.util.HashSet<>();
+            if (newParamNames != null) {
+                allParamNames.addAll(newParamNames);
+            }
+            allParamNames.addAll(originalUrlParams.keySet());
+            allParamNames.addAll(originalBodyParams.keySet());
+            
+            // ✅ 移除URL中的查询参数（避免重复），统一通过参数对象添加
+            String cleanUrl = url;
+            try {
+                java.net.URI uri = new java.net.URI(url);
+                String scheme = uri.getScheme();
+                String host = uri.getHost();
+                String path = uri.getPath();
+                int port = uri.getPort();
+                // ✅ 修复：如果 host 为 null 或 "null"，使用手动解析
+                if (host == null || host.isEmpty() || "null".equals(host)) {
+                    // 手动解析 URL
+                    int queryIndex = url.indexOf("?");
+                    if (queryIndex > 0) {
+                        cleanUrl = url.substring(0, queryIndex);
+                    }
+                } else {
+                    boolean defaultPort = (scheme != null && scheme.equalsIgnoreCase("https") && port == 443) || 
+                                          (scheme != null && scheme.equalsIgnoreCase("http") && port == 80);
+                    String portStr = (port > 0 && !defaultPort) ? (":" + port) : "";
+                    cleanUrl = scheme + "://" + host + portStr + (path != null && !path.isEmpty() ? path : "/");
+                }
+            } catch (Exception e) {
+                int queryIndex = url.indexOf("?");
+                if (queryIndex > 0) {
+                    cleanUrl = url.substring(0, queryIndex);
+                }
+            }
+            
+            burp.api.montoya.http.message.requests.HttpRequest req = buildRequest(cleanUrl, method, contentType);
+            if (req == null) return null;
+            
+            if (allParamNames.isEmpty()) return req;
+            
+            try {
+                if ("GET".equalsIgnoreCase(method)) {
+                    // GET请求：所有参数（原始URL+原始Body+新参数）都添加到URL
+                    for (String name : allParamNames) {
+                        String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
+                                      (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
+                        req = req.withAddedParameters(
+                            burp.api.montoya.http.message.params.HttpParameter.urlParameter(name, value)
+                        );
+                    }
+                } else if (contentType != null && contentType.toLowerCase(java.util.Locale.ROOT).contains("json")) {
+                    // POST JSON：所有参数（原始URL+原始Body+新参数）都添加到JSON Body
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("{");
+                    boolean first = true;
+                    for (String name : allParamNames) {
+                        if (!first) sb.append(",");
+                        String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
+                                      (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
+                        sb.append("\"").append(name).append("\":\"").append(escapeJson(value)).append("\"");
+                        first = false;
+                    }
+                    sb.append("}");
+                    req = req.withBody(sb.toString());
+                    // 确保Content-Type
+                    boolean hasCT = false;
+                    for (var h : req.headers()) { if ("Content-Type".equalsIgnoreCase(h.name())) { hasCT = true; break; } }
+                    if (!hasCT) req = req.withAddedHeader("Content-Type", "application/json");
+                } else {
+                    // POST 表单：所有参数（原始URL+原始Body+新参数）都添加到Body
+                    for (String name : allParamNames) {
+                        String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
+                                      (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
+                        req = req.withAddedParameters(
+                            burp.api.montoya.http.message.params.HttpParameter.bodyParameter(name, value)
+                        );
+                    }
+                    // 确保Content-Type
+                    boolean hasCT = false;
+                    for (var h : req.headers()) { if ("Content-Type".equalsIgnoreCase(h.name())) { hasCT = true; break; } }
+                    if (!hasCT) req = req.withAddedHeader("Content-Type", "application/x-www-form-urlencoded");
+                }
+            } catch (Exception e) {
+                api.logging().raiseErrorEvent("构建请求参数失败: " + e.getMessage());
+            }
+            return req;
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("构建请求失败: " + e.getMessage());
+            return null;
+        }
+    }
+    
+    /**
+     * 转义JSON字符串中的特殊字符
+     */
+    private String escapeJson(String str) {
+        if (str == null) return "";
+        return str.replace("\\", "\\\\")
+                  .replace("\"", "\\\"")
+                  .replace("\n", "\\n")
+                  .replace("\r", "\\r")
+                  .replace("\t", "\\t");
+    }
+    
     private burp.api.montoya.http.message.requests.HttpRequest buildRequestWithParams(
             String url, String method, String contentType, java.util.Set<String> paramNames) {
-        burp.api.montoya.http.message.requests.HttpRequest req = buildRequest(url, method, contentType);
+        return buildRequestWithParams(url, method, contentType, paramNames, null);
+    }
+    
+    /**
+     * ✅ 修复：支持传入原始模板请求，使用原参数值
+     */
+    private burp.api.montoya.http.message.requests.HttpRequest buildRequestWithParams(
+            String url, String method, String contentType, java.util.Set<String> paramNames, HttpRequest originalTemplate) {
+        // ✅ 提取原始请求的参数值
+        java.util.Map<String, String> originalUrlParams = new java.util.HashMap<>();
+        java.util.Map<String, String> originalBodyParams = new java.util.HashMap<>();
+        if (originalTemplate != null) {
+            for (var p : originalTemplate.parameters()) {
+                if (p.type() == burp.api.montoya.http.message.params.HttpParameterType.URL) {
+                    originalUrlParams.put(p.name(), p.value());
+                } else if (p.type() == burp.api.montoya.http.message.params.HttpParameterType.BODY) {
+                    originalBodyParams.put(p.name(), p.value());
+                }
+            }
+        }
+        
+        // ✅ 修复：对于所有请求，都需要移除URL中的查询参数（避免参数重复）
+        // 参数会通过 withAddedParameters 统一添加，确保使用原始参数值
+        String cleanUrl = url;
+        try {
+            java.net.URI uri = new java.net.URI(url);
+            String scheme = uri.getScheme();
+            String host = uri.getHost();
+            String path = uri.getPath();
+            int port = uri.getPort();
+            // ✅ 修复：如果 host 为 null 或 "null"，使用手动解析
+            if (host == null || host.isEmpty() || "null".equals(host)) {
+                // 手动解析 URL
+                int queryIndex = url.indexOf("?");
+                if (queryIndex > 0) {
+                    cleanUrl = url.substring(0, queryIndex);
+                }
+            } else {
+                boolean defaultPort = (scheme != null && scheme.equalsIgnoreCase("https") && port == 443) || 
+                                      (scheme != null && scheme.equalsIgnoreCase("http") && port == 80);
+                String portStr = (port > 0 && !defaultPort) ? (":" + port) : "";
+                cleanUrl = scheme + "://" + host + portStr + (path != null && !path.isEmpty() ? path : "/");
+            }
+        } catch (Exception e) {
+            // 如果解析失败，使用原始URL
+            int queryIndex = url.indexOf("?");
+            if (queryIndex > 0) {
+                cleanUrl = url.substring(0, queryIndex);
+            }
+        }
+        
+        burp.api.montoya.http.message.requests.HttpRequest req = buildRequest(cleanUrl, method, contentType);
         if (req == null || paramNames == null || paramNames.isEmpty()) return req;
         try {
             if ("GET".equalsIgnoreCase(method)) {
+                // GET请求：参数添加到URL，✅ 使用原参数值
                 for (String name : paramNames) {
+                    String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
+                                  (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
                     req = req.withAddedParameters(
-                        burp.api.montoya.http.message.params.HttpParameter.urlParameter(name, "xprobe_test")
+                        burp.api.montoya.http.message.params.HttpParameter.urlParameter(name, value)
                     );
                 }
             } else if (contentType != null && contentType.toLowerCase(java.util.Locale.ROOT).contains("json")) {
+                // POST JSON：参数添加到Body，确保URL中没有参数，✅ 使用原参数值
                 StringBuilder sb = new StringBuilder();
                 sb.append("{");
                 boolean first = true;
                 for (String name : paramNames) {
                     if (!first) sb.append(",");
-                    sb.append("\"").append(name).append("\":\"xprobe_test\"");
+                    String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
+                                  (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
+                    sb.append("\"").append(name).append("\":\"").append(escapeJson(value)).append("\"");
                     first = false;
                 }
                 sb.append("}");
@@ -2929,10 +3883,12 @@ public class RealtimeScannerRefactored {
                 for (var h : req.headers()) { if ("Content-Type".equalsIgnoreCase(h.name())) { hasCT = true; break; } }
                 if (!hasCT) req = req.withAddedHeader("Content-Type", "application/json");
             } else {
-                // 表单
+                // POST 表单：参数添加到Body，确保URL中没有参数，✅ 使用原参数值
                 for (String name : paramNames) {
+                    String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
+                                  (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
                     req = req.withAddedParameters(
-                        burp.api.montoya.http.message.params.HttpParameter.bodyParameter(name, "xprobe_test")
+                        burp.api.montoya.http.message.params.HttpParameter.bodyParameter(name, value)
                     );
                 }
                 // 确保Content-Type
@@ -2942,6 +3898,258 @@ public class RealtimeScannerRefactored {
             }
         } catch (Exception ignore) {}
         return req;
+    }
+
+    /**
+     * 将增量参数添加到原始请求中，保持原有参数位置（URL参数添加到URL，Body参数添加到Body）
+     * ✅ 修复：使用原参数值（从 originalTemplate 中提取，而不是从已修改的 request 中提取）
+     */
+    private burp.api.montoya.http.message.requests.HttpRequest addIncrementalParamsToRequest(
+            burp.api.montoya.http.message.requests.HttpRequest request, 
+            java.util.Set<String> incrementalParams,
+            HttpRequest originalTemplate) {
+        if (request == null || incrementalParams == null || incrementalParams.isEmpty()) {
+            return request;
+        }
+        try {
+            // ✅ 修复：从 originalTemplate 中提取原始参数值，而不是从已修改的 request 中提取
+            java.util.Map<String, String> originalUrlParams = new java.util.HashMap<>();
+            java.util.Map<String, String> originalBodyParams = new java.util.HashMap<>();
+            if (originalTemplate != null) {
+                for (var p : originalTemplate.parameters()) {
+                    if (p.type() == burp.api.montoya.http.message.params.HttpParameterType.URL) {
+                        originalUrlParams.put(p.name(), p.value());
+                    } else if (p.type() == burp.api.montoya.http.message.params.HttpParameterType.BODY) {
+                        originalBodyParams.put(p.name(), p.value());
+                    }
+                }
+            }
+            
+            // 检查原始请求的参数类型分布
+            boolean hasUrlParams = !originalUrlParams.isEmpty();
+            boolean hasBodyParams = !originalBodyParams.isEmpty();
+            String contentType = null;
+            for (var h : request.headers()) {
+                if ("Content-Type".equalsIgnoreCase(h.name())) {
+                    contentType = h.value();
+                    break;
+                }
+            }
+            
+            // 根据原始请求的参数分布，决定增量参数的添加位置
+            if (hasUrlParams && hasBodyParams) {
+                // ✅ 同时有URL和Body参数：增量参数只添加到URL（避免破坏Body结构）
+                // 这样可以保持原始请求的Body结构不变，只修改URL参数
+                for (String name : incrementalParams) {
+                    String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
+                                  (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
+                    request = request.withAddedParameters(
+                        burp.api.montoya.http.message.params.HttpParameter.urlParameter(name, value)
+                    );
+                }
+            } else if (hasUrlParams) {
+                // 只有URL参数：增量参数添加到URL，✅ 使用原参数值
+                for (String name : incrementalParams) {
+                    String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : "xprobe_test";
+                    request = request.withAddedParameters(
+                        burp.api.montoya.http.message.params.HttpParameter.urlParameter(name, value)
+                    );
+                }
+            } else if (hasBodyParams) {
+                // 只有Body参数：根据Content-Type决定
+                if (contentType != null && contentType.toLowerCase(java.util.Locale.ROOT).contains("json")) {
+                    // JSON Body：合并到现有JSON，✅ 使用原参数值
+                    String existingBody = request.bodyToString();
+                    if (existingBody != null && existingBody.trim().startsWith("{")) {
+                        StringBuilder sb = new StringBuilder();
+                        sb.append(existingBody.trim());
+                        if (!existingBody.trim().endsWith("}")) {
+                            sb.setLength(sb.length() - 1);
+                        }
+                        if (sb.length() > 1 && !sb.substring(1, sb.length() - 1).trim().isEmpty()) {
+                            sb.insert(sb.length() - 1, ",");
+                        }
+                        for (String name : incrementalParams) {
+                            String value = originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test";
+                            sb.insert(sb.length() - 1, String.format("\"%s\":\"%s\",", name, escapeJson(value)));
+                        }
+                        if (sb.charAt(sb.length() - 2) == ',') {
+                            sb.deleteCharAt(sb.length() - 2);
+                        }
+                        sb.append("}");
+                        request = request.withBody(sb.toString());
+                    } else {
+                        StringBuilder sb = new StringBuilder();
+                        sb.append("{");
+                        boolean first = true;
+                        for (String name : incrementalParams) {
+                            if (!first) sb.append(",");
+                            String value = originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test";
+                            sb.append("\"").append(name).append("\":\"").append(escapeJson(value)).append("\"");
+                            first = false;
+                        }
+                        sb.append("}");
+                        request = request.withBody(sb.toString());
+                    }
+                } else {
+                    // 表单Body：添加到Body参数，✅ 使用原参数值
+                    for (String name : incrementalParams) {
+                        String value = originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test";
+                        request = request.withAddedParameters(
+                            burp.api.montoya.http.message.params.HttpParameter.bodyParameter(name, value)
+                        );
+                    }
+                }
+            } else {
+                // 没有参数：根据方法决定（GET→URL，POST→Body），✅ 使用原参数值（虽然原请求没有参数，但保持一致性）
+                String method = request.method();
+                if ("GET".equalsIgnoreCase(method)) {
+                    for (String name : incrementalParams) {
+                        request = request.withAddedParameters(
+                            burp.api.montoya.http.message.params.HttpParameter.urlParameter(name, "xprobe_test")
+                        );
+                    }
+                } else {
+                    if (contentType != null && contentType.toLowerCase(java.util.Locale.ROOT).contains("json")) {
+                        StringBuilder sb = new StringBuilder();
+                        sb.append("{");
+                        boolean first = true;
+                        for (String name : incrementalParams) {
+                            if (!first) sb.append(",");
+                            sb.append("\"").append(name).append("\":\"xprobe_test\"");
+                            first = false;
+                        }
+                        sb.append("}");
+                        request = request.withBody(sb.toString());
+                    } else {
+                        for (String name : incrementalParams) {
+                            request = request.withAddedParameters(
+                                burp.api.montoya.http.message.params.HttpParameter.bodyParameter(name, "xprobe_test")
+                            );
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("添加增量参数失败: " + e.getMessage());
+        }
+        return request;
+    }
+
+    /**
+     * 从原始请求复制关键会话头到新请求（跳过Host和Content-Length）
+     */
+    private burp.api.montoya.http.message.requests.HttpRequest copyCriticalSessionHeaders(
+            burp.api.montoya.http.message.requests.HttpRequest original, 
+            burp.api.montoya.http.message.requests.HttpRequest target) {
+        if (original == null || target == null) return target;
+        try {
+            java.util.Set<String> criticalHeaders = java.util.Set.of(
+                "Cookie", "Authorization", "Referer", "X-CSRF-Token", 
+                "X-Requested-With", "X-Auth-Token", "X-API-Key"
+            );
+            for (var h : original.headers()) {
+                String name = h.name();
+                if (criticalHeaders.contains(name) || 
+                    name.toLowerCase(java.util.Locale.ROOT).startsWith("x-")) {
+                    // 跳过Host和Content-Length（由API自动处理）
+                    if ("Host".equalsIgnoreCase(name) || "Content-Length".equalsIgnoreCase(name)) {
+                        continue;
+                    }
+                    // 如果目标请求已有该头，更新；否则添加
+                    boolean exists = false;
+                    for (var th : target.headers()) {
+                        if (name.equalsIgnoreCase(th.name())) {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (exists) {
+                        target = target.withUpdatedHeader(name, h.value());
+                    } else {
+                        target = target.withAddedHeader(name, h.value());
+                    }
+                }
+            }
+        } catch (Exception ignore) {}
+        return target;
+    }
+
+    /**
+     * 从模板请求构建完整URL（替换host和path）
+     */
+    private String buildUrlFromTemplate(HttpRequest template, String targetHost, String endpoint) {
+        try {
+            // ✅ 修复：优先使用 template.httpService() 获取 scheme 和 port，避免 URL 解析问题
+            String scheme = "https";
+            int port = 443;
+            boolean isSecure = true;
+            
+            // 尝试从 template 的 httpService 获取
+            try {
+                burp.api.montoya.http.HttpService httpService = template.httpService();
+                if (httpService != null) {
+                    scheme = httpService.secure() ? "https" : "http";
+                    port = httpService.port();
+                    isSecure = httpService.secure();
+                }
+            } catch (Exception ignored) {}
+            
+            // 如果无法从 httpService 获取，尝试从 URL 解析
+            try {
+                String originalUrl = template.url();
+                java.net.URI uri = new java.net.URI(originalUrl);
+                String uriScheme = uri.getScheme();
+                if (uriScheme != null && !uriScheme.isEmpty()) {
+                    scheme = uriScheme;
+                    isSecure = "https".equalsIgnoreCase(scheme);
+                }
+                int uriPort = uri.getPort();
+                if (uriPort > 0) {
+                    port = uriPort;
+                } else {
+                    port = isSecure ? 443 : 80;
+                }
+            } catch (Exception ignored) {
+                // 使用默认值
+            }
+            
+            boolean defaultPort = (isSecure && port == 443) || (!isSecure && port == 80);
+            String portStr = defaultPort ? "" : (":" + port);
+            
+            // ✅ 确保 targetHost 不为 null
+            if (targetHost == null || targetHost.isEmpty() || "null".equals(targetHost)) {
+                api.logging().raiseErrorEvent("构建URL失败: targetHost 为空或为 null");
+                return null;
+            }
+            
+            // ✅ 确保 endpoint 不为 null
+            if (endpoint == null || endpoint.isEmpty()) {
+                endpoint = "/";
+            }
+            
+            // ✅ 保留原始URL的查询参数（用于GET请求）
+            String query = null;
+            String fragment = null;
+            try {
+                String originalUrl = template.url();
+                java.net.URI uri = new java.net.URI(originalUrl);
+                query = uri.getQuery();
+                fragment = uri.getFragment();
+            } catch (Exception ignored) {}
+            
+            String url = scheme + "://" + targetHost + portStr + endpoint;
+            if (query != null && !query.isEmpty()) {
+                url += "?" + query;
+            }
+            if (fragment != null && !fragment.isEmpty()) {
+                url += "#" + fragment;
+            }
+            return url;
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("构建URL失败: " + e.getMessage());
+            return null;
+        }
     }
 
     public void stopAllTasksAndClear() {

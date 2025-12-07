@@ -90,19 +90,48 @@ public class ParameterCollector {
             
             URI uri = new URI(url);
             String host = uri.getHost();
-            String mainDomain = extractMainDomain(host);
-            String endpoint = uri.getPath().isEmpty() ? "/" : uri.getPath();
-            
-            // 提取参数
-            Set<String> parameters = extractParameters(request);
-            
-            if (parameters.isEmpty()) {
-                processedRequests.put(dedupeKey, Boolean.TRUE);
+            // ✅ 修复：如果 host 为 null，尝试从 request 的 httpService 获取
+            if (host == null || host.isEmpty() || "null".equals(host)) {
+                host = request.httpService().host();
+            }
+            // ✅ 修复：如果 host 仍然为 null，直接返回，避免后续使用 null 作为 key
+            if (host == null || host.isEmpty() || "null".equals(host)) {
+                api.logging().raiseDebugEvent("跳过请求：无法确定 host - url=" + url);
                 return false;
+            }
+            String mainDomain = extractMainDomain(host);
+            // ✅ 修复：如果 mainDomain 为 null（不应该发生，但保险起见），直接返回
+            if (mainDomain == null || mainDomain.isEmpty()) {
+                api.logging().raiseDebugEvent("跳过请求：无法确定 mainDomain - host=" + host);
+                return false;
+            }
+            // ✅ 修复：直接使用 request.path() 而不是从 URL 解析，避免 URL 格式问题导致路径错误
+            String endpoint = request.path();
+            if (endpoint == null || endpoint.isEmpty()) {
+                // 如果 request.path() 返回空，再从 URL 解析
+                endpoint = uri.getPath();
+            }
+            if (endpoint == null || endpoint.isEmpty()) {
+                endpoint = "/";
+            }
+            
+            // ✅ 修复：去掉 endpoint 中的 query 参数，确保同一个接口不会因为参数不同而被当作不同接口
+            int queryIndex = endpoint.indexOf('?');
+            if (queryIndex > 0) {
+                endpoint = endpoint.substring(0, queryIndex);
+            }
+            if (endpoint.isEmpty()) {
+                endpoint = "/";
             }
             
             // 获取或创建域数据
             DomainData domainData = domainDataMap.computeIfAbsent(mainDomain, DomainData::new);
+            
+            // ✅ 先添加接口信息（即使没有参数也要添加接口）
+            domainData.addEndpoint(host, endpoint, method, contentType, request);
+            
+            // 提取参数
+            Set<String> parameters = extractParameters(request);
             
             // 检查是否有新参数
             boolean hasNewParameters = false;
@@ -113,8 +142,7 @@ public class ParameterCollector {
                 }
             }
             
-            // 添加参数和接口信息
-            domainData.addEndpoint(host, endpoint, method, contentType, request);
+            // 添加参数（如果有参数的话）
             for (String param : parameters) {
                 domainData.addParameter(host, endpoint, param);
             }
@@ -179,7 +207,21 @@ public class ParameterCollector {
             
             URI uri = new URI(url);
             String host = uri.getHost();
+            // ✅ 修复：如果 host 为 null，尝试从 request 的 httpService 获取
+            if (host == null || host.isEmpty() || "null".equals(host)) {
+                host = request.httpService().host();
+            }
+            // ✅ 修复：如果 host 仍然为 null，直接返回，避免后续使用 null 作为 key
+            if (host == null || host.isEmpty() || "null".equals(host)) {
+                api.logging().raiseDebugEvent("跳过响应：无法确定 host - url=" + url);
+                return false;
+            }
             String mainDomain = extractMainDomain(host);
+            // ✅ 修复：如果 mainDomain 为 null，直接返回
+            if (mainDomain == null || mainDomain.isEmpty()) {
+                api.logging().raiseDebugEvent("跳过响应：无法确定 mainDomain - host=" + host);
+                return false;
+            }
             
             // 从响应中提取参数（从JSON、HTML等）
             Set<String> parameters = extractParametersFromResponse(response);
@@ -194,7 +236,23 @@ public class ParameterCollector {
             
             // 检查是否有新参数
             boolean hasNewParameters = false;
-            String endpoint = uri.getPath().isEmpty() ? "/" : uri.getPath();
+            // ✅ 修复：直接使用 request.path() 而不是从 URL 解析，避免 URL 格式问题导致路径错误
+            String endpoint = request.path();
+            if (endpoint == null || endpoint.isEmpty()) {
+                endpoint = uri.getPath();
+            }
+            if (endpoint == null || endpoint.isEmpty()) {
+                endpoint = "/";
+            }
+            
+            // ✅ 修复：去掉 endpoint 中的 query 参数，确保同一个接口不会因为参数不同而被当作不同接口
+            int queryIndex = endpoint.indexOf('?');
+            if (queryIndex > 0) {
+                endpoint = endpoint.substring(0, queryIndex);
+            }
+            if (endpoint.isEmpty()) {
+                endpoint = "/";
+            }
             
             for (String param : parameters) {
                 if (!domainData.hasParameter(param)) {
@@ -825,8 +883,13 @@ public class ParameterCollector {
             
             // ✅ 修复：先检查是否存在，正确判断是否为新接口
             boolean isNewEndpoint = !endpointMap.containsKey(endpointKey);
-            endpointMap.computeIfAbsent(endpointKey, 
+            EndpointInfo epInfo = endpointMap.computeIfAbsent(endpointKey, 
                 k -> new EndpointInfo(host, endpoint, method, normalizedContentType, request));
+            
+            // ✅ 修复：如果接口已存在，更新模板请求以合并所有参数（确保包含所有见过的参数值）
+            if (!isNewEndpoint && epInfo != null) {
+                epInfo.updateTemplateRequest(request);
+            }
             
             // ✅ 修复：只在新接口时更新时间
             if (isNewEndpoint) {
@@ -950,6 +1013,111 @@ public class ParameterCollector {
         
         public void addParameter(String parameter) {
             parameters.add(parameter);
+        }
+        
+        /**
+         * ✅ 修复：更新模板请求，合并所有参数（包括新请求中的参数）
+         * 这样确保模板请求包含所有见过的参数值
+         */
+        public void updateTemplateRequest(HttpRequest newRequest) {
+            if (newRequest == null) return;
+            
+            // 如果当前模板为空，直接使用新请求
+            if (this.templateRequest == null) {
+                this.templateRequest = newRequest;
+                return;
+            }
+            
+            // 收集旧模板中的所有参数（使用 List 保留所有参数值，包括同名参数）
+            java.util.List<java.util.AbstractMap.SimpleEntry<String, String>> allUrlParams = new java.util.ArrayList<>();
+            java.util.List<java.util.AbstractMap.SimpleEntry<String, String>> allBodyParams = new java.util.ArrayList<>();
+            
+            // 先添加旧模板中的所有参数
+            for (var param : this.templateRequest.parameters()) {
+                if (param.type() == burp.api.montoya.http.message.params.HttpParameterType.URL) {
+                    allUrlParams.add(new java.util.AbstractMap.SimpleEntry<>(param.name(), param.value()));
+                } else if (param.type() == burp.api.montoya.http.message.params.HttpParameterType.BODY) {
+                    allBodyParams.add(new java.util.AbstractMap.SimpleEntry<>(param.name(), param.value()));
+                }
+            }
+            
+            // 再添加新请求中的所有参数（如果参数名已存在，也添加，保留所有值）
+            for (var param : newRequest.parameters()) {
+                if (param.type() == burp.api.montoya.http.message.params.HttpParameterType.URL) {
+                    allUrlParams.add(new java.util.AbstractMap.SimpleEntry<>(param.name(), param.value()));
+                } else if (param.type() == burp.api.montoya.http.message.params.HttpParameterType.BODY) {
+                    allBodyParams.add(new java.util.AbstractMap.SimpleEntry<>(param.name(), param.value()));
+                }
+            }
+            
+            // ✅ 修复：构建一个干净的请求（去掉 URL 中的 query 参数和 body 中的参数），然后添加所有合并后的参数
+            // 1. 获取干净的 path（去掉 query 参数）
+            String cleanPath = newRequest.path();
+            int queryIndex = cleanPath != null ? cleanPath.indexOf('?') : -1;
+            if (queryIndex > 0) {
+                cleanPath = cleanPath.substring(0, queryIndex);
+            }
+            if (cleanPath == null || cleanPath.isEmpty()) {
+                cleanPath = "/";
+            }
+            
+            // 2. 构建基础请求字符串（使用新请求的 method、headers、body，但使用干净的 path）
+            try {
+                StringBuilder requestBuilder = new StringBuilder();
+                requestBuilder.append(newRequest.method()).append(" ").append(cleanPath).append(" HTTP/1.1\r\n");
+                
+                // 添加所有 headers
+                for (var header : newRequest.headers()) {
+                    requestBuilder.append(header.name()).append(": ").append(header.value()).append("\r\n");
+                }
+                requestBuilder.append("\r\n");
+                
+                // 添加 body（如果有，但要去掉 body 中的参数）
+                // 注意：如果 body 是表单格式，参数在 body 中，我们需要去掉这些参数
+                String bodyStr = newRequest.bodyToString();
+                if (bodyStr != null && !bodyStr.isEmpty()) {
+                    // 检查 Content-Type 是否是表单格式
+                    boolean isFormData = false;
+                    for (var header : newRequest.headers()) {
+                        if ("Content-Type".equalsIgnoreCase(header.name()) && 
+                            header.value().contains("application/x-www-form-urlencoded")) {
+                            isFormData = true;
+                            break;
+                        }
+                    }
+                    // 如果不是表单格式，直接添加 body（如 JSON、XML 等）
+                    if (!isFormData) {
+                        requestBuilder.append(bodyStr);
+                    }
+                    // 如果是表单格式，body 中的参数会被下面的 withAddedParameters 添加，所以这里不添加
+                }
+                
+                // 3. 构建干净的请求（不包含任何参数）
+                burp.api.montoya.http.message.requests.HttpRequest updatedRequest = 
+                    burp.api.montoya.http.message.requests.HttpRequest.httpRequest(
+                        newRequest.httpService(), 
+                        requestBuilder.toString()
+                    );
+                
+                // 4. 添加所有 URL 参数（包括旧模板和新请求中的所有参数值）
+                for (java.util.AbstractMap.SimpleEntry<String, String> e : allUrlParams) {
+                    updatedRequest = updatedRequest.withAddedParameters(
+                        burp.api.montoya.http.message.params.HttpParameter.urlParameter(e.getKey(), e.getValue())
+                    );
+                }
+                
+                // 5. 添加所有 Body 参数（包括旧模板和新请求中的所有参数值）
+                for (java.util.AbstractMap.SimpleEntry<String, String> e : allBodyParams) {
+                    updatedRequest = updatedRequest.withAddedParameters(
+                        burp.api.montoya.http.message.params.HttpParameter.bodyParameter(e.getKey(), e.getValue())
+                    );
+                }
+                
+                this.templateRequest = updatedRequest;
+            } catch (Exception e) {
+                // 如果构建失败，使用新请求（至少保留新请求的参数）
+                this.templateRequest = newRequest;
+            }
         }
         
         public String getEndpoint() {
