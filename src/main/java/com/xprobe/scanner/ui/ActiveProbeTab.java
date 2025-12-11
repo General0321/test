@@ -783,7 +783,10 @@ public class ActiveProbeTab {
     private void openProbeConfigDialog(ActiveProbeConfigDialog.ProbeMode mode) {
         SwingUtilities.invokeLater(() -> {
             Window owner = SwingUtilities.getWindowAncestor(panel);
-            ParameterDataStorage.ParameterDataModel dataModel = parameterDataStorage.load();
+            // ✅ 修复：从 ParameterCollector 构建 dataModel，而不是从文件加载
+            // 这样可以确保配置页面显示的是当前内存中的实时数据，而不是文件中的旧数据
+            ParameterCollector collector = realtimeScanner.getParameterCollector();
+            ParameterDataStorage.ParameterDataModel dataModel = parameterDataStorage.buildDataModel(collector);
             ActiveProbeConfigDialog dialog = new ActiveProbeConfigDialog(
                 owner,
                 dataModel,
@@ -880,7 +883,8 @@ public class ActiveProbeTab {
                     yield CompletableFuture.failedFuture(
                         new IllegalArgumentException("所选主域没有可用子域可执行接口探测。"));
                 }
-                yield CompletableFuture.runAsync(() -> runInterfaceOnTargets(targets, config.getInterfaceScope()));
+                // ✅ 修复：传递执行策略，确保根据策略决定是否执行 Arjun 扫描
+                yield CompletableFuture.runAsync(() -> runInterfaceOnTargets(targets, config.getInterfaceScope(), config.getStrategy()));
             }
         };
     }
@@ -969,7 +973,8 @@ public class ActiveProbeTab {
      * @param scope 接口范围选项
      */
     private void runInterfaceOnTargets(Map<String, Set<String>> targets,
-                                       ActiveProbeConfigDialog.ScopeOption scope) {
+                                       ActiveProbeConfigDialog.ScopeOption scope,
+                                       ActiveProbeConfigDialog.ProbeMode strategy) {
         if (targets.isEmpty()) {
             return;
         }
@@ -977,6 +982,13 @@ public class ActiveProbeTab {
         // ✅ 判断是否只使用选中子域的接口
         boolean useOnlyHostEndpoints = scope == ActiveProbeConfigDialog.ScopeOption.SELECTED_SUBDOMAINS;
         ParameterCollector collector = realtimeScanner.getParameterCollector();
+        
+        // ✅ 修复：根据执行策略决定是否执行 Arjun 扫描
+        // INTERFACE_ONLY: 仅接口探测，runArjun=false
+        // INTERFACE_THEN_ARJUN: 接口探测成功后做 Arjun，runArjun=true, interfaceDiscoveryFirst=true
+        // ARJUN_ONLY: 直接对接口进行 Arjun，runArjun=true, interfaceDiscoveryFirst=false
+        boolean runArjun = strategy != ActiveProbeConfigDialog.ProbeMode.INTERFACE_ONLY;
+        boolean interfaceDiscoveryFirst = strategy == ActiveProbeConfigDialog.ProbeMode.INTERFACE_THEN_ARJUN;
 
         // ✅ 性能优化：在主域级别缓存接口数据，避免对每个子域重复获取
         targets.forEach((mainDomain, hosts) -> {
@@ -1000,7 +1012,7 @@ public class ActiveProbeTab {
 
             // ✅ 批量处理同一主域下的所有子域
             for (String host : hosts) {
-                triggerInterfaceDiscoveryForHost(mainDomain, host, useOnlyHostEndpoints, allEndpointKeys, collector);
+                triggerInterfaceDiscoveryForHost(mainDomain, host, useOnlyHostEndpoints, allEndpointKeys, collector, runArjun, interfaceDiscoveryFirst);
             }
         });
     }
@@ -1355,13 +1367,26 @@ public class ActiveProbeTab {
                             Set<String> hostParameters = parameterCollector.getParametersForHost(host);
                             Set<String> hostKeywords = new HashSet<>();
                             
-                            // 统计该子域名的接口数（需要遍历所有接口，找出属于该host的）
+                            // ✅ 统计该子域名的接口数（需要遍历所有接口，找出属于该host的）
+                            // ✅ 修复：统计所有不同的 EndpointKey（包括不同的 method 和 contentType），而不是只统计 endpoint 路径
                             Set<ParameterCollector.EndpointKey> allEndpointKeys = 
                                 parameterCollector.getEndpointKeysForMainDomain(mainDomain);
-                            for (ParameterCollector.EndpointKey epKey : allEndpointKeys) {
-                                if (epKey.host.equals(host)) {
-                                    hostEndpoints.add(epKey.endpoint);
+                            if (allEndpointKeys != null) {
+                                for (ParameterCollector.EndpointKey epKey : allEndpointKeys) {
+                                    if (epKey.host != null && epKey.host.equals(host)) {
+                                        // ✅ 修复：使用完整的 EndpointKey 来统计，确保不同 method/contentType 的接口都被统计
+                                        // 但为了显示，我们只统计不同的 endpoint 路径（因为 UI 显示的是接口路径数）
+                                        hostEndpoints.add(epKey.endpoint);
+                                    }
                                 }
+                            }
+                            
+                            // ✅ 诊断：如果接口数为0，记录日志
+                            if (hostEndpoints.size() == 0 && hostParameters.size() > 0) {
+                                api.logging().raiseDebugEvent(String.format(
+                                    "⚠️ 子域 %s 有 %d 个参数但接口数为0，可能接口恢复失败或统计逻辑有问题",
+                                    host, hostParameters.size()
+                                ));
                             }
                             
                             // 如果启用了关键词收集，获取该子域名的关键词
@@ -2059,11 +2084,11 @@ public class ActiveProbeTab {
      * @param useOnlyHostEndpoints 如果为true，只使用该子域的接口；如果为false，使用主域下所有子域的接口
      */
     private void triggerInterfaceDiscoveryForHost(String mainDomain, String host, boolean useOnlyHostEndpoints) {
-        // ✅ 向后兼容：获取数据后调用性能优化版本
+        // ✅ 向后兼容：获取数据后调用性能优化版本，默认仅接口探测
         ParameterCollector collector = realtimeScanner.getParameterCollector();
         Set<ParameterCollector.EndpointKey> allEndpointKeys = 
             collector.getEndpointKeysForMainDomain(mainDomain);
-        triggerInterfaceDiscoveryForHost(mainDomain, host, useOnlyHostEndpoints, allEndpointKeys, collector);
+        triggerInterfaceDiscoveryForHost(mainDomain, host, useOnlyHostEndpoints, allEndpointKeys, collector, false, false);
     }
     
     /**
@@ -2074,10 +2099,14 @@ public class ActiveProbeTab {
      * @param useOnlyHostEndpoints 如果为true，只使用该子域的接口；如果为false，使用主域下所有子域的接口
      * @param allEndpointKeys 主域下所有接口（已缓存，避免重复获取）
      * @param collector 参数收集器（已获取，避免重复获取）
+     * @param runArjun 是否执行 Arjun 扫描
+     * @param interfaceDiscoveryFirst 是否先探测接口再执行 Arjun
      */
     private void triggerInterfaceDiscoveryForHost(String mainDomain, String host, boolean useOnlyHostEndpoints,
                                                    Set<ParameterCollector.EndpointKey> allEndpointKeys,
-                                                   ParameterCollector collector) {
+                                                   ParameterCollector collector,
+                                                   boolean runArjun,
+                                                   boolean interfaceDiscoveryFirst) {
         try {
             // ✅ 根据接口范围选择过滤接口
             List<ParameterCollector.EndpointKey> hostEndpoints = new ArrayList<>();
@@ -2152,8 +2181,10 @@ public class ActiveProbeTab {
                             }
                             
                             // ✅ 调用完整的接口探测逻辑（包含随机路径验证）
-                            // 参数说明：url, runArjun=false（仅接口探测）, interfaceDiscoveryFirst=false（不先探测接口）
-                            realtimeScanner.triggerManualEndpointScan(url, false, false);
+                            // ✅ 修复：传入原始请求模板以保留请求头
+                            // ✅ 修复：根据执行策略决定是否执行 Arjun 扫描
+                            // 参数说明：url, runArjun（根据策略决定）, interfaceDiscoveryFirst（根据策略决定）, useOnlyHostParameters=false, originalTemplate=template（原始请求模板）
+                            realtimeScanner.triggerManualEndpointScanAsync(url, runArjun, interfaceDiscoveryFirst, false, template);
                             sentCount[0]++;
                             // 添加小延迟，避免请求过快
                             Thread.sleep(100);

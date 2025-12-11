@@ -125,14 +125,24 @@ public class ParameterDataStorage {
                         if (hostData.endpoints != null) {
                             for (EndpointData epData : hostData.endpoints) {
                                 try {
+                                    String mainDomain = mainDomainData.mainDomain;
                                     HttpRequest request = buildRequestFromEndpointData(epData, api);
                                     if (request != null) {
-                                        // ✅ 直接调用 collectFromRequest，它现在会即使没有参数也添加接口
-                                        collector.collectFromRequest(request);
+                                        // ✅ 修复：使用 addEndpointDirectly 方法直接添加接口，跳过去重检查
+                                        // 这样可以确保恢复的接口被正确添加，即使请求已经被处理过
+                                        String host = epData.host;
+                                        String endpoint = epData.endpoint;
+                                        String method = epData.method != null ? epData.method : "GET";
+                                        String contentType = epData.contentType != null ? epData.contentType : "application/x-www-form-urlencoded";
+                                        
+                                        collector.addEndpointDirectly(host, endpoint, method, contentType, request, mainDomain);
                                         restoredEndpoints++;
+                                    } else {
+                                        api.logging().raiseErrorEvent("恢复接口失败: 无法构建请求 - " + epData.host + " " + epData.endpoint);
                                     }
                                 } catch (Exception e) {
-                                    api.logging().raiseDebugEvent("恢复接口失败: " + epData.host + " " + epData.endpoint + " - " + e.getMessage());
+                                    api.logging().raiseErrorEvent("恢复接口失败: " + epData.host + " " + epData.endpoint + " - " + e.getMessage());
+                                    e.printStackTrace();
                                 }
                             }
                         }
@@ -169,17 +179,23 @@ public class ParameterDataStorage {
                     }
                 } else if (mainDomainData.endpoints != null) {
                     // 向后兼容：旧格式（扁平结构）
+                    String mainDomain = mainDomainData.mainDomain;
                     for (EndpointData epData : mainDomainData.endpoints) {
-                        try {
-                            HttpRequest request = buildRequestFromEndpointData(epData, api);
-                            if (request != null) {
-                                // ✅ 直接调用 collectFromRequest，它现在会即使没有参数也添加接口
-                                collector.collectFromRequest(request);
-                                restoredEndpoints++;
-                            }
-                        } catch (Exception e) {
-                            api.logging().raiseDebugEvent("恢复接口失败: " + epData.host + " " + epData.endpoint + " - " + e.getMessage());
-                        }
+                                try {
+                                    HttpRequest request = buildRequestFromEndpointData(epData, api);
+                                    if (request != null) {
+                                        // ✅ 修复：使用 addEndpointDirectly 方法直接添加接口，跳过去重检查
+                                        String host = epData.host;
+                                        String endpoint = epData.endpoint;
+                                        String method = epData.method != null ? epData.method : "GET";
+                                        String contentType = epData.contentType != null ? epData.contentType : "application/x-www-form-urlencoded";
+                                        
+                                        collector.addEndpointDirectly(host, endpoint, method, contentType, request, mainDomain);
+                                        restoredEndpoints++;
+                                    }
+                                } catch (Exception e) {
+                                    api.logging().raiseDebugEvent("恢复接口失败: " + epData.host + " " + epData.endpoint + " - " + e.getMessage());
+                                }
                     }
                 }
                 
@@ -330,8 +346,11 @@ public class ParameterDataStorage {
     /**
      * ✅ 从 ParameterCollector 构建数据模型（优化版：按主域名->子域名结构）
      * 每个子域名保存有哪些接口和参数
+     * 
+     * @param collector 参数收集器
+     * @return 数据模型
      */
-    private ParameterDataModel buildDataModel(ParameterCollector collector) {
+    public ParameterDataModel buildDataModel(ParameterCollector collector) {
         ParameterDataModel model = new ParameterDataModel();
         model.mainDomains = new HashMap<>();
         
@@ -353,6 +372,10 @@ public class ParameterDataStorage {
             // ✅ 修复：使用 Map 去重，确保同一个 endpoint（相同 method+host+contentType+path）只保存一次
             Map<String, EndpointData> endpointMap = new HashMap<>();
             
+            // ✅ 修复：按子域名统计不同的 endpoint 路径（与表格统计逻辑一致）
+            // 使用 Set 记录每个 host 已经添加的 endpoint 路径，避免重复统计
+            Map<String, Set<String>> hostEndpointPaths = new HashMap<>();
+            
             for (ParameterCollector.EndpointKey epKey : endpointKeys) {
                 HttpRequest template = collector.getEndpointTemplate(mainDomain, epKey);
                 if (template != null) {
@@ -366,6 +389,14 @@ public class ParameterDataStorage {
                     if (endpointMap.containsKey(endpointKey)) {
                         continue;
                     }
+                    
+                    // ✅ 修复：检查该 host 是否已经添加过这个 endpoint 路径
+                    // 如果已经添加过，跳过（与表格统计逻辑一致：只统计不同的 endpoint 路径）
+                    Set<String> endpointPaths = hostEndpointPaths.computeIfAbsent(host, k -> new HashSet<>());
+                    if (endpointPaths.contains(epKey.endpoint)) {
+                        continue;  // 该 host 已经添加过这个 endpoint 路径，跳过
+                    }
+                    endpointPaths.add(epKey.endpoint);  // 记录已添加的 endpoint 路径
                     
                     // 获取或创建该子域名的数据
                     HostData hostData = hostDataMap.computeIfAbsent(host, k -> {
@@ -542,6 +573,7 @@ public class ParameterDataStorage {
             }
             
             // 4. ✅ 修复：从 requestTemplate 中解析所有参数（URL 和 Body），而不仅仅是从 query string 中提取
+            // ✅ 关键修复：优先使用 epData.endpoint 作为 path，确保与保存时的 endpoint 一致
             // 首先尝试从 requestTemplate 解析完整的请求
             HttpRequest restoredRequest = null;
             if (epData.requestTemplate != null && !epData.requestTemplate.isEmpty()) {
@@ -554,17 +586,19 @@ public class ParameterDataStorage {
                         String[] requestParts = requestLine.split("\\s+");
                         if (requestParts.length >= 2) {
                             String templateMethod = requestParts[0];
-                            String templatePath = requestParts[1];
+                            // ✅ 修复：优先使用 epData.endpoint（去掉 query），确保与保存时的 endpoint 一致
+                            // 这样恢复的请求的 request.path() 会返回正确的 endpoint
+                            String templatePath = cleanPath;  // 使用之前确定的 cleanPath（来自 epData.endpoint）
                             
-                            // 从 templatePath 提取 query 参数
+                            // 从原始 requestTemplate 的请求行中提取 query 参数（用于恢复参数）
                             String templateQuery = null;
-                            int queryIdx = templatePath.indexOf('?');
+                            String originalTemplatePath = requestParts[1];
+                            int queryIdx = originalTemplatePath.indexOf('?');
                             if (queryIdx > 0) {
-                                templateQuery = templatePath.substring(queryIdx + 1);
-                                templatePath = templatePath.substring(0, queryIdx);
+                                templateQuery = originalTemplatePath.substring(queryIdx + 1);
                             }
                             
-                            // 构建基础请求
+                            // 构建基础请求（使用 cleanPath，确保与保存的 endpoint 一致）
                             StringBuilder requestBuilder = new StringBuilder();
                             requestBuilder.append(templateMethod).append(" ").append(templatePath).append(" HTTP/1.1\r\n");
                             
@@ -681,6 +715,25 @@ public class ParameterDataStorage {
                         restoredRequest = restoredRequest.withAddedParameters(
                             burp.api.montoya.http.message.params.HttpParameter.urlParameter(e.getKey(), e.getValue())
                         );
+                    }
+                }
+            }
+            
+            // ✅ 修复：验证恢复的请求的 path 是否与保存的 endpoint 一致
+            if (restoredRequest != null) {
+                String restoredPath = restoredRequest.path();
+                if (restoredPath != null) {
+                    // 去掉 query 参数
+                    int queryIdx = restoredPath.indexOf('?');
+                    if (queryIdx > 0) {
+                        restoredPath = restoredPath.substring(0, queryIdx);
+                    }
+                    // 确保 path 与保存的 endpoint 一致
+                    if (!restoredPath.equals(epData.endpoint) && !restoredPath.equals("/" + epData.endpoint) && !epData.endpoint.equals("/" + restoredPath)) {
+                        api.logging().raiseDebugEvent(String.format(
+                            "⚠️ 恢复的请求 path 与保存的 endpoint 不一致，可能影响接口恢复: path=%s, endpoint=%s, host=%s",
+                            restoredPath, epData.endpoint, epData.host
+                        ));
                     }
                 }
             }

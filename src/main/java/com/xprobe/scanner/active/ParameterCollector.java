@@ -127,6 +127,17 @@ public class ParameterCollector {
             // 获取或创建域数据
             DomainData domainData = domainDataMap.computeIfAbsent(mainDomain, DomainData::new);
             
+            // ✅ 修复：规范化endpoint，将路径参数化的接口识别为同一个接口
+            // 例如：/api/business/folder/tree/1001090991 和 /api/business/folder/tree/587091401 识别为同一个接口
+            // 注意：需要在获取domainData之后调用，因为normalizeEndpoint需要访问domainDataMap
+            String normalizedEndpoint = normalizeEndpoint(endpoint, mainDomain);
+            
+            // ✅ 如果规范化后的endpoint与原始不同，说明找到了相似的接口
+            // 此时需要更新endpoint，以便后续使用规范化后的endpoint
+            if (!normalizedEndpoint.equals(endpoint)) {
+                endpoint = normalizedEndpoint;
+            }
+            
             // ✅ 先添加接口信息（即使没有参数也要添加接口）
             domainData.addEndpoint(host, endpoint, method, contentType, request);
             
@@ -231,11 +242,6 @@ public class ParameterCollector {
                 return false;
             }
             
-            // 获取或创建域数据
-            DomainData domainData = domainDataMap.computeIfAbsent(mainDomain, DomainData::new);
-            
-            // 检查是否有新参数
-            boolean hasNewParameters = false;
             // ✅ 修复：直接使用 request.path() 而不是从 URL 解析，避免 URL 格式问题导致路径错误
             String endpoint = request.path();
             if (endpoint == null || endpoint.isEmpty()) {
@@ -254,6 +260,18 @@ public class ParameterCollector {
                 endpoint = "/";
             }
             
+            // 获取或创建域数据（需要在normalizeEndpoint之前获取）
+            DomainData domainData = domainDataMap.computeIfAbsent(mainDomain, DomainData::new);
+            
+            // ✅ 修复：规范化endpoint，将路径参数化的接口识别为同一个接口
+            // 例如：/api/business/folder/tree/1001090991 和 /api/business/folder/tree/587091401 识别为同一个接口
+            String normalizedEndpoint = normalizeEndpoint(endpoint, mainDomain);
+            if (!normalizedEndpoint.equals(endpoint)) {
+                endpoint = normalizedEndpoint;
+            }
+            
+            // 检查是否有新参数
+            boolean hasNewParameters = false;
             for (String param : parameters) {
                 if (!domainData.hasParameter(param)) {
                     hasNewParameters = true;
@@ -294,6 +312,40 @@ public class ParameterCollector {
         String mainDomain = extractMainDomain(host);
         DomainData domainData = domainDataMap.get(mainDomain);
         return domainData != null ? domainData.getHostParameters(host) : new HashSet<>();
+    }
+    
+    /**
+     * ✅ 直接添加接口（用于数据恢复，跳过去重检查）
+     * 
+     * @param host 子域名
+     * @param endpoint 接口路径
+     * @param method HTTP方法
+     * @param contentType Content-Type
+     * @param request HTTP请求
+     * @param mainDomain 主域名
+     */
+    public void addEndpointDirectly(String host, String endpoint, String method, 
+                                   String contentType, HttpRequest request, String mainDomain) {
+        DomainData domainData = domainDataMap.computeIfAbsent(mainDomain, DomainData::new);
+        Set<ParameterCollector.EndpointKey> beforeKeys = domainData.getAllEndpointKeys();
+        int beforeCount = beforeKeys != null ? beforeKeys.size() : 0;
+        
+        domainData.addEndpoint(host, endpoint, method, contentType, request);
+        
+        Set<ParameterCollector.EndpointKey> afterKeys = domainData.getAllEndpointKeys();
+        int afterCount = afterKeys != null ? afterKeys.size() : 0;
+        
+        if (afterCount > beforeCount) {
+            api.logging().raiseDebugEvent(String.format(
+                "✅ 恢复接口成功: %s %s %s %s (主域 %s, 接口数: %d -> %d)",
+                method, host, contentType, endpoint, mainDomain, beforeCount, afterCount
+            ));
+        } else {
+            api.logging().raiseDebugEvent(String.format(
+                "恢复接口（已存在）: %s %s %s %s (主域 %s, 接口数: %d)",
+                method, host, contentType, endpoint, mainDomain, beforeCount
+            ));
+        }
     }
     
     /**
@@ -767,6 +819,158 @@ public class ParameterCollector {
     }
     
     /**
+     * ✅ 规范化endpoint，将路径参数化的接口识别为同一个接口
+     * 
+     * 规则：
+     * 1. 将路径按 `/` 拆分成单词
+     * 2. 如果只有一处不同，且位置相同，则判断为同一个接口
+     * 3. 将不同的部分替换为占位符 `{id}` 或 `{param}`
+     * 
+     * 示例：
+     * - /api/business/folder/tree/1001090991 → /api/business/folder/tree/{id}
+     * - /api/business/folder/tree/587091401 → /api/business/folder/tree/{id}
+     * 
+     * @param endpoint 原始endpoint
+     * @param mainDomain 主域名（用于查找同一主域名下的其他endpoint进行比较）
+     * @return 规范化后的endpoint
+     */
+    private String normalizeEndpoint(String endpoint, String mainDomain) {
+        if (endpoint == null || endpoint.isEmpty() || "/".equals(endpoint)) {
+            return endpoint;
+        }
+        
+        // ✅ 先尝试从已收集的endpoint中找到相似的
+        String[] currentParts = endpoint.split("/");
+        if (currentParts.length < 2) {
+            return endpoint;  // 路径太短，不需要规范化
+        }
+        
+        // ✅ 优先查找同一主域名下的endpoint（更准确）
+        DomainData domainData = domainDataMap.get(mainDomain);
+        if (domainData != null) {
+            Set<String> existingEndpoints = domainData.getAllEndpoints();
+            
+            String normalized = findSimilarEndpoint(endpoint, currentParts, existingEndpoints);
+            if (normalized != null) {
+                return normalized;
+            }
+        }
+        
+        // ✅ 如果同一主域名下没找到，再遍历所有主域名下的endpoint（跨主域比较，但优先级较低）
+        for (Map.Entry<String, DomainData> entry : domainDataMap.entrySet()) {
+            if (entry.getKey().equals(mainDomain)) {
+                continue;  // 已经检查过了
+            }
+            
+            DomainData otherDomainData = entry.getValue();
+            
+            // 获取该主域名下的所有endpoint
+            Set<String> existingEndpoints = otherDomainData.getAllEndpoints();
+            
+            String normalized = findSimilarEndpoint(endpoint, currentParts, existingEndpoints);
+            if (normalized != null) {
+                return normalized;
+            }
+        }
+        
+        // ✅ 如果没有找到相似的，返回原始endpoint
+        return endpoint;
+    }
+    
+    /**
+     * ✅ 查找相似的endpoint（辅助方法）
+     */
+    private String findSimilarEndpoint(String endpoint, String[] currentParts, Set<String> existingEndpoints) {
+        for (String existingEndpoint : existingEndpoints) {
+            if (existingEndpoint == null || existingEndpoint.isEmpty() || "/".equals(existingEndpoint)) {
+                continue;
+            }
+            
+            // ✅ 如果existingEndpoint已经是规范化后的（包含{id}），跳过
+            if (existingEndpoint.contains("{id}") || existingEndpoint.contains("{param}")) {
+                continue;
+            }
+            
+            String[] existingParts = existingEndpoint.split("/");
+            
+            // ✅ 检查长度是否相同
+            if (existingParts.length != currentParts.length) {
+                continue;
+            }
+            
+            // ✅ 检查是否只有一处不同
+            int diffCount = 0;
+            int diffIndex = -1;
+            for (int i = 0; i < currentParts.length; i++) {
+                if (!currentParts[i].equals(existingParts[i])) {
+                    diffCount++;
+                    diffIndex = i;
+                }
+            }
+            
+            // ✅ 如果只有一处不同，且不同的部分都是数字或看起来像ID，则认为是同一个接口
+            if (diffCount == 1 && diffIndex >= 0) {
+                String currentDiff = currentParts[diffIndex];
+                String existingDiff = existingParts[diffIndex];
+                
+                // ✅ 检查不同的部分是否都是数字或UUID格式（看起来像ID）
+                boolean currentIsId = isIdLike(currentDiff);
+                boolean existingIsId = isIdLike(existingDiff);
+                
+                if (currentIsId && existingIsId) {
+                    // ✅ 找到相似的endpoint，使用占位符替换不同的部分
+                    String[] normalizedParts = currentParts.clone();
+                    normalizedParts[diffIndex] = "{id}";
+                    String normalized = String.join("/", normalizedParts);
+                    
+                    api.logging().raiseDebugEvent(String.format(
+                        "✅ 规范化endpoint: %s → %s (与 %s 相似)",
+                        endpoint, normalized, existingEndpoint
+                    ));
+                    
+                    return normalized;
+                }
+            }
+        }
+        
+        return null;
+    }
+    
+    /**
+     * ✅ 判断字符串是否像ID（数字、UUID等）
+     */
+    private boolean isIdLike(String str) {
+        if (str == null || str.isEmpty()) {
+            return false;
+        }
+        
+        // ✅ 纯数字（至少3位，避免误判）
+        if (str.matches("^\\d{3,}$")) {
+            return true;
+        }
+        
+        // ✅ UUID格式（8-4-4-4-12）
+        if (str.matches("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")) {
+            return true;
+        }
+        
+        // ✅ 32位或64位十六进制字符串（MD5/SHA256等）
+        if (str.matches("^[0-9a-fA-F]{32}$") || str.matches("^[0-9a-fA-F]{64}$")) {
+            return true;
+        }
+        
+        // ✅ 其他常见的ID格式（如：base64编码的ID，至少8个字符）
+        if (str.length() >= 8 && str.matches("^[A-Za-z0-9_-]+$")) {
+            // 如果包含数字，更可能是ID
+            if (str.matches(".*\\d.*")) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
      * 标准化 Content-Type
      */
     private String normalizeContentType(String contentType) {
@@ -1017,7 +1221,8 @@ public class ParameterCollector {
         
         /**
          * ✅ 修复：更新模板请求，合并所有参数（包括新请求中的参数）
-         * 这样确保模板请求包含所有见过的参数值
+         * ✅ 修复：动态更新请求头（Cookie、Authorization等），新值替换旧值
+         * 这样确保模板请求包含所有见过的参数值和最新的请求头
          */
         public void updateTemplateRequest(HttpRequest newRequest) {
             if (newRequest == null) return;
@@ -1061,15 +1266,62 @@ public class ParameterCollector {
                 cleanPath = "/";
             }
             
-            // 2. 构建基础请求字符串（使用新请求的 method、headers、body，但使用干净的 path）
+            // 2. ✅ 修复：合并请求头，新请求的请求头优先（动态更新Cookie、Authorization等）
+            // 先收集旧模板的所有请求头（作为基础）
+            java.util.Map<String, String> mergedHeaders = new java.util.LinkedHashMap<>();
+            for (var header : this.templateRequest.headers()) {
+                String headerName = header.name();
+                // ✅ 跳过Host和Content-Length（由API自动处理）
+                if ("Host".equalsIgnoreCase(headerName) || "Content-Length".equalsIgnoreCase(headerName)) {
+                    continue;
+                }
+                mergedHeaders.put(headerName.toLowerCase(java.util.Locale.ROOT), header.value());
+            }
+            
+            // ✅ 再添加新请求的请求头（新值会替换旧值，实现动态更新）
+            for (var header : newRequest.headers()) {
+                String headerName = header.name();
+                // ✅ 跳过Host和Content-Length（由API自动处理）
+                if ("Host".equalsIgnoreCase(headerName) || "Content-Length".equalsIgnoreCase(headerName)) {
+                    continue;
+                }
+                // ✅ 新请求的请求头优先，替换旧值（实现Cookie、Authorization等的动态更新）
+                mergedHeaders.put(headerName.toLowerCase(java.util.Locale.ROOT), header.value());
+            }
+            
+            // 3. 构建基础请求字符串（使用新请求的 method、合并后的 headers、body，但使用干净的 path）
             try {
                 StringBuilder requestBuilder = new StringBuilder();
                 requestBuilder.append(newRequest.method()).append(" ").append(cleanPath).append(" HTTP/1.1\r\n");
                 
-                // 添加所有 headers
+                // ✅ 添加合并后的 headers（保持原始大小写，但值已更新）
+                // 先添加新请求的 headers（保持顺序）
+                java.util.Set<String> addedHeaders = new java.util.HashSet<>();
                 for (var header : newRequest.headers()) {
-                    requestBuilder.append(header.name()).append(": ").append(header.value()).append("\r\n");
+                    String headerName = header.name();
+                    // ✅ 跳过Host和Content-Length（由API自动处理）
+                    if ("Host".equalsIgnoreCase(headerName) || "Content-Length".equalsIgnoreCase(headerName)) {
+                        continue;
+                    }
+                    String headerKey = headerName.toLowerCase(java.util.Locale.ROOT);
+                    String headerValue = mergedHeaders.containsKey(headerKey) ? mergedHeaders.get(headerKey) : header.value();
+                    requestBuilder.append(headerName).append(": ").append(headerValue).append("\r\n");
+                    addedHeaders.add(headerKey);
                 }
+                
+                // ✅ 添加旧模板中独有的请求头（新请求中没有的）
+                for (var header : this.templateRequest.headers()) {
+                    String headerName = header.name();
+                    if ("Host".equalsIgnoreCase(headerName) || "Content-Length".equalsIgnoreCase(headerName)) {
+                        continue;
+                    }
+                    String headerKey = headerName.toLowerCase(java.util.Locale.ROOT);
+                    // ✅ 如果新请求中没有这个请求头，添加旧模板的请求头
+                    if (!addedHeaders.contains(headerKey) && mergedHeaders.containsKey(headerKey)) {
+                        requestBuilder.append(headerName).append(": ").append(mergedHeaders.get(headerKey)).append("\r\n");
+                    }
+                }
+                
                 requestBuilder.append("\r\n");
                 
                 // 添加 body（如果有，但要去掉 body 中的参数）
@@ -1092,21 +1344,21 @@ public class ParameterCollector {
                     // 如果是表单格式，body 中的参数会被下面的 withAddedParameters 添加，所以这里不添加
                 }
                 
-                // 3. 构建干净的请求（不包含任何参数）
+                // 4. 构建干净的请求（不包含任何参数）
                 burp.api.montoya.http.message.requests.HttpRequest updatedRequest = 
                     burp.api.montoya.http.message.requests.HttpRequest.httpRequest(
                         newRequest.httpService(), 
                         requestBuilder.toString()
                     );
                 
-                // 4. 添加所有 URL 参数（包括旧模板和新请求中的所有参数值）
+                // 5. 添加所有 URL 参数（包括旧模板和新请求中的所有参数值）
                 for (java.util.AbstractMap.SimpleEntry<String, String> e : allUrlParams) {
                     updatedRequest = updatedRequest.withAddedParameters(
                         burp.api.montoya.http.message.params.HttpParameter.urlParameter(e.getKey(), e.getValue())
                     );
                 }
                 
-                // 5. 添加所有 Body 参数（包括旧模板和新请求中的所有参数值）
+                // 6. 添加所有 Body 参数（包括旧模板和新请求中的所有参数值）
                 for (java.util.AbstractMap.SimpleEntry<String, String> e : allBodyParams) {
                     updatedRequest = updatedRequest.withAddedParameters(
                         burp.api.montoya.http.message.params.HttpParameter.bodyParameter(e.getKey(), e.getValue())
