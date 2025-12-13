@@ -94,6 +94,20 @@ public class PassiveScanConfigTab {
         // ✅ 全局注入模式选择
         globalInjectionModeCombo = new JComboBox<>(Configuration.InjectionMode.values());
         globalInjectionModeCombo.setSelectedItem(Configuration.InjectionMode.BATCH);
+        // 为全局注入模式下拉框添加渲染器，确保字体统一
+        final Font comboFont = new JLabel().getFont().deriveFont(12f);  // 统一字体12px
+        globalInjectionModeCombo.setRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index,
+                                                         boolean isSelected, boolean cellHasFocus) {
+                super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                if (value instanceof Configuration.InjectionMode) {
+                    setText(((Configuration.InjectionMode) value).getDisplayName());
+                }
+                setFont(comboFont);  // 每次渲染时都设置统一字体
+                return this;
+            }
+        });
         
         // ✅ 扫描结果记录模式选择
         logModeCombo = new JComboBox<>(XProbeConfig.ScanResultLogMode.values());
@@ -106,15 +120,16 @@ public class PassiveScanConfigTab {
                 if (value instanceof XProbeConfig.ScanResultLogMode) {
                     setText(((XProbeConfig.ScanResultLogMode) value).getDisplayName());
                 }
+                setFont(comboFont);  // 每次渲染时都设置统一字体
                 return this;
             }
         });
-        globalInjectionModeCombo.setFont(globalInjectionModeCombo.getFont().deriveFont(13f));
         globalInjectionModeCombo.setToolTipText("<html>" +
             "<b>全局注入模式（可在单个规则中覆盖）</b><br>" +
             "• 批量模式：所有匹配参数同时注入，速度快<br>" +
             "• 逐个模式：每次只注入一个参数，精确定位" +
             "</html>");
+        // 字体在 setupLayout() 中统一设置
     }
     
     private void setupLayout() {
@@ -141,26 +156,29 @@ public class PassiveScanConfigTab {
         topPanel.add(separator1);
         topPanel.add(Box.createRigidArea(new Dimension(20, 0)));
         
-        // 2. 全局注入模式组
-        JPanel injectionModePanel = new JPanel();
-        injectionModePanel.setLayout(new BoxLayout(injectionModePanel, BoxLayout.Y_AXIS));
+        // 左侧填充，使后面的两个部分居中
+        topPanel.add(Box.createHorizontalGlue());
+        
+        // 统一字体大小 - 所有文字使用12px
+        Font baseFont = new JLabel().getFont().deriveFont(12f);
+        Font labelFont = baseFont.deriveFont(Font.BOLD);  // 标签使用粗体
+        Font normalFont = baseFont;  // 下拉框和提示文字使用普通字体
+        
+        // 2. 全局注入模式组 - 改为水平布局，居中
+        JPanel injectionModePanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 5, 0));
         injectionModePanel.setOpaque(false);
         
-        JLabel modeLabel = new JLabel("全局注入模式");
-        modeLabel.setFont(modeLabel.getFont().deriveFont(Font.BOLD, 12f));
+        JLabel modeLabel = new JLabel("全局注入模式：");
+        modeLabel.setFont(labelFont);  // 统一使用labelFont
         modeLabel.setForeground(new Color(50, 50, 50));
         
-        JPanel modeValuePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        modeValuePanel.setOpaque(false);
-        modeValuePanel.add(globalInjectionModeCombo);
+        globalInjectionModeCombo.setFont(normalFont);  // 统一使用normalFont
+        injectionModePanel.add(modeLabel);
+        injectionModePanel.add(globalInjectionModeCombo);
         JLabel modeHint = new JLabel("各规则可单独设置");
         modeHint.setForeground(new Color(120, 120, 120));
-        modeHint.setFont(modeHint.getFont().deriveFont(Font.PLAIN, 10f));
-        modeValuePanel.add(modeHint);
-        
-        injectionModePanel.add(modeLabel);
-        injectionModePanel.add(Box.createRigidArea(new Dimension(0, 3)));
-        injectionModePanel.add(modeValuePanel);
+        modeHint.setFont(normalFont);  // 统一使用normalFont
+        injectionModePanel.add(modeHint);
         
         topPanel.add(injectionModePanel);
         topPanel.add(Box.createRigidArea(new Dimension(25, 0)));
@@ -172,38 +190,32 @@ public class PassiveScanConfigTab {
         topPanel.add(separator2);
         topPanel.add(Box.createRigidArea(new Dimension(20, 0)));
         
-        // 3. 结果记录模式组
-        JPanel logModePanel = new JPanel();
-        logModePanel.setLayout(new BoxLayout(logModePanel, BoxLayout.Y_AXIS));
+        // 3. 结果记录模式组 - 改为水平布局，居中
+        JPanel logModePanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 5, 0));
         logModePanel.setOpaque(false);
         
-        JLabel logModeLabel = new JLabel("扫描结果记录");
-        logModeLabel.setFont(logModeLabel.getFont().deriveFont(Font.BOLD, 12f));
+        JLabel logModeLabel = new JLabel("扫描结果记录：");
+        logModeLabel.setFont(labelFont);  // 统一使用labelFont
         logModeLabel.setForeground(new Color(50, 50, 50));
         
-        JPanel logValuePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        logValuePanel.setOpaque(false);
-        
-        logModeCombo.setFont(logModeCombo.getFont().deriveFont(12f));
+        logModeCombo.setFont(normalFont);  // 统一使用normalFont
         logModeCombo.setToolTipText("<html>" +
             "<b>扫描结果记录模式</b><br>" +
             "• <b>记录所有流量</b>：记录所有被动扫描发送的请求（便于调试，内存占用高）<br>" +
             "• <b>仅记录命中</b>：只记录命中规则的请求（推荐，节省内存和性能）" +
             "</html>");
-        logValuePanel.add(logModeCombo);
         
         JLabel logHint = new JLabel("仅命中可节省资源");
         logHint.setForeground(new Color(180, 100, 0));
-        logHint.setFont(logHint.getFont().deriveFont(Font.PLAIN, 10f));
-        logValuePanel.add(logHint);
+        logHint.setFont(normalFont);  // 统一使用normalFont
         
         logModePanel.add(logModeLabel);
-        logModePanel.add(Box.createRigidArea(new Dimension(0, 3)));
-        logModePanel.add(logValuePanel);
+        logModePanel.add(logModeCombo);
+        logModePanel.add(logHint);
         
         topPanel.add(logModePanel);
         
-        // 右侧填充
+        // 右侧填充，使前面的两个部分居中
         topPanel.add(Box.createHorizontalGlue());
         
         panel.add(topPanel, BorderLayout.NORTH);

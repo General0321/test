@@ -136,6 +136,9 @@ public class XProbe implements BurpExtension {
         // ✅ 建立RealtimeScanner和TaskScheduler的双向引用（用于Arjun→漏洞扫描）
         realtimeScanner.setTaskScheduler(taskScheduler);
         
+        // ✅ 设置响应缓存引用（用于缓存主动探测的原始响应，供被动扫描规则使用）
+        realtimeScanner.setResponseCache(responseCache);
+        
         // ✅ 创建请求处理器 (需要RealtimeScanner和响应缓存)
         RequestHandler requestHandler = new RequestHandler(api, configManager, requestFilter, taskScheduler, realtimeScanner, xprobeConfigManager, responseCache, globalFilter);
         

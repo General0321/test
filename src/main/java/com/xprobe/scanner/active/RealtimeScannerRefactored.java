@@ -52,6 +52,9 @@ public class RealtimeScannerRefactored {
     // ✅ TaskScheduler引用（用于Arjun发现参数后触发漏洞扫描）
     private TaskScheduler taskScheduler;
     
+    // ✅ OriginalResponseCache引用（用于缓存主动探测的原始响应，供被动扫描规则使用）
+    private com.xprobe.scanner.core.OriginalResponseCache responseCache;
+    
     // ✅ ActiveProbeTab引用（用于接口探测结果回调）
     private com.xprobe.scanner.ui.ActiveProbeTab activeProbeTab;
     
@@ -120,6 +123,13 @@ public class RealtimeScannerRefactored {
         api.logging().raiseDebugEvent("接口探测策略: " + (require ? "接口探测后做Arjun" : "直接Arjun"));
     }
     
+    // ✅ 新增：主动探测启用被动扫描规则标志（用于将主动探测结果传递给被动扫描规则）
+    private volatile boolean enablePassiveScanRulesForActiveProbe = false;
+    public void setEnablePassiveScanRulesForActiveProbe(boolean enable) {
+        this.enablePassiveScanRulesForActiveProbe = enable;
+        api.logging().raiseInfoEvent("主动探测被动扫描规则: " + (enable ? "已启用" : "已禁用"));
+    }
+    
     public RealtimeScannerRefactored(MontoyaApi api, ConfigurationManager configManager, 
                                     GlobalFilter globalFilter, LogModel logModel, 
                                     com.xprobe.scanner.config.XProbeConfig xprobeConfig) {
@@ -160,6 +170,13 @@ public class RealtimeScannerRefactored {
      */
     public void setTaskScheduler(TaskScheduler taskScheduler) {
         this.taskScheduler = taskScheduler;
+    }
+    
+    /**
+     * ✅ 设置OriginalResponseCache引用（用于缓存主动探测的原始响应）
+     */
+    public void setResponseCache(com.xprobe.scanner.core.OriginalResponseCache responseCache) {
+        this.responseCache = responseCache;
     }
     
     /**
@@ -3286,6 +3303,81 @@ public class RealtimeScannerRefactored {
             }
         }
         notifyInterfaceResult(mainDomain, host, endpoint, method, contentType, exists);
+        
+        // ✅ 新增：如果启用被动扫描规则，将主动探测的结果传递给被动扫描规则
+        if (enablePassiveScanRulesForActiveProbe && originalRequest != null && originalResponse != null) {
+            triggerPassiveScanForActiveProbeResult(originalRequest, originalResponse);
+        }
+    }
+    
+    /**
+     * ✅ 将主动探测的结果传递给被动扫描规则
+     * 功能：类似于 RequestHandler.handleHttpResponseReceived() 的逻辑
+     */
+    private void triggerPassiveScanForActiveProbeResult(HttpRequest request, HttpRequestResponse responseReceived) {
+        try {
+            // 检查被动扫描是否启用（通过检查是否有启用的配置）
+            if (configManager == null || configManager.getEnabledConfigurations().isEmpty()) {
+                return;
+            }
+            
+            // 检查 TaskScheduler 是否已设置
+            if (taskScheduler == null) {
+                api.logging().raiseDebugEvent("⚠️ TaskScheduler未设置，无法触发被动扫描规则");
+                return;
+            }
+            
+            // 检查请求是否应该扫描（使用 GlobalFilter）
+            if (globalFilter != null && !globalFilter.shouldProcessPassive(request.url())) {
+                return;
+            }
+            
+            // 创建请求上下文
+            RequestContext context = new RequestContext(
+                "ACTIVE_PROBE",  // 工具来源标记为主动探测
+                request.method(),
+                request.url(),
+                request.toString().hashCode()
+            );
+            
+            // 收集扫描任务
+            List<ScanTask> scanTasks = new ArrayList<>();
+            for (Configuration config : configManager.getEnabledConfigurations()) {
+                if (config.getPairs() != null && !config.getPairs().isEmpty()) {
+                    ScanTask task = new ScanTask(null, config, request, context);
+                    scanTasks.add(task);
+                }
+            }
+            
+            // 调度扫描任务
+            if (!scanTasks.isEmpty()) {
+                // ✅ 缓存原始响应（如果 responseCache 可用）
+                // 这样被动扫描器才能找到原始响应进行对比
+                if (responseCache != null && responseReceived != null && responseReceived.response() != null) {
+                    try {
+                        responseCache.put(
+                            request.method(),
+                            request.url(),
+                            responseReceived.response()  // ✅ 提取 HttpResponse 对象
+                        );
+                        api.logging().raiseDebugEvent(String.format(
+                            "✅ 已缓存主动探测的原始响应: %s %s",
+                            request.method(), request.url()
+                        ));
+                    } catch (Exception e) {
+                        api.logging().raiseDebugEvent("缓存原始响应失败: " + e.getMessage());
+                    }
+                }
+                
+                taskScheduler.scheduleScan(scanTasks);
+                api.logging().raiseDebugEvent(String.format(
+                    "✅ 主动探测结果已传递给被动扫描规则: %s %s (任务数: %d)",
+                    request.method(), request.url(), scanTasks.size()
+                ));
+            }
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("触发被动扫描规则失败: " + e.getMessage());
+        }
     }
     
     // ===== 接口探测时间戳缓存（首包发送时刻） =====

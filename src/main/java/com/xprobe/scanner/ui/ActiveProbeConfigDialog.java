@@ -24,7 +24,6 @@ public class ActiveProbeConfigDialog extends JDialog {
     private final JComboBox<String> presetCombo;
     private final JPanel subdomainTreePanel;
     private final JLabel selectionStatsLabel;
-    private final JLabel keywordStatsLabel;
     private final JButton clearSelectionButton;
     private final JRadioButton sourceCollectedRadio;
     private final JRadioButton sourceManualRadio;
@@ -40,6 +39,8 @@ public class ActiveProbeConfigDialog extends JDialog {
     private final JRadioButton strategyInterfaceOnly;
     private final JRadioButton strategyInterfaceThenArjun;
     private final JRadioButton strategyArjunOnly;
+    private final JCheckBox enablePassiveScanRules;
+    private final JTextField searchField;
 
     private final ExecutionHandler executionHandler;
     private final Map<String, List<ParameterDataStorage.HostData>> mainDomainHosts = new LinkedHashMap<>();
@@ -56,8 +57,7 @@ public class ActiveProbeConfigDialog extends JDialog {
         this.executionHandler = executionHandler;
         this.presetCombo = new JComboBox<>(new String[]{"默认配置"});
         this.subdomainTreePanel = new JPanel();
-        this.selectionStatsLabel = new JLabel("子域：0 接口：0 参数：0");
-        this.keywordStatsLabel = new JLabel("关键词：0");
+        this.selectionStatsLabel = new JLabel("主域：0 子域：0");
         this.clearSelectionButton = new JButton("清空选择");
         this.sourceCollectedRadio = new JRadioButton("使用已收集数据", true);
         this.sourceManualRadio = new JRadioButton("手动输入");
@@ -74,6 +74,8 @@ public class ActiveProbeConfigDialog extends JDialog {
         this.strategyInterfaceOnly = new JRadioButton("仅接口探测");
         this.strategyInterfaceThenArjun = new JRadioButton("接口探测成功后做 Arjun");
         this.strategyArjunOnly = new JRadioButton("直接对接口进行 Arjun（跳过接口探测）");
+        this.enablePassiveScanRules = new JCheckBox("启用被动扫描规则");
+        this.searchField = new JTextField();
 
         buildDomainData();
         initLayout();
@@ -81,7 +83,7 @@ public class ActiveProbeConfigDialog extends JDialog {
         applyModeDefaults(mode);
         loadInitialData();
 
-        setMinimumSize(new Dimension(760, 600));
+        setMinimumSize(new Dimension(760, 700)); // 增加高度从600到700，让对话框更长
         setLocationRelativeTo(owner);
     }
 
@@ -158,25 +160,55 @@ public class ActiveProbeConfigDialog extends JDialog {
 
     private JPanel buildTargetPanel() {
         JPanel panel = buildTitledPanel("STEP 1 目标选择");
-        panel.setLayout(new BorderLayout(8, 8));
+        panel.setLayout(new BorderLayout(8, 4)); // 减小上下间距从8到4
         panel.add(buildStatsPanel(), BorderLayout.NORTH);
 
         subdomainTreePanel.setLayout(new BoxLayout(subdomainTreePanel, BoxLayout.Y_AXIS));
         JScrollPane scrollPane = new JScrollPane(subdomainTreePanel);
-        scrollPane.setPreferredSize(new Dimension(400, 220));
+        scrollPane.setPreferredSize(new Dimension(400, 300)); // 增大默认高度从220到300
         panel.add(scrollPane, BorderLayout.CENTER);
+        
         return panel;
     }
 
     private JPanel buildStatsPanel() {
-        JPanel stats = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
-        selectionStatsLabel.setFont(selectionStatsLabel.getFont().deriveFont(Font.BOLD));
-        keywordStatsLabel.setForeground(new Color(80, 120, 200));
+        JPanel stats = new JPanel(new BorderLayout(4, 0)); // 减小间距从8到4
+        
+        // 左侧：统计信息
+        JPanel leftPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0)); // 减小间距从8到4
+        Font smallerFont = selectionStatsLabel.getFont().deriveFont(Font.PLAIN, 12f); // 减小字体
+        selectionStatsLabel.setFont(smallerFont.deriveFont(Font.BOLD));
         JLabel title = new JLabel("选择统计：");
-        stats.add(title);
-        stats.add(selectionStatsLabel);
-        stats.add(new JLabel(" | "));
-        stats.add(keywordStatsLabel);
+        title.setFont(smallerFont); // 使用较小的字体
+        leftPanel.add(title);
+        leftPanel.add(selectionStatsLabel);
+        stats.add(leftPanel, BorderLayout.WEST);
+        
+        // 右侧：搜索框
+        JPanel searchPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0)); // 减小间距从8到4
+        JLabel searchLabel = new JLabel("搜索：");
+        searchLabel.setFont(smallerFont); // 使用与其他文字一致的字体
+        searchField.setToolTipText("输入关键词搜索子域或接口");
+        searchField.setPreferredSize(new Dimension(150, 20)); // 减小搜索框尺寸：宽度从200到150，高度从22到20
+        searchField.setFont(smallerFont); // 使用与其他文字一致的字体
+        searchField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            @Override
+            public void insertUpdate(javax.swing.event.DocumentEvent e) {
+                filterHostTree();
+            }
+            @Override
+            public void removeUpdate(javax.swing.event.DocumentEvent e) {
+                filterHostTree();
+            }
+            @Override
+            public void changedUpdate(javax.swing.event.DocumentEvent e) {
+                filterHostTree();
+            }
+        });
+        searchPanel.add(searchLabel);
+        searchPanel.add(searchField);
+        stats.add(searchPanel, BorderLayout.EAST);
+        
         return stats;
     }
 
@@ -265,26 +297,41 @@ public class ActiveProbeConfigDialog extends JDialog {
 
     private JPanel buildStrategyPanel() {
         JPanel panel = buildTitledPanel("STEP 4 执行策略");
-        panel.setLayout(new BorderLayout());
-        JPanel list = new JPanel();
-        list.setLayout(new BoxLayout(list, BoxLayout.Y_AXIS));
-        list.setBorder(new EmptyBorder(4, 8, 4, 8));
-        list.setOpaque(false);
+        panel.setLayout(new BorderLayout(8, 8));
+        
+        // 使用BoxLayout垂直排列，确保对齐
+        JPanel contentPanel = new JPanel();
+        contentPanel.setLayout(new BoxLayout(contentPanel, BoxLayout.Y_AXIS));
+        // 与步骤二保持一致，不设置额外的左边距（TitledBorder本身已经有边距）
+        contentPanel.setBorder(new EmptyBorder(4, 0, 8, 8));
+        
+        // 水平排列的单选按钮
+        JPanel radioPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 0));
         ButtonGroup group = new ButtonGroup();
         group.add(strategyInterfaceOnly);
         group.add(strategyInterfaceThenArjun);
         group.add(strategyArjunOnly);
         strategyInterfaceOnly.setSelected(true);
-        strategyInterfaceOnly.setAlignmentX(Component.LEFT_ALIGNMENT);
-        strategyInterfaceThenArjun.setAlignmentX(Component.LEFT_ALIGNMENT);
-        strategyArjunOnly.setAlignmentX(Component.LEFT_ALIGNMENT);
-
-        list.add(strategyInterfaceOnly);
-        list.add(Box.createVerticalStrut(4));
-        list.add(strategyInterfaceThenArjun);
-        list.add(Box.createVerticalStrut(4));
-        list.add(strategyArjunOnly);
-        panel.add(list, BorderLayout.CENTER);
+        
+        radioPanel.add(strategyInterfaceOnly);
+        radioPanel.add(strategyInterfaceThenArjun);
+        radioPanel.add(strategyArjunOnly);
+        radioPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        contentPanel.add(radioPanel);
+        
+        // 添加间距
+        contentPanel.add(Box.createVerticalStrut(8));
+        
+        // 添加"启用被动扫描规则"复选框，与单选按钮圆圈/正方形对齐
+        // 关键：使用与单选按钮面板完全相同的FlowLayout配置（包括相同的组件间距）
+        // 这样复选框的图标位置就会与第一个单选按钮的图标位置完全一致
+        JPanel checkboxPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 0));
+        checkboxPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        enablePassiveScanRules.setAlignmentX(Component.LEFT_ALIGNMENT);
+        checkboxPanel.add(enablePassiveScanRules);
+        contentPanel.add(checkboxPanel);
+        
+        panel.add(contentPanel, BorderLayout.CENTER);
 
         return panel;
     }
@@ -355,21 +402,74 @@ public class ActiveProbeConfigDialog extends JDialog {
     }
 
     private void refreshHostTree() {
+        filterHostTree();
+    }
+    
+    private void filterHostTree() {
         subdomainTreePanel.removeAll();
         subdomainCheckboxes.clear();
+
+        String searchText = searchField.getText();
+        String searchLower = searchText == null ? "" : searchText.trim().toLowerCase();
 
         mainDomainHosts.entrySet().stream()
             .sorted(Map.Entry.comparingByKey(Comparator.nullsLast(String::compareToIgnoreCase)))
             .forEach(entry -> {
-                JPanel domainPanel = createDomainSection(entry.getKey(), entry.getValue());
-                if (domainPanel != null) {
-                    subdomainTreePanel.add(domainPanel);
-                    subdomainTreePanel.add(Box.createVerticalStrut(6));
+                String mainDomain = entry.getKey();
+                List<ParameterDataStorage.HostData> hosts = entry.getValue();
+                
+                // 如果搜索框有内容，进行过滤
+                if (!searchLower.isEmpty()) {
+                    // 检查主域名是否匹配
+                    boolean mainDomainMatches = mainDomain != null && mainDomain.toLowerCase().contains(searchLower);
+                    
+                    // 过滤子域列表
+                    List<ParameterDataStorage.HostData> filteredHosts = hosts.stream()
+                        .filter(hostData -> {
+                            if (hostData.host == null) {
+                                return false;
+                            }
+                            String hostLower = hostData.host.toLowerCase();
+                            // 检查子域名是否匹配
+                            boolean hostMatches = hostLower.contains(searchLower);
+                            // 检查接口是否匹配
+                            boolean endpointMatches = false;
+                            if (hostData.endpoints != null) {
+                                endpointMatches = hostData.endpoints.stream()
+                                    .anyMatch(ep -> {
+                                        if (ep == null) return false;
+                                        String epStr = ep.toString().toLowerCase();
+                                        return epStr.contains(searchLower);
+                                    });
+                            }
+                            return hostMatches || endpointMatches;
+                        })
+                        .collect(Collectors.toList());
+                    
+                    // 如果主域名匹配或过滤后的子域列表不为空，显示该主域
+                    if (mainDomainMatches || !filteredHosts.isEmpty()) {
+                        JPanel domainPanel = createDomainSection(mainDomain, filteredHosts);
+                        if (domainPanel != null) {
+                            subdomainTreePanel.add(domainPanel);
+                            subdomainTreePanel.add(Box.createVerticalStrut(6));
+                        }
+                    }
+                } else {
+                    // 没有搜索条件，显示所有
+                    JPanel domainPanel = createDomainSection(mainDomain, hosts);
+                    if (domainPanel != null) {
+                        subdomainTreePanel.add(domainPanel);
+                        subdomainTreePanel.add(Box.createVerticalStrut(6));
+                    }
                 }
             });
 
         if (subdomainTreePanel.getComponentCount() == 0) {
-            subdomainTreePanel.add(new JLabel("没有可用的子域"));
+            if (!searchLower.isEmpty()) {
+                subdomainTreePanel.add(new JLabel("未找到匹配的子域或接口"));
+            } else {
+                subdomainTreePanel.add(new JLabel("没有可用的子域"));
+            }
         }
 
         subdomainTreePanel.revalidate();
@@ -447,32 +547,23 @@ public class ActiveProbeConfigDialog extends JDialog {
 
     private void updateSelectionStats() {
         int selectedHosts = selectedHostKeys.size();
-        int endpointCount = 0;
-        int parameterCount = 0;
-        int keywordCount = 0;
+        int selectedMainDomains = 0;
 
-        for (Map.Entry<String, List<ParameterDataStorage.HostData>> entry : mainDomainHosts.entrySet()) {
-            boolean domainSelected = false;
-            for (ParameterDataStorage.HostData hostData : entry.getValue()) {
-                String key = buildHostKey(entry.getKey(), hostData.host);
-                if (!selectedHostKeys.contains(key)) {
-                    continue;
-                }
-                domainSelected = true;
-                if (hostData.endpoints != null) {
-                    endpointCount += hostData.endpoints.size();
-                }
-                if (hostData.parameters != null) {
-                    parameterCount += hostData.parameters.size();
-                }
+        // 统计已选择的主域数量
+        Set<String> selectedMainDomainSet = new HashSet<>();
+        for (String key : selectedHostKeys) {
+            if (key == null || key.isBlank()) {
+                continue;
             }
-            if (domainSelected) {
-                keywordCount += mainDomainKeywordCounts.getOrDefault(entry.getKey(), 0);
+            String[] parts = key.split("\\|\\|", 2);
+            String mainDomain = parts.length > 0 ? parts[0] : null;
+            if (mainDomain != null && !mainDomain.isBlank()) {
+                selectedMainDomainSet.add(mainDomain);
             }
         }
+        selectedMainDomains = selectedMainDomainSet.size();
 
-        selectionStatsLabel.setText(String.format("子域：%d   接口：%d   参数：%d", selectedHosts, endpointCount, parameterCount));
-        keywordStatsLabel.setText(String.format("关键词：%d", keywordCount));
+        selectionStatsLabel.setText(String.format("主域：%d   子域：%d", selectedMainDomains, selectedHosts));
     }
 
     private String buildHostKey(String mainDomain, String host) {
@@ -555,7 +646,8 @@ public class ActiveProbeConfigDialog extends JDialog {
             parameterScope,
             strategy,
             customDictionaryToggle.isSelected(),
-            manualEntries
+            manualEntries,
+            enablePassiveScanRules.isSelected()
         );
     }
 
@@ -610,6 +702,7 @@ public class ActiveProbeConfigDialog extends JDialog {
         private final ProbeMode strategy;
         private final boolean customDictionaryEnabled;
         private final List<String> manualEntries;
+        private final boolean enablePassiveScanRules;
 
         public ExecutionConfig(Map<String, Set<String>> selectedHostsByDomain,
                                InterfaceSource interfaceSource,
@@ -617,7 +710,8 @@ public class ActiveProbeConfigDialog extends JDialog {
                                ScopeOption parameterScope,
                                ProbeMode strategy,
                                boolean customDictionaryEnabled,
-                               List<String> manualEntries) {
+                               List<String> manualEntries,
+                               boolean enablePassiveScanRules) {
             this.selectedHostsByDomain = Collections.unmodifiableMap(new LinkedHashMap<>(selectedHostsByDomain));
             this.interfaceSource = interfaceSource;
             this.interfaceScope = interfaceScope;
@@ -625,6 +719,7 @@ public class ActiveProbeConfigDialog extends JDialog {
             this.strategy = strategy;
             this.customDictionaryEnabled = customDictionaryEnabled;
             this.manualEntries = Collections.unmodifiableList(new ArrayList<>(manualEntries));
+            this.enablePassiveScanRules = enablePassiveScanRules;
         }
 
         public Map<String, Set<String>> getSelectedHostsByDomain() {
@@ -653,6 +748,10 @@ public class ActiveProbeConfigDialog extends JDialog {
 
         public List<String> getManualEntries() {
             return manualEntries;
+        }
+
+        public boolean isEnablePassiveScanRules() {
+            return enablePassiveScanRules;
         }
     }
 

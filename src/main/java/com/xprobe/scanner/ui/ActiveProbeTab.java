@@ -804,6 +804,9 @@ public class ActiveProbeTab {
         statusLabel.setText("⏳ 正在根据配置执行探测...");
         statusLabel.setForeground(new Color(52, 152, 219));
         
+        // ✅ 设置主动探测启用被动扫描规则标志
+        realtimeScanner.setEnablePassiveScanRulesForActiveProbe(config.isEnablePassiveScanRules());
+        
         CompletableFuture<Void> interfacePhase = config.getStrategy() == ActiveProbeConfigDialog.ProbeMode.ARJUN_ONLY
             ? CompletableFuture.completedFuture(null)
             : runInterfacePhase(config);
@@ -836,12 +839,14 @@ public class ActiveProbeTab {
                 finalArjunService.setUserCustomDictionary(
                     originalDictionary != null ? originalDictionary : Collections.emptySet());
             }
-            SwingUtilities.invokeLater(() -> {
+                SwingUtilities.invokeLater(() -> {
                 disableActionButtons(false);
                 progressBar.setIndeterminate(false);
                 progressBar.setValue(throwable == null ? 100 : 0);
                 // ✅ 重置接口探测策略标志
                 realtimeScanner.setRequireInterfaceFirst(false);
+                // ✅ 重置主动探测启用被动扫描规则标志
+                realtimeScanner.setEnablePassiveScanRulesForActiveProbe(false);
                 if (throwable == null) {
                     String successText = switch (config.getStrategy()) {
                         case INTERFACE_ONLY -> "✅ 接口探测完成";
