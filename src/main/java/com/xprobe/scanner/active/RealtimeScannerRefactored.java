@@ -13,6 +13,7 @@ import com.xprobe.scanner.core.TaskScheduler;
 import com.xprobe.scanner.active.arjun.ArjunService;
 import com.xprobe.scanner.Logs.LogModel;
 import com.xprobe.scanner.models.RequestContext;
+import com.xprobe.scanner.active.headers.ActiveProbeHeaderManager;
 import com.xprobe.scanner.models.ScanTask;
 import com.xprobe.scanner.utils.BoundedCache;
 
@@ -36,6 +37,8 @@ public class RealtimeScannerRefactored {
     private final GlobalFilter globalFilter;
     private final ConfigurationManager configManager;  // ✅ 配置管理器
     private final ArjunService arjunService;  // ✅ 使用Java原生Arjun替代外部Python版本
+    // ✅ 主动探测请求头管理（按主机维度 + 配置中心覆盖）
+    private final ActiveProbeHeaderManager headerManager;
     
     // 使用新的参数收集器和管理器
     private final ParameterCollector parameterCollector;
@@ -144,7 +147,10 @@ public class RealtimeScannerRefactored {
         this.parameterCollector = new ParameterCollector(api);
         this.parameterManager = new ParameterManager(api);
         
-        api.logging().raiseInfoEvent("✅ 实时扫描器已初始化（Java原生Arjun + 参数收集器）");
+        // ✅ 初始化主动探测请求头管理器（按主机维度 + 配置中心覆盖）
+        this.headerManager = new ActiveProbeHeaderManager(api, xprobeConfig);
+        
+        api.logging().raiseInfoEvent("✅ 实时扫描器已初始化（Java原生Arjun + 参数收集器 + 请求头管理器）");
     }
     
     /**
@@ -200,9 +206,11 @@ public class RealtimeScannerRefactored {
             // 可选：根据请求参数触发智能扫描
             // ✅ 修复：手动解析 URL，避免 URI 类无法处理未编码的特殊字符
             String host = null;
+            String endpoint = null;
             try {
                 URI uri = new URI(url);
                 host = uri.getHost();
+                endpoint = uri.getPath();
             } catch (Exception e) {
                 // ✅ 如果 URI 解析失败（可能包含未编码的特殊字符），使用手动解析
                 int schemeEnd = url.indexOf("://");
@@ -211,8 +219,14 @@ public class RealtimeScannerRefactored {
                     String hostPort;
                     if (pathStart == -1) {
                         hostPort = url.substring(schemeEnd + 3);
+                        endpoint = "/";
                     } else {
                         hostPort = url.substring(schemeEnd + 3, pathStart);
+                        endpoint = url.substring(pathStart);
+                        int queryIndex = endpoint.indexOf('?');
+                        if (queryIndex > 0) {
+                            endpoint = endpoint.substring(0, queryIndex);
+                        }
                     }
                     int portStart = hostPort.indexOf(':');
                     host = portStart == -1 ? hostPort : hostPort.substring(0, portStart);
@@ -222,6 +236,12 @@ public class RealtimeScannerRefactored {
             if (host == null || host.isEmpty() || "null".equals(host)) {
                 return;
             }
+            
+            // ✅ 新增：更新最新请求头缓存
+            if (endpoint != null && !endpoint.isEmpty()) {
+                headerManager.updateFromRequest(host, request);
+            }
+            
             String mainDomain = extractMainDomain(host);
             // ✅ 修复：如果 mainDomain 为 null，跳过处理
             if (mainDomain == null || mainDomain.isEmpty()) {
@@ -258,6 +278,39 @@ public class RealtimeScannerRefactored {
             // 委托给参数收集器（参数收集器内部也会检查静态资源，这里是双重保险）
             boolean hasNewParameters = parameterCollector.collectFromRequest(request);
             
+            // ✅ 新增：更新最新请求头缓存（用于后续的接口探测和参数探测）
+            try {
+                String host = null;
+                String endpoint = null;
+                try {
+                    URI uri = new URI(url);
+                    host = uri.getHost();
+                    endpoint = uri.getPath();
+                } catch (Exception e) {
+                    // 手动解析
+                    int schemeEnd = url.indexOf("://");
+                    if (schemeEnd != -1) {
+                        int pathStart = url.indexOf('/', schemeEnd + 3);
+                        if (pathStart != -1) {
+                            String hostPort = url.substring(schemeEnd + 3, pathStart);
+                            int portStart = hostPort.indexOf(':');
+                            host = portStart == -1 ? hostPort : hostPort.substring(0, portStart);
+                            endpoint = url.substring(pathStart);
+                            int queryIndex = endpoint.indexOf('?');
+                            if (queryIndex > 0) {
+                                endpoint = endpoint.substring(0, queryIndex);
+                            }
+                        }
+                    }
+                }
+                
+                if (host != null && !host.isEmpty() && endpoint != null && !endpoint.isEmpty()) {
+                    headerManager.updateFromRequest(host, request);
+                }
+            } catch (Exception e) {
+                api.logging().raiseDebugEvent("更新请求头缓存失败: " + e.getMessage());
+            }
+            
             if (hasNewParameters) {
                 // 记录统计信息
                 ParameterCollector.CollectorStatistics stats = parameterCollector.getStatistics();
@@ -272,6 +325,21 @@ public class RealtimeScannerRefactored {
         }
     }
     
+    // ========== 请求头管理机制 ==========
+    
+    /**
+     * ✅ 新增：构建请求头缓存key
+     * @param host 主机名
+     * @param endpoint 端点路径
+     * @return 缓存key
+     */
+    /**
+     * ✅ 新增：更新最新请求头缓存
+     * 在被动收集时调用，记录最新的请求头状态
+     * @param host 主机名
+     * @param endpoint 端点路径
+     * @param request HTTP请求
+     */
     // ========== 智能触发机制 ==========
     
     /**
@@ -713,6 +781,9 @@ public class RealtimeScannerRefactored {
                     
                     // ✅ 复制关键会话头（Cookie/Authorization等）
                     modifiedRequest = copyCriticalSessionHeaders(originalTemplate, modifiedRequest);
+                    
+                    // ✅ 新增：应用最新请求头（确保使用最新的会话信息，覆盖旧的请求头）
+                    modifiedRequest = headerManager.applyTo(modifiedRequest, targetHost);
                     
                     final HttpRequest finalRequest = modifiedRequest;
                     final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
@@ -1715,6 +1786,10 @@ public class RealtimeScannerRefactored {
                         
                         // ✅ 复制关键会话头（Cookie/Authorization等）
                         HttpRequest requestToScan = copyCriticalSessionHeaders(templateRequest, baseRequest);
+                        
+                        // ✅ 新增：应用最新请求头（确保使用最新的会话信息，覆盖旧的请求头）
+                        requestToScan = headerManager.applyTo(requestToScan, epKey.host);
+                        
                         final HttpRequest finalRequest = requestToScan;
                         final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
                         final String finalMethod = method;
@@ -1959,6 +2034,8 @@ public class RealtimeScannerRefactored {
                     
                     // ✅ 修复：复制关键会话头（确保Arjun扫描时也保留请求头）
                     HttpRequest requestWithHeaders = copyCriticalSessionHeaders(finalTemplateForLambda, request);
+                    // 应用最新主机级请求头 + 配置中心自定义请求头（最高优先级）
+                    requestWithHeaders = headerManager.applyTo(requestWithHeaders, finalHost);
                     
                     final HttpRequest finalRequest = requestWithHeaders;
                     final Set<String> finalIncrementalParams = new HashSet<>(incrementalParams);
@@ -2000,6 +2077,10 @@ public class RealtimeScannerRefactored {
                                         api.logging().raiseErrorEvent("接口探测失败：无法构建请求 - " + cleanUrl);
                                         return false;
                                     }
+                                    
+                                    // ✅ 新增：应用最新请求头（确保使用最新的会话信息）
+                                    validationRequest = headerManager.applyTo(validationRequest, finalHost);
+                                    
                                     api.logging().raiseDebugEvent(String.format(
                                         "🔍 接口探测（Arjun前）：发送请求 - %s %s (%s) %s",
                                         finalMethod, finalHost, finalContentType != null ? finalContentType : "N/A", endpoint
@@ -2234,6 +2315,10 @@ public class RealtimeScannerRefactored {
                                     }
                                     return;
                                 }
+                                
+                                // ✅ 新增：应用最新请求头（确保使用最新的会话信息）
+                                validationRequest = headerManager.applyTo(validationRequest, finalHost);
+                                
                                 api.logging().raiseDebugEvent(String.format(
                                     "🔍 接口探测：发送请求 - %s %s (%s) %s",
                                     finalMethod, finalHost, finalContentType != null ? finalContentType : "N/A", endpoint
