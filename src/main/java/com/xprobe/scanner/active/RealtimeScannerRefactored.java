@@ -39,6 +39,7 @@ public class RealtimeScannerRefactored {
     private final ArjunService arjunService;  // ✅ 使用Java原生Arjun替代外部Python版本
     // ✅ 主动探测请求头管理（按主机维度 + 配置中心覆盖）
     private final ActiveProbeHeaderManager headerManager;
+    private final com.xprobe.scanner.config.XProbeConfig xprobeConfig;
     
     // 使用新的参数收集器和管理器
     private final ParameterCollector parameterCollector;
@@ -149,6 +150,7 @@ public class RealtimeScannerRefactored {
         
         // ✅ 初始化主动探测请求头管理器（按主机维度 + 配置中心覆盖）
         this.headerManager = new ActiveProbeHeaderManager(api, xprobeConfig);
+        this.xprobeConfig = xprobeConfig;
         
         api.logging().raiseInfoEvent("✅ 实时扫描器已初始化（Java原生Arjun + 参数收集器 + 请求头管理器）");
     }
@@ -340,6 +342,28 @@ public class RealtimeScannerRefactored {
      * @param endpoint 端点路径
      * @param request HTTP请求
      */
+        // ===== 值规范化与占位控制 =====
+    private String getPlaceholder() {
+        if (xprobeConfig != null) {
+            return xprobeConfig.getParamValuePlaceholder();
+        }
+        // 使用配置默认值，避免硬编码
+        return com.xprobe.scanner.config.XProbeConfig.DEFAULT_PARAM_VALUE_PLACEHOLDER;
+    }
+
+    private int getMaxParamValueLength() {
+        if (xprobeConfig != null) {
+            return xprobeConfig.getParamValueMaxLength();
+        }
+        // 使用配置默认值，避免硬编码
+        return com.xprobe.scanner.config.XProbeConfig.DEFAULT_PARAM_VALUE_MAX_LENGTH;
+    }
+
+    private String normalizeValue(String v) {
+        if (v == null) return getPlaceholder();
+        return v.length() > getMaxParamValueLength() ? getPlaceholder() : v;
+    }
+
     // ========== 智能触发机制 ==========
     
     /**
@@ -3836,7 +3860,8 @@ public class RealtimeScannerRefactored {
                 // GET: 添加URL参数，✅ 使用原参数值
                 for (String paramName : foundParams) {
                     String value = originalUrlParams.containsKey(paramName) ? originalUrlParams.get(paramName) : 
-                                  (originalBodyParams.containsKey(paramName) ? originalBodyParams.get(paramName) : "xprobe_test");
+                                  (originalBodyParams.containsKey(paramName) ? originalBodyParams.get(paramName) : getPlaceholder());
+                    value = normalizeValue(value);
                     requestWithParams = requestWithParams.withAddedParameters(
                         HttpParameter.urlParameter(paramName, value)
                     );
@@ -3848,7 +3873,8 @@ public class RealtimeScannerRefactored {
                 // POST表单: 添加body参数，✅ 使用原参数值
                 for (String paramName : foundParams) {
                     String value = originalUrlParams.containsKey(paramName) ? originalUrlParams.get(paramName) : 
-                                  (originalBodyParams.containsKey(paramName) ? originalBodyParams.get(paramName) : "xprobe_test");
+                                  (originalBodyParams.containsKey(paramName) ? originalBodyParams.get(paramName) : getPlaceholder());
+                    value = normalizeValue(value);
                     requestWithParams = requestWithParams.withAddedParameters(
                         HttpParameter.bodyParameter(paramName, value)
                     );
@@ -3929,7 +3955,7 @@ public class RealtimeScannerRefactored {
             
             // ✅ 添加发现的参数，使用原参数值
             for (String paramName : paramNames) {
-                String value = "xprobe_test";
+                String value = getPlaceholder();
                 if (originalUrlParams != null && originalUrlParams.containsKey(paramName)) {
                     value = originalUrlParams.get(paramName);
                 } else if (originalBodyParams != null && originalBodyParams.containsKey(paramName)) {
@@ -3941,6 +3967,7 @@ public class RealtimeScannerRefactored {
                         value = existingValue.toString();
                     }
                 }
+                value = normalizeValue(value);
                 jsonMap.put(paramName, value);
             }
             
@@ -4302,7 +4329,8 @@ public class RealtimeScannerRefactored {
                     // GET请求：所有参数（原始URL+原始Body+新参数）都添加到URL
                     for (String name : allParamNames) {
                         String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
-                                      (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
+                                      (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : getPlaceholder());
+                        value = normalizeValue(value);
                         req = req.withAddedParameters(
                             burp.api.montoya.http.message.params.HttpParameter.urlParameter(name, value)
                         );
@@ -4315,7 +4343,8 @@ public class RealtimeScannerRefactored {
                     for (String name : allParamNames) {
                         if (!first) sb.append(",");
                         String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
-                                      (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
+                                      (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : getPlaceholder());
+                        value = normalizeValue(value);
                         sb.append("\"").append(name).append("\":\"").append(escapeJson(value)).append("\"");
                         first = false;
                     }
@@ -4329,7 +4358,8 @@ public class RealtimeScannerRefactored {
                     // POST 表单：所有参数（原始URL+原始Body+新参数）都添加到Body
                     for (String name : allParamNames) {
                         String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
-                                      (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
+                                      (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : getPlaceholder());
+                        value = normalizeValue(value);
                         req = req.withAddedParameters(
                             burp.api.montoya.http.message.params.HttpParameter.bodyParameter(name, value)
                         );
@@ -4421,7 +4451,7 @@ public class RealtimeScannerRefactored {
                 // GET请求：参数添加到URL，✅ 使用原参数值
                 for (String name : paramNames) {
                     String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
-                                  (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
+                                  (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : getPlaceholder());
                     req = req.withAddedParameters(
                         burp.api.montoya.http.message.params.HttpParameter.urlParameter(name, value)
                     );
@@ -4434,7 +4464,7 @@ public class RealtimeScannerRefactored {
                 for (String name : paramNames) {
                     if (!first) sb.append(",");
                     String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
-                                  (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
+                                  (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : getPlaceholder());
                     sb.append("\"").append(name).append("\":\"").append(escapeJson(value)).append("\"");
                     first = false;
                 }
@@ -4448,7 +4478,7 @@ public class RealtimeScannerRefactored {
                 // POST 表单：参数添加到Body，确保URL中没有参数，✅ 使用原参数值
                 for (String name : paramNames) {
                     String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
-                                  (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
+                                  (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : getPlaceholder());
                     req = req.withAddedParameters(
                         burp.api.montoya.http.message.params.HttpParameter.bodyParameter(name, value)
                     );
@@ -4504,7 +4534,7 @@ public class RealtimeScannerRefactored {
                 // 这样可以保持原始请求的Body结构不变，只修改URL参数
                 for (String name : incrementalParams) {
                     String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : 
-                                  (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test");
+                                  (originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : getPlaceholder());
                     request = request.withAddedParameters(
                         burp.api.montoya.http.message.params.HttpParameter.urlParameter(name, value)
                     );
@@ -4512,7 +4542,8 @@ public class RealtimeScannerRefactored {
             } else if (hasUrlParams) {
                 // 只有URL参数：增量参数添加到URL，✅ 使用原参数值
                 for (String name : incrementalParams) {
-                    String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : "xprobe_test";
+                    String value = originalUrlParams.containsKey(name) ? originalUrlParams.get(name) : getPlaceholder();
+                    value = normalizeValue(value);
                     request = request.withAddedParameters(
                         burp.api.montoya.http.message.params.HttpParameter.urlParameter(name, value)
                     );
@@ -4532,7 +4563,8 @@ public class RealtimeScannerRefactored {
                             sb.insert(sb.length() - 1, ",");
                         }
                         for (String name : incrementalParams) {
-                            String value = originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test";
+                            String value = originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : getPlaceholder();
+                            value = normalizeValue(value);
                             sb.insert(sb.length() - 1, String.format("\"%s\":\"%s\",", name, escapeJson(value)));
                         }
                         if (sb.charAt(sb.length() - 2) == ',') {
@@ -4546,7 +4578,8 @@ public class RealtimeScannerRefactored {
                         boolean first = true;
                         for (String name : incrementalParams) {
                             if (!first) sb.append(",");
-                            String value = originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test";
+                            String value = originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : getPlaceholder();
+                            value = normalizeValue(value);
                             sb.append("\"").append(name).append("\":\"").append(escapeJson(value)).append("\"");
                             first = false;
                         }
@@ -4556,7 +4589,8 @@ public class RealtimeScannerRefactored {
                 } else {
                     // 表单Body：添加到Body参数，✅ 使用原参数值
                     for (String name : incrementalParams) {
-                        String value = originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : "xprobe_test";
+                        String value = originalBodyParams.containsKey(name) ? originalBodyParams.get(name) : getPlaceholder();
+                            value = normalizeValue(value);
                         request = request.withAddedParameters(
                             burp.api.montoya.http.message.params.HttpParameter.bodyParameter(name, value)
                         );
@@ -4568,7 +4602,7 @@ public class RealtimeScannerRefactored {
                 if ("GET".equalsIgnoreCase(method)) {
                     for (String name : incrementalParams) {
                         request = request.withAddedParameters(
-                            burp.api.montoya.http.message.params.HttpParameter.urlParameter(name, "xprobe_test")
+                            burp.api.montoya.http.message.params.HttpParameter.urlParameter(name, getPlaceholder())
                         );
                     }
                 } else {
@@ -4578,7 +4612,7 @@ public class RealtimeScannerRefactored {
                         boolean first = true;
                         for (String name : incrementalParams) {
                             if (!first) sb.append(",");
-                            sb.append("\"").append(name).append("\":\"xprobe_test\"");
+                            sb.append("\"").append(name).append("\":\"").append(escapeJson(getPlaceholder())).append("\"");
                             first = false;
                         }
                         sb.append("}");
@@ -4586,7 +4620,7 @@ public class RealtimeScannerRefactored {
                     } else {
                         for (String name : incrementalParams) {
                             request = request.withAddedParameters(
-                                burp.api.montoya.http.message.params.HttpParameter.bodyParameter(name, "xprobe_test")
+                                burp.api.montoya.http.message.params.HttpParameter.bodyParameter(name, getPlaceholder())
                             );
                         }
                     }

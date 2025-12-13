@@ -56,6 +56,14 @@ public class XProbeConfig implements Serializable {
     private boolean enablePassiveScan = true;  // 被动扫描总开关（默认启用）
     private Configuration.InjectionMode globalInjectionMode = Configuration.InjectionMode.BATCH;  // 全局注入模式（默认批量）
     private ScanResultLogMode scanResultLogMode = ScanResultLogMode.MATCHED_ONLY;  // 扫描结果记录模式（默认仅命中）
+
+    // ✅ 参数值复用控制（新增）
+    // 当历史参数值长度超过该阈值时，改用占位值；占位值可配置
+    private int paramValueMaxLength = 36;
+    public static final int DEFAULT_PARAM_VALUE_MAX_LENGTH = 36;
+    public static final String DEFAULT_PARAM_VALUE_PLACEHOLDER = "xprobe_test";
+    
+    private String paramValuePlaceholder = DEFAULT_PARAM_VALUE_PLACEHOLDER;
     
     // 扫描结果记录模式枚举
     public enum ScanResultLogMode {
@@ -388,6 +396,23 @@ public class XProbeConfig implements Serializable {
     public void setArjunCustomHeaders(Map<String, String> arjunCustomHeaders) {
         this.arjunCustomHeaders = arjunCustomHeaders != null ? arjunCustomHeaders : new HashMap<>();
     }
+
+    // ✅ 参数值复用控制（Getters/Setters）
+    public int getParamValueMaxLength() {
+        return paramValueMaxLength > 0 ? paramValueMaxLength : DEFAULT_PARAM_VALUE_MAX_LENGTH;
+    }
+
+    public void setParamValueMaxLength(int paramValueMaxLength) {
+        this.paramValueMaxLength = Math.max(1, Math.min(paramValueMaxLength, 4096));
+    }
+
+    public String getParamValuePlaceholder() {
+        return (paramValuePlaceholder != null && !paramValuePlaceholder.isEmpty()) ? paramValuePlaceholder : DEFAULT_PARAM_VALUE_PLACEHOLDER;
+    }
+
+    public void setParamValuePlaceholder(String paramValuePlaceholder) {
+        this.paramValuePlaceholder = (paramValuePlaceholder != null && !paramValuePlaceholder.isEmpty()) ? paramValuePlaceholder : "xprobe_test";
+    }
     
     // ✅ 规则文件配置的Getters和Setters
     public boolean isUseExternalRuleFile() {
@@ -485,6 +510,10 @@ public class XProbeConfig implements Serializable {
         // Arjun实时模式配置
         copy.setArjunRealtimeInterval(this.arjunRealtimeInterval);
         copy.setArjunRealtimeThreshold(this.arjunRealtimeThreshold);
+        
+        // ✅ 参数值复用控制
+        copy.setParamValueMaxLength(this.paramValueMaxLength);
+        copy.setParamValuePlaceholder(this.paramValuePlaceholder);
         
         // ✅ 规则文件配置
         copy.setUseExternalRuleFile(this.useExternalRuleFile);
