@@ -82,11 +82,8 @@ public class ParameterCollector {
             String method = request.method();
             String contentType = getContentType(request);
             
-            // 去重检查（method + url + contentType）
-            String dedupeKey = method + "|" + url + "|" + normalizeContentType(contentType);
-            if (processedRequests.containsKey(dedupeKey)) {
-                return false;
-            }
+            // 先不做去重，提取参数名用于构建更精细的去重键
+            // 提取参数（仅名称，用于签名）将在下方完成后再计算去重键
             
             URI uri = new URI(url);
             String host = uri.getHost();
@@ -138,11 +135,19 @@ public class ParameterCollector {
                 endpoint = normalizedEndpoint;
             }
             
-            // ✅ 先添加接口信息（即使没有参数也要添加接口）
+            // 先提取参数（用于构建更精细的去重键）
+            Set<String> parameters = extractParameters(request);
+            
+            // 构建去重键（包含参数名指纹，避免不同参数集被误判为重复）
+            String paramSig = buildParamSignature(parameters);
+            String dedupeKey = "REQUEST|" + method + "|" + host + "|" + normalizeContentType(contentType) + "|" + endpoint + "|" + paramSig;
+            if (processedRequests.containsKey(dedupeKey)) {
+                return false;
+            }
+            
+            // ✅ 添加接口信息（即使没有参数也要添加接口）
             domainData.addEndpoint(host, endpoint, method, contentType, request);
             
-            // 提取参数
-            Set<String> parameters = extractParameters(request);
             
             // 检查是否有新参数
             boolean hasNewParameters = false;
@@ -157,6 +162,9 @@ public class ParameterCollector {
             for (String param : parameters) {
                 domainData.addParameter(host, endpoint, param);
             }
+            
+            // 标记请求已处理（使用包含参数名指纹的去重键）
+            processedRequests.put(dedupeKey, Boolean.TRUE);
             
             // 如果启用了关键词收集模式，提取参数值作为关键词
             if (collectionMode == CollectionMode.PARAMETERS_AND_KEYWORDS) {
@@ -210,12 +218,6 @@ public class ParameterCollector {
             String method = request.method();
             String contentType = getContentType(request);
             
-            // 去重检查
-            String dedupeKey = "RESPONSE|" + method + "|" + url + "|" + normalizeContentType(contentType);
-            if (processedRequests.containsKey(dedupeKey)) {
-                return false;
-            }
-            
             URI uri = new URI(url);
             String host = uri.getHost();
             // ✅ 修复：如果 host 为 null，尝试从 request 的 httpService 获取
@@ -238,7 +240,6 @@ public class ParameterCollector {
             Set<String> parameters = extractParametersFromResponse(response);
             
             if (parameters.isEmpty()) {
-                processedRequests.put(dedupeKey, Boolean.TRUE);
                 return false;
             }
             
@@ -268,6 +269,13 @@ public class ParameterCollector {
             String normalizedEndpoint = normalizeEndpoint(endpoint, mainDomain);
             if (!normalizedEndpoint.equals(endpoint)) {
                 endpoint = normalizedEndpoint;
+            }
+            
+            // 构建响应去重键（包含参数名指纹）
+            String respParamSig = buildParamSignature(parameters);
+            String dedupeKey = "RESPONSE|" + method + "|" + host + "|" + normalizeContentType(contentType) + "|" + endpoint + "|" + respParamSig;
+            if (processedRequests.containsKey(dedupeKey)) {
+                return false;
             }
             
             // 检查是否有新参数
@@ -526,6 +534,32 @@ public class ParameterCollector {
     }
     
     // ========== 辅助方法 ==========
+    
+    /**
+     * 构建参数名集合的稳定签名（用于请求/响应去重键）
+     * 规则：按字典序排序参数名，使用'\n'连接；为空返回"NOPARAMS"；
+     * 再计算 SHA-256 的十六进制，避免过长键。
+     */
+    private String buildParamSignature(Set<String> parameters) {
+        try {
+            if (parameters == null || parameters.isEmpty()) {
+                return "NOPARAMS";
+            }
+            java.util.List<String> list = new java.util.ArrayList<>(parameters);
+            java.util.Collections.sort(list, String.CASE_INSENSITIVE_ORDER);
+            String joined = String.join("\n", list);
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(joined.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            // 降级：回退到长度和哈希码组合
+            return "FALLBACK-" + (parameters != null ? parameters.size() : 0) + "-" + (parameters != null ? parameters.hashCode() : 0);
+        }
+    }
     
     // ========== 参数和关键词提取逻辑（参考 GAP.py）==========
     

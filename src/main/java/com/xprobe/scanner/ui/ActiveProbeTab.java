@@ -443,7 +443,7 @@ public class ActiveProbeTab {
         sourceAutoRadio.setFont(sourceFont);
         
         // Arjun配置
-        chunkSizeSpinner = new JSpinner(new SpinnerNumberModel(250, 10, 1000, 10));
+        chunkSizeSpinner = new JSpinner(new SpinnerNumberModel(200, 10, 1000, 10));  // ✅ 默认值从250改为200
         timeoutSpinner = new JSpinner(new SpinnerNumberModel(15, 5, 60, 1));
         customDictCheckbox = new JCheckBox("使用自定义字典");
         customDictCheckbox.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));

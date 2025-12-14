@@ -146,7 +146,7 @@ public class UnifiedConfigTab {
         // Java原生Arjun配置组件
         arjunEnabledCheckBox = new JCheckBox("✅ 启用Arjun参数发现");
         arjunEnabledCheckBox.setSelected(true);
-        arjunChunkSizeSpinner = new JSpinner(new SpinnerNumberModel(250, 10, 1000, 10));
+        arjunChunkSizeSpinner = new JSpinner(new SpinnerNumberModel(200, 10, 1000, 10));  // ✅ 默认值从250改为200
         arjunTimeoutSpinner = new JSpinner(new SpinnerNumberModel(15, 5, 60, 5));
         arjunCustomDictArea = new JTextArea(8, 40);
         arjunCustomDictArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
@@ -478,7 +478,7 @@ public class UnifiedConfigTab {
         javaArjunContent.add(arjunChunkSizeSpinner, gbc2);
         
         gbc2.gridx = 2; gbc2.weightx = 0.7;
-        JLabel chunkUnit = new JLabel("个参数/批次 (10-1000，默认250)");
+        JLabel chunkUnit = new JLabel("个参数/批次 (10-1000，默认200)");
         chunkUnit.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
         chunkUnit.setForeground(Color.GRAY);
         javaArjunContent.add(chunkUnit, gbc2);
@@ -1224,19 +1224,28 @@ public class UnifiedConfigTab {
         }
         
         // 应用Java原生Arjun配置
-        if (arjunService != null) {
-            com.xprobe.scanner.active.arjun.config.ArjunConfig arjunConfig = arjunService.getConfig();
+        // ✅ 修复：如果 arjunService 为 null，尝试从 realtimeScanner 获取
+        com.xprobe.scanner.active.arjun.ArjunService serviceToUse = arjunService;
+        if (serviceToUse == null && realtimeScanner != null) {
+            serviceToUse = realtimeScanner.getArjunService();
+        }
+        
+        if (serviceToUse != null) {
+            com.xprobe.scanner.active.arjun.config.ArjunConfig arjunConfig = serviceToUse.getConfig();
             arjunConfig.setEnabled(config.isArjunEnabled());
             arjunConfig.setChunkSize(config.getArjunChunkSize());
             arjunConfig.setTimeout(config.getArjunTimeout());
             
-            // 应用用户自定义字典
-            arjunService.setUserCustomDictionary(config.getArjunCustomDictionary());
+            // ✅ 更新ParamDiscoveryEngine的chunkSize（配置中心修改分块大小时生效）
+            serviceToUse.updateChunkSize(config.getArjunChunkSize());
+            
+            // ✅ 修复：应用用户自定义字典（启动时自动加载）
+            serviceToUse.setUserCustomDictionary(config.getArjunCustomDictionary());
             
             api.logging().raiseInfoEvent(String.format(
                 "✅ Arjun基础配置已更新: 启用=%b, 块大小=%d, 超时=%d秒, 自定义字典=%d个",
                 config.isArjunEnabled(), config.getArjunChunkSize(), config.getArjunTimeout(),
-                config.getArjunCustomDictionary().size()
+                config.getArjunCustomDictionary() != null ? config.getArjunCustomDictionary().size() : 0
             ));
             
             // ✅ P1修复：提示高级配置变化需要重启
@@ -1245,6 +1254,9 @@ public class UnifiedConfigTab {
                     "⚠️ Arjun高级配置（稳定模式/线程数/重试次数/速率限制）已变化，需要重新加载插件才能生效"
                 );
             }
+        } else {
+            // ✅ 修复：如果 arjunService 仍为 null，记录警告日志
+            api.logging().raiseDebugEvent("⚠️ ArjunService 未初始化，无法应用 Arjun 配置（参数字典等）");
         }
         
         // ✅ 应用实时模式配置到实时扫描器
@@ -1256,6 +1268,33 @@ public class UnifiedConfigTab {
                 config.getArjunRealtimeThreshold(), config.getArjunRealtimeInterval()
             ));
         }
+        
+        // ✅ 应用被动扫描配置（enablePassiveScan, globalInjectionMode, scanResultLogMode）
+        // 这些配置通过 XProbeConfigManager 管理，已保存到配置文件中
+        // RequestHandler 和 TaskScheduler 会从 XProbeConfigManager 实时读取，所以无需额外更新
+        api.logging().raiseInfoEvent(String.format(
+            "✅ 被动扫描配置已保存: 启用=%b, 注入模式=%s, 记录模式=%s",
+            config.isEnablePassiveScan(),
+            config.getGlobalInjectionMode(),
+            config.getScanResultLogMode()
+        ));
+        
+        // ✅ 应用扫描规则配置（scanConfigurations）
+        // 扫描规则通过 ConfigurationManager 管理，在"被动扫描规则"标签页中单独管理
+        // 这里只记录日志，实际更新在 PassiveScanRulesTab 中处理
+        if (config.getScanConfigurations() != null) {
+            api.logging().raiseInfoEvent(String.format(
+                "✅ 扫描规则配置已保存: %d 个规则",
+                config.getScanConfigurations().size()
+            ));
+        }
+        
+        // ✅ 线程池配置和代理池配置
+        // 线程池在 TaskScheduler 初始化时创建，无法动态更新（需要重启插件）
+        // 代理池配置目前未实现动态更新功能
+        api.logging().raiseInfoEvent(
+            "⚠️ 线程池配置和代理池配置已保存，但需要重新加载插件才能生效"
+        );
     }
     
     private void saveAllConfigurations() {
@@ -1294,6 +1333,9 @@ public class UnifiedConfigTab {
             
             // 应用到后端组件
             applyConfigToComponents(config);
+            
+            // ✅ 同时更新 XProbeConfigManager 中的配置（确保内存中的配置也是最新的）
+            xprobeConfigManager.saveConfig(config);
             
             // ✅ 持久化到磁盘（保存到 .ser 文件，包括黑白名单）
             configStorage.save(config);
@@ -1344,7 +1386,16 @@ public class UnifiedConfigTab {
         config.setWhitelist(parseTextAreaToList(whitelistTextArea));
         config.setBlacklist(parseTextAreaToList(blacklistTextArea));
         
-        // 主动探测（启用状态由 ActiveProbeTab 的总开关控制）
+        // 主动探测
+        // ✅ 修复：从已保存的配置中读取 enableActiveScan 状态（由 ActiveProbeTab 的总开关控制）
+        // 确保不会覆盖 ActiveProbeTab 保存的状态
+        try {
+            XProbeConfig savedConfig = configStorage.load();
+            config.setEnableActiveScan(savedConfig.isEnableActiveScan());
+        } catch (Exception e) {
+            // 如果加载失败，保持当前配置中的值（从 getConfigCopy() 获取的副本应该已经包含）
+            api.logging().raiseDebugEvent("读取 enableActiveScan 状态失败，使用当前配置值: " + e.getMessage());
+        }
         config.setBruteforceInterval((Integer) bruteforceIntervalSpinner.getValue());
         config.setMinParameterCount((Integer) minParameterCountSpinner.getValue());
         config.setMaxConcurrentHosts((Integer) maxConcurrentHostsSpinner.getValue());

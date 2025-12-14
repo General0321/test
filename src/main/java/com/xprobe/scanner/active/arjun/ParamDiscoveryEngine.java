@@ -29,11 +29,20 @@ import java.util.stream.Collectors;
  */
 public class ParamDiscoveryEngine {
     
+    // ✅ 常量定义（避免硬编码）
+    private static final int MIN_MERGE_THRESHOLD = 10;  // 合并阈值的最小值（参数总数<=此值时直接合并测试）
+    private static final int MIN_RECURSIVE_PARAMS = 5;  // 递归缩小时的最小参数数（<=此值时不再递归）
+    private static final int MAX_RECURSIVE_DEPTH = 5;  // 最大递归深度
+    private static final int RECURSIVE_DIVISOR = 5;  // 递归分块时的除数（params.size() / 5）
+    private static final int MIN_SUB_CHUNK_SIZE = 2;  // 子块的最小大小
+    private static final int MAX_STABILITY_RETRIES = 10;  // 稳定性检测的最大重试次数
+    private static final int PROGRESS_LOG_INTERVAL = 10;  // 进度日志输出间隔（每10个输出一次）
+    
     private final MontoyaApi api;
     private final BurpHttpRequester requester;
     private final ResponseBaseline baseline;
     private final AnomalyDetector detector;
-    private final ChunkProcessor chunkProcessor;
+    private ChunkProcessor chunkProcessor;  // ✅ 改为非final，支持动态更新
     private final ParamVerifier verifier;
     
     // ✅ 新增：Python功能组件
@@ -42,14 +51,14 @@ public class ParamDiscoveryEngine {
     private final ConcurrentProcessor concurrentProcessor;
     
     // 配置
-    private final int chunkSize;
+    private int chunkSize;  // ✅ 改为非final，支持动态更新
     private final int threads;
     
     /**
      * 默认构造函数
      */
     public ParamDiscoveryEngine(MontoyaApi api) {
-        this(api, 250, 9999, false, 5, 5, new HashMap<>());
+        this(api, 200, 9999, false, 5, 5, new HashMap<>());  // ✅ 默认chunkSize从250改为200
     }
     
     /**
@@ -66,7 +75,7 @@ public class ParamDiscoveryEngine {
     
     /**
      * 完整构造函数（含自定义HTTP头）
-     * @param chunkSize chunk大小（默认250）
+     * @param chunkSize chunk大小（默认200）
      * @param maxRequestsPerSecond 最大请求速率（默认9999）
      * @param stableMode 稳定模式（默认false）
      * @param threads 并发线程数（默认5）
@@ -174,7 +183,9 @@ public class ParamDiscoveryEngine {
                 
             } catch (Exception e) {
                 long elapsed = System.currentTimeMillis() - startTime;
-                api.logging().raiseErrorEvent("参数发现失败: " + e.getMessage());
+                api.logging().raiseErrorEvent(String.format(
+                    "参数发现失败 (耗时 %dms): %s", elapsed, e.getMessage()
+                ));
                 e.printStackTrace();
                 return DiscoveryResult.error(e.getMessage());
             }
@@ -238,7 +249,7 @@ public class ParamDiscoveryEngine {
         // ✅ P0修复：动态移除不稳定因子（关键！）
         api.logging().raiseDebugEvent("  开始稳定性验证（动态因子调整）...");
         
-        int maxRetries = 10;  // 最多尝试10次
+        int maxRetries = MAX_STABILITY_RETRIES;  // 最多尝试次数
         int retryCount = 0;
         
         while (retryCount < maxRetries) {
@@ -324,12 +335,44 @@ public class ParamDiscoveryEngine {
     
     /**
      * 递归缩小参数范围（✅ 并发处理，对应Python的narrower()）
+     * ✅ 优化：如果参数总数较少（<=chunkSize），直接合并测试，避免不必要的分块
      */
     private Set<ParamCandidate> narrowDown(ScanContext context) {
         Set<ParamCandidate> allCandidates = new LinkedHashSet<>();
         
+        Set<String> dictionary = context.getDictionary();
+        int dictSize = dictionary.size();
+        
+        // ✅ 优化：如果参数总数较少（<=chunkSize 或 <=MIN_MERGE_THRESHOLD），直接合并到一个请求中测试，跳过分块和递归缩小
+        // 这样可以避免参数被拆分，减少请求数量
+        int mergeThreshold = Math.min(chunkSize, MIN_MERGE_THRESHOLD);  // 取较小值，更保守
+        if (dictSize <= mergeThreshold) {
+            api.logging().raiseInfoEvent(String.format(
+                "  参数总数较少 (%d <= %d)，直接合并测试（跳过分块和递归缩小）", dictSize, mergeThreshold
+            ));
+            
+            // 直接测试所有参数
+            Set<String> result = testChunkForAnomaly(context, dictionary);
+            if (result != null) {
+                // 发现异常，将所有参数作为候选
+                api.logging().raiseInfoEvent(
+                    "  ✓ 发现异常，所有参数作为候选"
+                );
+                for (String param : dictionary) {
+                    allCandidates.add(new ParamCandidate(param));
+                }
+            } else {
+                api.logging().raiseInfoEvent(
+                    "  ℹ️ 未发现异常，这些参数可能都无效"
+                );
+            }
+            
+            return allCandidates;
+        }
+        
+        // 参数数量较多，使用分块策略
         // 创建分块
-        List<Set<String>> chunks = chunkProcessor.createChunks(context.getDictionary());
+        List<Set<String>> chunks = chunkProcessor.createChunks(dictionary);
         
         api.logging().raiseInfoEvent(String.format(
             "  分块数量: %d (每块 %d 个参数), 并发线程: %d", 
@@ -341,7 +384,7 @@ public class ParamDiscoveryEngine {
             chunks,
             chunk -> testChunkForAnomaly(context, chunk),  // 处理函数
             (completed, total) -> {                        // 进度回调
-                if (completed % 10 == 0 || completed == total) {
+                if (completed % PROGRESS_LOG_INTERVAL == 0 || completed == total) {
                     api.logging().raiseInfoEvent(String.format(
                         "  进度: %d/%d", completed, total));
                 }
@@ -434,8 +477,8 @@ public class ParamDiscoveryEngine {
             return candidates;
         }
         
-        if (params.size() <= 5 || depth > 5) {
-            // 小于5个参数，或递归深度超过5层，全部作为候选
+        if (params.size() <= MIN_RECURSIVE_PARAMS || depth > MAX_RECURSIVE_DEPTH) {
+            // 小于最小参数数，或递归深度超过最大深度，全部作为候选
             for (String param : params) {
                 candidates.add(new ParamCandidate(param));
             }
@@ -443,7 +486,7 @@ public class ParamDiscoveryEngine {
         }
         
         // 继续分块
-        int subChunkSize = Math.max(2, params.size() / 5);
+        int subChunkSize = Math.max(MIN_SUB_CHUNK_SIZE, params.size() / RECURSIVE_DIVISOR);
         List<Set<String>> subChunks = chunkProcessor.createChunks(params, subChunkSize);
         
         api.logging().raiseDebugEvent(String.format(
@@ -476,39 +519,48 @@ public class ParamDiscoveryEngine {
     }
     
     /**
-     * 最终验证（单独测试每个参数）
+     * 最终验证（批量合并参数到单个请求，减少请求数量）
+     * ✅ 优化：将多个参数合并到一个请求中测试，而不是每个参数单独发请求
      */
     private Set<String> verify(ScanContext context, Set<ParamCandidate> candidates) {
         Set<String> confirmedParams = new LinkedHashSet<>();
         
-        int total = candidates.size();
-        int current = 0;
+        if (candidates.isEmpty()) {
+            return confirmedParams;
+        }
         
+        // ✅ 将所有候选参数收集到一个集合中
+        Set<String> candidateParams = new LinkedHashSet<>();
         for (ParamCandidate candidate : candidates) {
-            current++;
-            
-            // 单独测试这个参数
-            String anomalyType = verifier.verifySingle(
-                context.getOriginalRequest(),
-                candidate.getName(),
-                context.getFactors()
+            candidateParams.add(candidate.getName());
+        }
+        
+        int total = candidateParams.size();
+        api.logging().raiseInfoEvent(String.format(
+            "  开始批量验证: %d 个候选参数", total
+        ));
+        
+        // ✅ 批量验证：将所有参数合并到一个请求中测试
+        Set<String> batchConfirmed = verifier.verifyBatch(
+            context.getOriginalRequest(),
+            candidateParams,
+            context.getFactors()
+        );
+        
+        confirmedParams.addAll(batchConfirmed);
+        
+        api.logging().raiseInfoEvent(String.format(
+            "  批量验证完成: %d/%d 个参数确认有效", 
+            confirmedParams.size(), total
+        ));
+        
+        // ✅ 如果批量验证未发现参数，且候选数量较少（<=MIN_MERGE_THRESHOLD），不再回退到单独验证
+        // 因为单独验证会导致每个参数发一个请求，违背了合并优化的初衷
+        // 如果批量验证未发现异常，说明这些参数可能都无效，直接返回空结果
+        if (confirmedParams.isEmpty() && total > 0) {
+            api.logging().raiseInfoEvent(
+                String.format("  批量验证未发现参数，%d 个候选参数可能都无效", total)
             );
-            
-            if (anomalyType != null) {
-                confirmedParams.add(candidate.getName());
-                api.logging().raiseInfoEvent(String.format(
-                    "  ✅ [%d/%d] 确认参数: %s (检测到: %s)", 
-                    current, total,
-                    candidate.getName(), 
-                    anomalyType
-                ));
-            } else {
-                api.logging().raiseDebugEvent(String.format(
-                    "  ❌ [%d/%d] 排除参数: %s", 
-                    current, total,
-                    candidate.getName()
-                ));
-            }
         }
         
         return confirmedParams;
@@ -561,6 +613,26 @@ public class ParamDiscoveryEngine {
      */
     private String generateRandomValue() {
         return generateRandomString(6);
+    }
+    
+    /**
+     * ✅ 更新chunkSize（用于配置中心动态修改）
+     */
+    public void updateChunkSize(int newChunkSize) {
+        if (newChunkSize < 10 || newChunkSize > 1000) {
+            api.logging().raiseErrorEvent(
+                String.format("⚠️ chunkSize无效: %d，应在10-1000之间，忽略更新", newChunkSize)
+            );
+            return;
+        }
+        
+        this.chunkSize = newChunkSize;
+        // 更新ChunkProcessor的默认chunkSize
+        this.chunkProcessor = new ChunkProcessor(newChunkSize);
+        
+        api.logging().raiseInfoEvent(String.format(
+            "✅ ParamDiscoveryEngine chunkSize已更新: %d", newChunkSize
+        ));
     }
     
     /**

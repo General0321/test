@@ -6,7 +6,7 @@ package com.xprobe.scanner.active.arjun.config;
 public class ArjunConfig {
     
     private boolean enabled = true;
-    private int chunkSize = 250;
+    private int chunkSize = 200;  // ✅ 默认值从250改为200
     private boolean enableHeuristic = true;
     private int maxThreads = 5;
     private int timeout = 15;

@@ -24,7 +24,7 @@ public class XProbeConfig implements Serializable {
     
     // Java原生Arjun配置
     private boolean arjunEnabled = true;
-    private int arjunChunkSize = 250;
+    private int arjunChunkSize = 200;  // ✅ 默认值从250改为200
     private int arjunTimeout = 15;
     private Set<String> arjunCustomDictionary = new HashSet<>();  // 用户自定义字典
     

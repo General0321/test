@@ -2231,7 +2231,7 @@ public class UniversalScanner extends AbstractScanner {
             return null;
         }
         try {
-            return responseCache.get(request.method(), request.url());
+            return responseCache.get(request);
         } catch (Exception e) {
             api.logging().raiseDebugEvent("⚠️ 从缓存获取原始响应失败: " + e.getMessage());
             return null;

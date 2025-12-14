@@ -310,20 +310,17 @@ public class TaskScheduler {
      */
     private HttpResponse findOriginalResponse(HttpRequest originalRequest) {
         try {
-            String method = originalRequest.method();
-            String url = originalRequest.url();
-            
             // 从缓存中查找（O(1)操作）
-            HttpResponse cachedResponse = responseCache.get(method, url);
+            HttpResponse cachedResponse = responseCache.get(originalRequest);
             
             if (cachedResponse != null) {
                 api.logging().raiseDebugEvent(
-                    "✅ 从缓存找到原始响应: " + method + " " + url
+                    "✅ 从缓存找到原始响应: " + originalRequest.method() + " " + originalRequest.url()
                 );
                 return cachedResponse;
             } else {
                 api.logging().raiseDebugEvent(
-                    "⚠️ 缓存中未找到原始响应: " + method + " " + url
+                    "⚠️ 缓存中未找到原始响应: " + originalRequest.method() + " " + originalRequest.url()
                 );
             }
             

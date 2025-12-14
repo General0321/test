@@ -130,6 +130,14 @@ public class RealtimeScannerRefactored {
         api.logging().raiseInfoEvent("主动探测被动扫描规则: " + (enable ? "已启用" : "已禁用"));
     }
     
+    /**
+     * ✅ 检查主动探测是否启用了被动扫描规则
+     * 供 RequestHandler 使用，用于判断是否应该处理主动探测的请求
+     */
+    public boolean isEnablePassiveScanRulesForActiveProbe() {
+        return enablePassiveScanRulesForActiveProbe;
+    }
+    
     public RealtimeScannerRefactored(MontoyaApi api, ConfigurationManager configManager, 
                                     GlobalFilter globalFilter, LogModel logModel, 
                                     com.xprobe.scanner.config.XProbeConfig xprobeConfig) {
@@ -849,9 +857,23 @@ public class RealtimeScannerRefactored {
                         String paramTypeProgress = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
                         notifyArjunProgress(mainDomain, targetHost, epKey.endpoint, paramTypeProgress);
                     }
-                    arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                    // 合并策略：若启用了“自定义上传字典”，在调用scan前与增量参数合并；
+                        // ArjunService.scan 内部仍会再与其持有的 userCustomDictionary 合并，Set 去重无需担心重复。
+                        Set<String> dictToUse = new HashSet<>(finalIncrementalParams);
+                        if (arjunService != null) {
+                            try {
+                                Set<String> userDict = arjunService.getUserCustomDictionary();
+                                if (userDict != null && !userDict.isEmpty()) {
+                                    dictToUse.addAll(userDict);
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                        arjunService.scan(finalRequest, dictToUse).thenAccept(result -> {
                         // ✅ 修复：在收到响应时立即生成时间戳，避免延迟
                         long timestamp = System.currentTimeMillis();
+                        
+                        // ✅ 新增：如果启用被动扫描规则，将Arjun扫描的结果传递给被动扫描规则
+                        triggerPassiveScanForArjunResult(finalRequest);
                         
                         if (result.isSuccess()) {
                             String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
@@ -1029,9 +1051,23 @@ public class RealtimeScannerRefactored {
                 }
                 
                 // 异步调用 Arjun
-                arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                // 合并策略：若启用了“自定义上传字典”，在调用scan前与增量参数合并；
+                        // ArjunService.scan 内部仍会再与其持有的 userCustomDictionary 合并，Set 去重无需担心重复。
+                        Set<String> dictToUse = new HashSet<>(finalIncrementalParams);
+                        if (arjunService != null) {
+                            try {
+                                Set<String> userDict = arjunService.getUserCustomDictionary();
+                                if (userDict != null && !userDict.isEmpty()) {
+                                    dictToUse.addAll(userDict);
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                        arjunService.scan(finalRequest, dictToUse).thenAccept(result -> {
                     // ✅ 修复：在收到响应时立即生成时间戳，避免延迟
                     long timestamp = System.currentTimeMillis();
+                    
+                    // ✅ 新增：如果启用被动扫描规则，将Arjun扫描的结果传递给被动扫描规则
+                    triggerPassiveScanForArjunResult(finalRequest);
                     
                     if (result.isSuccess()) {
                         // ✅ 优化日志：区分找到参数和未找到参数的情况
@@ -1620,9 +1656,23 @@ public class RealtimeScannerRefactored {
                                 notifyArjunProgress(mainDomain, epKey.host, epKey.endpoint, paramTypeProgress);
                             }
                             // 异步调用 Arjun
-                            arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                            // 合并策略：若启用了“自定义上传字典”，在调用scan前与增量参数合并；
+                        // ArjunService.scan 内部仍会再与其持有的 userCustomDictionary 合并，Set 去重无需担心重复。
+                        Set<String> dictToUse = new HashSet<>(finalIncrementalParams);
+                        if (arjunService != null) {
+                            try {
+                                Set<String> userDict = arjunService.getUserCustomDictionary();
+                                if (userDict != null && !userDict.isEmpty()) {
+                                    dictToUse.addAll(userDict);
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                        arjunService.scan(finalRequest, dictToUse).thenAccept(result -> {
                                 // ✅ 修复：在收到响应时立即生成时间戳，避免延迟
                                 long timestamp = System.currentTimeMillis();
+                                
+                                // ✅ 新增：如果启用被动扫描规则，将Arjun扫描的结果传递给被动扫描规则
+                                triggerPassiveScanForArjunResult(finalRequest);
                                 
                                 if (result.isSuccess()) {
                                     // ✅ 优化日志：区分找到参数和未找到参数的情况
@@ -1838,9 +1888,23 @@ public class RealtimeScannerRefactored {
                         totalIncrementalParams += incrementalParams.size();
                         
                         // 异步调用 Arjun（与SiteMap模式相同的逻辑）
-                        arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                        // 合并策略：若启用了“自定义上传字典”，在调用scan前与增量参数合并；
+                        // ArjunService.scan 内部仍会再与其持有的 userCustomDictionary 合并，Set 去重无需担心重复。
+                        Set<String> dictToUse = new HashSet<>(finalIncrementalParams);
+                        if (arjunService != null) {
+                            try {
+                                Set<String> userDict = arjunService.getUserCustomDictionary();
+                                if (userDict != null && !userDict.isEmpty()) {
+                                    dictToUse.addAll(userDict);
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                        arjunService.scan(finalRequest, dictToUse).thenAccept(result -> {
                             // ✅ 修复：在收到响应时立即生成时间戳，避免延迟
                             long timestamp = System.currentTimeMillis();
+                            
+                            // ✅ 新增：如果启用被动扫描规则，将Arjun扫描的结果传递给被动扫描规则
+                            triggerPassiveScanForArjunResult(finalRequest);
                             
                             if (result.isSuccess()) {
                                 // ✅ 优化日志：区分找到参数和未找到参数的情况
@@ -2205,9 +2269,23 @@ public class RealtimeScannerRefactored {
                                 notifyArjunProgress(mainDomain, finalHost, endpoint, paramTypeProgress);
                                 
                                 // ✅ 进行Arjun参数探测（接口已验证存在）
-                                arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                                // 合并策略：若启用了“自定义上传字典”，在调用scan前与增量参数合并；
+                        // ArjunService.scan 内部仍会再与其持有的 userCustomDictionary 合并，Set 去重无需担心重复。
+                        Set<String> dictToUse = new HashSet<>(finalIncrementalParams);
+                        if (arjunService != null) {
+                            try {
+                                Set<String> userDict = arjunService.getUserCustomDictionary();
+                                if (userDict != null && !userDict.isEmpty()) {
+                                    dictToUse.addAll(userDict);
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                        arjunService.scan(finalRequest, dictToUse).thenAccept(result -> {
                                     // ✅ 修复：在收到响应时立即生成时间戳，避免延迟
                                     long timestamp = System.currentTimeMillis();
+                                    
+                                    // ✅ 新增：如果启用被动扫描规则，将Arjun扫描的结果传递给被动扫描规则
+                                    triggerPassiveScanForArjunResult(finalRequest);
                                     
                                     if (result.isSuccess()) {
                                         String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
@@ -2259,7 +2337,7 @@ public class RealtimeScannerRefactored {
                                     );
                                     return null;
                                 });
-                            });  // 闭合外层的thenAccept
+                            });
                         } else {
                             // ✅ 直接进行Arjun参数探测（不先探测接口）
                             // 秒显：先插入“参数探测中”占位
@@ -2267,9 +2345,23 @@ public class RealtimeScannerRefactored {
                                 String paramTypeProgress = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
                                 notifyArjunProgress(mainDomain, finalHost, endpoint, paramTypeProgress);
                             }
-                            arjunService.scan(finalRequest, finalIncrementalParams).thenAccept(result -> {
+                            // 合并策略：若启用了“自定义上传字典”，在调用scan前与增量参数合并；
+                        // ArjunService.scan 内部仍会再与其持有的 userCustomDictionary 合并，Set 去重无需担心重复。
+                        Set<String> dictToUse = new HashSet<>(finalIncrementalParams);
+                        if (arjunService != null) {
+                            try {
+                                Set<String> userDict = arjunService.getUserCustomDictionary();
+                                if (userDict != null && !userDict.isEmpty()) {
+                                    dictToUse.addAll(userDict);
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                        arjunService.scan(finalRequest, dictToUse).thenAccept(result -> {
                                 // ✅ 修复：在收到响应时立即生成时间戳，避免延迟
                                 long timestamp = System.currentTimeMillis();
+                                
+                                // ✅ 新增：如果启用被动扫描规则，将Arjun扫描的结果传递给被动扫描规则
+                                triggerPassiveScanForArjunResult(finalRequest);
                                 
                                 if (result.isSuccess()) {
                                     String paramType = finalContentType != null && finalContentType.contains("json") ? "JSON" : finalMethod;
@@ -2795,11 +2887,88 @@ public class RealtimeScannerRefactored {
     
     /**
      * ✅ 辅助方法：获取URL的模板请求（用于保留请求头）
+     * 优先从 SiteMap 获取最新的请求（包含最新的 Cookie 等请求头），如果找不到则从 URL 构建
      * @param url 请求URL
      * @return 模板请求，如果构建失败返回null
      */
     private HttpRequest getTemplateRequestForUrl(String url) {
         try {
+            // ✅ 修复：优先从 SiteMap 获取最新的请求（包含最新的 Cookie 等请求头）
+            try {
+                SiteMap siteMap = api.siteMap();
+                List<HttpRequestResponse> entries = siteMap.requestResponses();
+                
+                // 提取 URL 的路径部分（去掉查询参数）用于匹配
+                String urlPath = url;
+                int queryIndex = url.indexOf('?');
+                if (queryIndex > 0) {
+                    urlPath = url.substring(0, queryIndex);
+                }
+                
+                // 提取 host 用于匹配
+                String targetHost = null;
+                try {
+                    java.net.URI uri = new java.net.URI(url);
+                    targetHost = uri.getHost();
+                } catch (Exception e) {
+                    int schemeEnd = url.indexOf("://");
+                    if (schemeEnd > 0) {
+                        int pathStart = url.indexOf('/', schemeEnd + 3);
+                        if (pathStart > 0) {
+                            String hostPort = url.substring(schemeEnd + 3, pathStart);
+                            int portStart = hostPort.indexOf(':');
+                            targetHost = portStart > 0 ? hostPort.substring(0, portStart) : hostPort;
+                        }
+                    }
+                }
+                
+                // 从 SiteMap 中查找匹配的请求（优先匹配相同路径和 host）
+                HttpRequestResponse bestMatch = null;
+                for (HttpRequestResponse entry : entries) {
+                    if (entry == null || entry.request() == null) continue;
+                    
+                    HttpRequest req = entry.request();
+                    String reqUrl = req.url();
+                    String reqPath = reqUrl;
+                    int reqQueryIndex = reqUrl.indexOf('?');
+                    if (reqQueryIndex > 0) {
+                        reqPath = reqUrl.substring(0, reqQueryIndex);
+                    }
+                    
+                    // 提取请求的 host
+                    String reqHost = null;
+                    try {
+                        java.net.URI reqUri = new java.net.URI(reqUrl);
+                        reqHost = reqUri.getHost();
+                    } catch (Exception e) {
+                        // 忽略解析错误
+                    }
+                    
+                    // 优先匹配：路径相同且 host 相同
+                    if (urlPath.equals(reqPath) && targetHost != null && targetHost.equals(reqHost)) {
+                        bestMatch = entry;
+                        break;  // 找到最佳匹配，直接返回
+                    }
+                    // 次优匹配：仅路径相同
+                    if (bestMatch == null && urlPath.equals(reqPath)) {
+                        bestMatch = entry;
+                    }
+                }
+                
+                // 如果找到匹配的请求，使用它作为模板（包含最新的请求头）
+                if (bestMatch != null && bestMatch.request() != null) {
+                    api.logging().raiseDebugEvent(String.format(
+                        "✅ 从 SiteMap 获取最新请求模板: %s (包含最新请求头)",
+                        bestMatch.request().url()
+                    ));
+                    return bestMatch.request();
+                }
+            } catch (Exception e) {
+                // SiteMap 查找失败，继续使用 URL 构建
+                api.logging().raiseDebugEvent("从 SiteMap 获取请求模板失败，使用 URL 构建: " + e.getMessage());
+            }
+            
+            // ✅ 如果 SiteMap 中没有找到，则从 URL 构建基本请求
             // ✅ 修复：手动解析 URL，避免 URI 类无法处理未编码的特殊字符
             String host = null;
             String scheme = null;
@@ -3311,11 +3480,41 @@ public class RealtimeScannerRefactored {
     }
     
     /**
+     * ✅ 辅助方法：从缓存获取响应并触发被动扫描规则（用于Arjun扫描完成后）
+     * @param request Arjun扫描的请求
+     */
+    private void triggerPassiveScanForArjunResult(HttpRequest request) {
+        if (!enablePassiveScanRulesForActiveProbe || request == null) {
+            return;
+        }
+        
+        // 从缓存中获取原始响应
+        if (responseCache != null) {
+            burp.api.montoya.http.message.responses.HttpResponse cachedResponse = responseCache.get(request);
+            if (cachedResponse != null) {
+                // 创建HttpRequestResponse对象
+                burp.api.montoya.http.message.HttpRequestResponse requestResponse = 
+                    burp.api.montoya.http.message.HttpRequestResponse.httpRequestResponse(request, cachedResponse);
+                triggerPassiveScanForActiveProbeResult(request, requestResponse);
+            } else {
+                api.logging().raiseDebugEvent("⚠️ 无法从缓存获取Arjun扫描的响应，跳过被动扫描规则");
+            }
+        } else {
+            api.logging().raiseDebugEvent("⚠️ responseCache未设置，无法触发被动扫描规则");
+        }
+    }
+    
+    /**
      * ✅ 将主动探测的结果传递给被动扫描规则
      * 功能：类似于 RequestHandler.handleHttpResponseReceived() 的逻辑
      */
     private void triggerPassiveScanForActiveProbeResult(HttpRequest request, HttpRequestResponse responseReceived) {
         try {
+            // ✅ 修复：首先检查主动探测是否启用了被动扫描规则（防御性编程）
+            if (!enablePassiveScanRulesForActiveProbe) {
+                return;
+            }
+            
             // 检查被动扫描是否启用（通过检查是否有启用的配置）
             if (configManager == null || configManager.getEnabledConfigurations().isEmpty()) {
                 return;
@@ -3356,9 +3555,8 @@ public class RealtimeScannerRefactored {
                 if (responseCache != null && responseReceived != null && responseReceived.response() != null) {
                     try {
                         responseCache.put(
-                            request.method(),
-                            request.url(),
-                            responseReceived.response()  // ✅ 提取 HttpResponse 对象
+                            request,
+                            responseReceived.response()
                         );
                         api.logging().raiseDebugEvent(String.format(
                             "✅ 已缓存主动探测的原始响应: %s %s",

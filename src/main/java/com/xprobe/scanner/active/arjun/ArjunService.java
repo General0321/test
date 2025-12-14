@@ -227,6 +227,15 @@ public class ArjunService {
     }
     
     /**
+     * ✅ 更新chunkSize（用于配置中心动态修改）
+     */
+    public void updateChunkSize(int newChunkSize) {
+        if (engine != null) {
+            engine.updateChunkSize(newChunkSize);
+        }
+    }
+    
+    /**
      * 设置用户自定义字典
      */
     public void setUserCustomDictionary(Set<String> dictionary) {

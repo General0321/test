@@ -62,8 +62,7 @@ public class RequestHandler implements HttpHandler {
                 
                 // ✅ 1. 先缓存原始响应
                 responseCache.put(
-                    initiatingRequest.method(), 
-                    initiatingRequest.url(), 
+                    initiatingRequest,
                     responseReceived
                 );
                 
@@ -74,6 +73,9 @@ public class RequestHandler implements HttpHandler {
                 );
                 
                 // ✅ 3. 触发被动扫描（此时原始响应已缓存）
+                // 注意：主动探测的请求（Arjun 扫描和接口探测）使用 api.http().sendRequest() 发送，
+                // 不会经过 Proxy，所以不会被 RequestHandler 捕获。
+                // 主动探测的被动扫描规则控制已在 RealtimeScannerRefactored 中处理。
                 if (xprobeConfigManager.isPassiveScanEnabled()) {
                     if (shouldScanRequest(initiatingRequest)) {
                         // 创建请求上下文
