@@ -197,16 +197,16 @@ public class XProbe implements BurpExtension {
 
         // 2. 扫描结果 - 结果展示（传入requestFilter和realtimeScanner用于清空扫描缓存）
         this.scanResultTab = new ScanResultTab(api, logModel, realtimeScanner, responseCache);
-        tabbedPane.addTab("📋 扫描结果", this.scanResultTab.getComponent());
+        tabbedPane.addTab("🔍 扫描结果", this.scanResultTab.getComponent());
 
         // 3. 被动扫描规则 - 核心功能
         com.xprobe.scanner.ui.PassiveScanConfigTab passiveScanTab = 
             new com.xprobe.scanner.ui.PassiveScanConfigTab(api, configManager, xprobeConfigManager);
-        tabbedPane.addTab("🔍 被动扫描规则", passiveScanTab.getComponent());
+        tabbedPane.addTab("📋 被动规则", passiveScanTab.getComponent());
 
         // 4. 主动探测 - 辅助功能（参数挖掘）
         this.activeProbeTab = new ActiveProbeTab(api, configManager, realtimeScanner);
-        tabbedPane.addTab("✨ 主动探测", this.activeProbeTab.getComponent());
+        tabbedPane.addTab("🎯 主动探测", this.activeProbeTab.getComponent());
 
         // 5. 配置中心 - 全局配置（黑白名单、工具配置等）
         this.unifiedConfigTab = new UnifiedConfigTab(api, configManager, globalFilter, realtimeScanner, xprobeConfigManager);
