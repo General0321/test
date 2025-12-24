@@ -108,8 +108,13 @@ public class ArjunService {
         }
         
         // 合并用户自定义字典
+        // ✅ 修复：仅在明确启用时才合并 userCustomDictionary。
+        // 说明：ActiveProbeTab 会在未启用“自定义上传字典”时，临时将 userCustomDictionary 置空。
+        // 这里增加保护，避免未来其他调用方误把 userCustomDictionary 无条件并入扫描字典。
         Set<String> mergedDictionary = new HashSet<>(customDictionary);
-        mergedDictionary.addAll(userCustomDictionary);
+        if (userCustomDictionary != null && !userCustomDictionary.isEmpty()) {
+            mergedDictionary.addAll(userCustomDictionary);
+        }
         
         // 记录开始日志到Dashboard
         logArjunStart(url, method, mergedDictionary.size());
