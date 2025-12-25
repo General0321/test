@@ -19,6 +19,17 @@ public class Configuration implements Serializable {  // 定义 Configuration �
     private String pairExpression;                    // 配对间逻辑表达式
     private DeduplicationGranularity deduplicationGranularity;  // 去重颗粒度
 
+    // ========== 多配对共享去重（高级模式优化） ==========
+    /**
+     * 是否在同一条规则的多个Pair之间共享去重Key。
+     *
+     * 适用场景：多个Pair只是不同的响应判断/验证方式，但注入请求本质相同。
+     * 开启后：相同host下，相同注入目标+相同payload 将只发送一次请求，后续Pair复用该响应进行判断。
+     *
+     * 默认：false（兼容旧行为：不同Pair独立发包/独立去重）。
+     */
+    private boolean shareDeduplicationAcrossPairs = false;
+
 
     // 默认构造函数
     public Configuration() {
@@ -462,5 +473,15 @@ public class Configuration implements Serializable {  // 定义 Configuration �
     
     public void setPairExpression(String pairExpression) {
         this.pairExpression = pairExpression;
+    }
+
+    // ========== 多配对共享去重 Getter/Setter ==========
+
+    public boolean isShareDeduplicationAcrossPairs() {
+        return shareDeduplicationAcrossPairs;
+    }
+
+    public void setShareDeduplicationAcrossPairs(boolean shareDeduplicationAcrossPairs) {
+        this.shareDeduplicationAcrossPairs = shareDeduplicationAcrossPairs;
     }
 }

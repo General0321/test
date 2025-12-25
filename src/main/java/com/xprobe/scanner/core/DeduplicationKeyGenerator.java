@@ -44,20 +44,100 @@ public class DeduplicationKeyGenerator {
                                      String contentType, 
                                      Configuration config,
                                      String targetIdentifier) {
-        return generateKey(method, host, path, contentType, config, targetIdentifier, null);
+        return generateKey(method, host, path, contentType, config, targetIdentifier, null, null);
     }
 
     /**
-     * 生成去重Key（支持颗粒度控制和配对ID）
-     * 
-     * @param method HTTP方法
-     * @param host 主机名
-     * @param path 请求路径
-     * @param contentType Content-Type
-     * @param config 扫描配置
-     * @param targetIdentifier 目标标识符（参数名、Header名等）
-     * @param pairId 配对ID（可选，用于区分同一规则下的不同配对）
-     * @return 去重Key
+     * 生成去重Key（支持颗粒度控制/配对ID/Payload区分）
+     *
+     * @param payloadResolved 已解析后的payload（可选；用于区分相同注入目标但不同payload的请求）
+     */
+    public static String generateKey(String method,
+                                     String host,
+                                     String path,
+                                     String contentType,
+                                     Configuration config,
+                                     String targetIdentifier,
+                                     Integer pairId,
+                                     String payloadResolved) {
+        // 基础部分
+        String normalizedContentType = normalizeContentType(contentType);
+        String ruleId = config.getRuleId();
+
+        // 如果提供了pairId，将其附加到ruleId后，确保不同配对生成不同的Key
+        if (pairId != null) {
+            ruleId = ruleId + "_p" + pairId;
+        }
+
+        // payload哈希（可选）
+        String payloadHash = null;
+        if (payloadResolved != null && !payloadResolved.isEmpty()) {
+            payloadHash = computeHash(payloadResolved);
+        }
+
+        // 获取去重颗粒度
+        Configuration.DeduplicationGranularity granularity = config.getDeduplicationGranularity();
+
+        // 如果是AUTO，自动检测
+        if (granularity == Configuration.DeduplicationGranularity.AUTO) {
+            granularity = detectGranularity(config);
+        }
+
+        // 根据颗粒度生成Key
+        switch (granularity) {
+            case GLOBAL:
+                return ruleId;
+            case HOST:
+                return String.format("%s|%s", ruleId, host);
+            case PATH:
+                String normalizedPath = normalizePathForDeduplication(path);
+                return String.format("%s|%s|%s", ruleId, host, normalizedPath);
+            case REQUEST:
+                String normalizedPathForRequest = normalizePathForDeduplication(path);
+                return String.format("%s|%s|%s|%s|%s",
+                    ruleId, method, host, normalizedPathForRequest, normalizedContentType
+                );
+            case PARAMETER_NAME_GLOBAL:
+                return String.format("%s|%s",
+                    ruleId, targetIdentifier != null ? targetIdentifier : "default"
+                );
+            case PARAMETER_NAME_PER_PATH:
+                String normalizedPathForParam = normalizePathForDeduplication(path);
+                return String.format("%s|%s|%s|%s",
+                    ruleId, host, normalizedPathForParam,
+                    targetIdentifier != null ? targetIdentifier : "default"
+                );
+            case PARAMETER:
+                String normalizedPathForParameter = normalizePathForDeduplication(path);
+                // ✅ 关键：参数级别去重时加入payload哈希，避免不同payload互相去重
+                return String.format("%s|%s|%s|%s|%s|%s|%s",
+                    ruleId, method, host, normalizedPathForParameter, normalizedContentType,
+                    targetIdentifier != null ? targetIdentifier : "default",
+                    payloadHash != null ? payloadHash : "nopayload"
+                );
+            case INJECTION_POINT:
+                String normalizedPathForInjection = normalizePathForDeduplication(path);
+                String injectionPointHash = generateInjectionPointHash(config);
+                // ✅ 关键：注入点级别去重时加入payload哈希，避免不同payload互相去重
+                return String.format("%s|%s|%s|%s|%s|%s|%s",
+                    ruleId, method, host, normalizedPathForInjection, normalizedContentType, injectionPointHash,
+                    payloadHash != null ? payloadHash : "nopayload"
+                );
+            case NONE:
+                return String.format("%s|%s|%d",
+                    ruleId, System.currentTimeMillis(),
+                    (int)(Math.random() * 1000000)
+                );
+            default:
+                String normalizedPathForDefault = normalizePathForDeduplication(path);
+                return String.format("%s|%s|%s|%s|%s",
+                    ruleId, method, host, normalizedPathForDefault, normalizedContentType
+                );
+        }
+    }
+
+    /**
+     * 兼容旧签名：生成去重Key（支持颗粒度控制和配对ID）
      */
     public static String generateKey(String method, 
                                      String host, 
@@ -66,98 +146,9 @@ public class DeduplicationKeyGenerator {
                                      Configuration config,
                                      String targetIdentifier,
                                      Integer pairId) {
-        // 基础部分
-        String normalizedContentType = normalizeContentType(contentType);
-        String ruleId = config.getRuleId();
-        
-        // 如果提供了pairId，将其附加到ruleId后，确保不同配对生成不同的Key
-        if (pairId != null) {
-            ruleId = ruleId + "_p" + pairId;
-        }
-        
-        // 获取去重颗粒度
-        Configuration.DeduplicationGranularity granularity = config.getDeduplicationGranularity();
-        
-        // 如果是AUTO，自动检测
-        if (granularity == Configuration.DeduplicationGranularity.AUTO) {
-            granularity = detectGranularity(config);
-        }
-        
-        // 根据颗粒度生成Key
-        switch (granularity) {
-            case GLOBAL:
-                // 全局：整个规则只测试一次
-                return ruleId;
-                
-            case HOST:
-                // 主机级：每个主机只测试一次
-                return String.format("%s|%s", ruleId, host);
-                
-            case PATH:
-                // 路径级：每个路径只测试一次
-                // ✅ 修复：使用标准化路径，忽略路径中的参数值
-                String normalizedPath = normalizePathForDeduplication(path);
-                return String.format("%s|%s|%s", ruleId, host, normalizedPath);
-                
-            case REQUEST:
-                // 请求级：每个完整请求只测试一次
-                // ✅ 修复：使用标准化路径，忽略路径中的参数值
-                String normalizedPathForRequest = normalizePathForDeduplication(path);
-                return String.format("%s|%s|%s|%s|%s",
-                    ruleId, method, host, normalizedPathForRequest, normalizedContentType
-                );
-                
-            case PARAMETER_NAME_GLOBAL:
-                // 参数名(全局)：相同参数名只测试一次
-                return String.format("%s|%s",
-                    ruleId, targetIdentifier != null ? targetIdentifier : "default"
-                );
-                
-            case PARAMETER_NAME_PER_PATH:
-                // 参数名(路径级)：每个路径下的参数名分别测试
-                // ✅ 修复：使用标准化路径，忽略路径中的参数值
-                String normalizedPathForParam = normalizePathForDeduplication(path);
-                return String.format("%s|%s|%s|%s",
-                    ruleId, host, normalizedPathForParam, 
-                    targetIdentifier != null ? targetIdentifier : "default"
-                );
-                
-            case PARAMETER:
-                // 参数级：每个请求中的参数分别扫描
-                // ✅ 修复：使用标准化路径，忽略路径中的参数值
-                String normalizedPathForParameter = normalizePathForDeduplication(path);
-                return String.format("%s|%s|%s|%s|%s|%s",
-                    ruleId, method, host, normalizedPathForParameter, normalizedContentType,
-                    targetIdentifier != null ? targetIdentifier : "default"
-                );
-                
-            case INJECTION_POINT:
-                // 注入点级：每个注入点分别扫描
-                // ✅ 修复：使用标准化路径，忽略路径中的参数值
-                String normalizedPathForInjection = normalizePathForDeduplication(path);
-                String injectionPointHash = generateInjectionPointHash(config);
-                return String.format("%s|%s|%s|%s|%s|%s",
-                    ruleId, method, host, normalizedPathForInjection, normalizedContentType, injectionPointHash
-                );
-                
-            case NONE:
-                // 无去重：每次都测试（Fuzzing模式）
-                return String.format("%s|%s|%d",
-                    ruleId, System.currentTimeMillis(), 
-                    (int)(Math.random() * 1000000)
-                );
-                
-            default:
-                // 默认使用REQUEST级别
-                // ✅ 修复：使用标准化路径，忽略路径中的参数值
-                String normalizedPathForDefault = normalizePathForDeduplication(path);
-                return String.format("%s|%s|%s|%s|%s",
-                    ruleId, method, host, normalizedPathForDefault, normalizedContentType
-                );
-        }
+        return generateKey(method, host, path, contentType, config, targetIdentifier, pairId, null);
     }
-    
-    
+
     /**
      * 自动检测去重颗粒度
      */

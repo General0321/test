@@ -29,6 +29,9 @@ import java.util.stream.Collectors;
 import java.util.Arrays;
 import com.xprobe.scanner.core.CrossPairVariableExtractor;
 
+import java.security.MessageDigest;
+import java.nio.charset.StandardCharsets;
+
 /**
  * 通用扫描器 - 基于配对架构的灵活扫描器
  * 
@@ -323,7 +326,7 @@ public class UniversalScanner extends AbstractScanner {
                 InjectionTarget firstTarget = allTargets.get(0);
                 // 生成去重Key（用于后续标记）
                 String dedupKey = DeduplicationKeyGenerator.generateKey(
-                    method, host, path, contentType, config, firstTarget.name, pairId
+                    method, host, path, contentType, config, firstTarget.name, pairId, null
                 );
                 firstTarget.dedupKey = dedupKey;
                 validTargets.add(firstTarget);
@@ -335,7 +338,7 @@ public class UniversalScanner extends AbstractScanner {
         for (InjectionTarget target : allTargets) {
             // 生成去重Key
             String dedupKey = DeduplicationKeyGenerator.generateKey(
-                method, host, path, contentType, config, target.name, pairId
+                method, host, path, contentType, config, target.name, pairId, null
             );
             
             // 检查这个key是否已经见过
@@ -417,6 +420,10 @@ public class UniversalScanner extends AbstractScanner {
             Map<Integer, Boolean> pairResults = new HashMap<>();
             Map<Integer, PairEvaluationResult> pairEvaluations = new HashMap<>();
             List<PairEvaluationResult> allEvaluations = new ArrayList<>();  // ✅ 保存所有评估（包括未命中的）
+
+            // ✅ 新增：规则内单次扫描缓存（用于多Pair共享去重+响应复用）
+            // Key: 共享去重Key (不含pairId), Value: 该请求的评估结果
+            Map<String, PairEvaluationResult> taskScopedCache = new HashMap<>();
             
             // ✨ 新增：保存每个Pair的响应特征，供后续Pair引用
             Map<Integer, PairResponseFeatures> allPairFeatures = new HashMap<>();
@@ -435,7 +442,7 @@ public class UniversalScanner extends AbstractScanner {
                     // ✅ 所有Pair都基于同一个拦截到的请求
                     // ✅ 传递allEvaluations列表和allPairFeatures，让评估方法能够记录所有请求并引用前面的特征
                     PairEvaluationResult evaluation = evaluatePair(
-                        pair, originalRequest, payloadResolver, config, allEvaluations, allPairFeatures, accumulatedVars
+                        pair, originalRequest, payloadResolver, config, allEvaluations, allPairFeatures, accumulatedVars, taskScopedCache
                     );
                     pairResults.put(pair.getId(), evaluation.matched);
                     pairEvaluations.put(pair.getId(), evaluation);
@@ -625,8 +632,9 @@ public class UniversalScanner extends AbstractScanner {
             
             // 检查是否有未去重的目标
             for (InjectionTarget target : allTargets) {
+                Integer dedupPairId = config.isShareDeduplicationAcrossPairs() ? null : pair.getId();
                 String dedupKey = com.xprobe.scanner.core.DeduplicationKeyGenerator.generateKey(
-                    method, host, path, contentType, config, target.name, pair.getId()
+                    method, host, path, contentType, config, target.name, dedupPairId, null
                 );
                 
                 // 如果有一个目标未去重，就需要执行扫描
@@ -679,7 +687,13 @@ public class UniversalScanner extends AbstractScanner {
                                               PayloadVariableResolver payloadResolver, Configuration config,
                                               List<PairEvaluationResult> allEvaluations,
                                               Map<Integer, PairResponseFeatures> allPairFeatures,
-                                              Map<String, String> accumulatedVars) {
+                                              Map<String, String> accumulatedVars,
+                                              Map<String, PairEvaluationResult> taskScopedCache) {
+        // ✅ 防御：避免空指针
+        if (taskScopedCache == null) {
+            taskScopedCache = new HashMap<>();
+        }
+
         UnifiedHttpConfig requestConfig = pair.getRequestConfig();
         UnifiedResponseConfig responseConfig = pair.getResponseConfig();
         
@@ -791,9 +805,17 @@ public class UniversalScanner extends AbstractScanner {
         //    去重决定"打不打"，批量/逐个决定"怎么打"
         //    ✅ 修复：传递pairId，确保不同配对即使针对同一参数也能分别执行
         List<InjectionTarget> validTargets = filterDuplicateTargets(allTargets, config, originalRequest, pair.getId());
+
+        // ✅ 多Pair共享去重：即使本Pair的targets全部被去重，也不代表本Pair必定失败
+        // 场景：pair1 已经发送过相同注入请求并缓存了响应，pair2 可以复用响应进行判断
+        // 因此此处不直接 return false，交给具体注入模式（batch/individual）尝试复用缓存
+
         
-        if (validTargets.isEmpty()) {
-            // 所有目标都被去重过滤掉了
+        // 注意：validTargets可能为空（全部被去重）
+        // - shareDeduplicationAcrossPairs=false：表示该Pair确实没有可发送的请求，直接失败
+        // - shareDeduplicationAcrossPairs=true：可能有可复用的缓存响应，后续会尝试复用
+        if (validTargets.isEmpty() && !config.isShareDeduplicationAcrossPairs()) {
+            // 所有目标都被去重过滤掉了（且不启用跨Pair复用）
             return new PairEvaluationResult(false);
         }
         
@@ -803,10 +825,10 @@ public class UniversalScanner extends AbstractScanner {
         // 📌 批量模式 vs 逐个模式
         if (injectionMode == Configuration.InjectionMode.BATCH) {
             // ========== 批量模式（BATCH）：所有validTargets同时注入相同payload ==========
-            return evaluateBatchMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures, accumulatedVars);
+            return evaluateBatchMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures, accumulatedVars, taskScopedCache);
         } else {
             // ========== 逐个模式（INDIVIDUAL）：每个validTarget分别注入 ==========
-            return evaluateIndividualMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures, accumulatedVars);
+            return evaluateIndividualMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures, accumulatedVars, taskScopedCache);
         }
     }
     
@@ -835,8 +857,9 @@ public class UniversalScanner extends AbstractScanner {
         for (InjectionTarget target : allTargets) {
             // ✅ 只检查是否重复，不标记（使用生成key的方式检查）
             // ✅ 修复：传入pairId，确保不同配对生成不同的Key
+            Integer dedupPairId = config.isShareDeduplicationAcrossPairs() ? null : pairId;
             String dedupKey = com.xprobe.scanner.core.DeduplicationKeyGenerator.generateKey(
-                method, host, path, contentType, config, target.name, pairId
+                method, host, path, contentType, config, target.name, dedupPairId, null
             );
             
             // 检查这个key是否已经在去重集合中
@@ -889,7 +912,8 @@ public class UniversalScanner extends AbstractScanner {
                                                    RuleMatchPair pair,
                                                    List<PairEvaluationResult> allEvaluations,
                                                    Map<Integer, PairResponseFeatures> allPairFeatures,
-                                                   Map<String, String> accumulatedVars) {
+                                                   Map<String, String> accumulatedVars,
+                                                   Map<String, PairEvaluationResult> taskScopedCache) {
         // ✅ 保存最后一个响应（用于记录未命中的请求）
         HttpResponse lastResponse = null;
         HttpRequest lastModifiedRequest = null;
@@ -982,24 +1006,46 @@ public class UniversalScanner extends AbstractScanner {
                 // ✅ 检查请求是否被修改
                 boolean requestChanged = isRequestModified(originalRequest, modifiedRequest);
                 
-                // 发送请求
+                // 发送请求（支持多Pair共享请求复用：以最终 modifiedRequest 作为复用依据）
                 HttpResponse response = null;
                 long responseTime = 0;
-                if (!requestChanged) {
-                    response = getCachedResponse(originalRequest);
-                    if (response != null) {
-                        api.logging().raiseDebugEvent("♻️ 批量模式未修改请求，复用原始响应");
+
+                // ✅ 复用Key：基于最终请求字节内容（避免“payload相同但注入位置/组合不同”的错误复用）
+                String requestHashKey = null;
+                if (config.isShareDeduplicationAcrossPairs()) {
+                    requestHashKey = computeRequestHash(modifiedRequest);
+                    if (requestHashKey != null) {
+                        PairEvaluationResult cached = taskScopedCache.get(requestHashKey);
+                        if (cached != null && cached.response != null) {
+                            response = cached.response;
+                            responseTime = cached.responseTime;
+                            api.logging().raiseDebugEvent("♻️ 多Pair复用：复用已发送响应 requestHash=" + requestHashKey);
+                        }
+                    }
+                }
+
+                if (response == null) {
+                    if (!requestChanged) {
+                        response = getCachedResponse(originalRequest);
+                        if (response != null) {
+                            api.logging().raiseDebugEvent("♻️ 批量模式未修改请求，复用原始响应");
+                        } else {
+                            long startTime = System.currentTimeMillis();
+                            response = api.http().sendRequest(modifiedRequest).response();
+                            responseTime = System.currentTimeMillis() - startTime;
+                        }
                     } else {
                         long startTime = System.currentTimeMillis();
                         response = api.http().sendRequest(modifiedRequest).response();
                         responseTime = System.currentTimeMillis() - startTime;
                     }
-                } else {
-                    long startTime = System.currentTimeMillis();
-                    response = api.http().sendRequest(modifiedRequest).response();
-                    responseTime = System.currentTimeMillis() - startTime;
+
+                    // ✅ 写入本次扫描缓存（仅当开启共享且hash可用）
+                    if (config.isShareDeduplicationAcrossPairs() && requestHashKey != null) {
+                        taskScopedCache.put(requestHashKey, new PairEvaluationResult(false, response, modifiedRequest, responseTime));
+                    }
                 }
-                
+
                 // ✅ 立即标记所有targets为已处理（遵循颗粒度）
                 for (InjectionTarget target : allTargetsToMark) {
                     markTargetAsProcessed(target);
@@ -1092,6 +1138,35 @@ public class UniversalScanner extends AbstractScanner {
      * ✅ 生成笛卡尔积（所有payload组合）
      * 例如：[[A1, A2], [B1, B2, B3]] -> [[A1, B1], [A1, B2], [A1, B3], [A2, B1], [A2, B2], [A2, B3]]
      */
+    /**
+     * ✅ 计算请求哈希（用于多Pair共享请求复用）
+     * 以最终 modifiedRequest 的字节内容作为唯一标识，避免“payload相同但注入位置不同”导致错误复用。
+     */
+    private String computeRequestHash(HttpRequest request) {
+        try {
+            if (request == null) {
+                return null;
+            }
+            byte[] bytes = request.toByteArray().getBytes();
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(bytes);
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < Math.min(8, hash.length); i++) {
+                String hex = Integer.toHexString(0xff & hash[i]);
+                if (hex.length() == 1) sb.append('0');
+                sb.append(hex);
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            // 降级：使用hashCode（不够强，但至少不阻塞功能）
+            try {
+                return String.valueOf(request.toString().hashCode());
+            } catch (Exception ex) {
+                return null;
+            }
+        }
+    }
+
     private <T> List<List<T>> generateCartesianProduct(List<List<T>> lists) {
         if (lists == null || lists.isEmpty()) {
             return new ArrayList<>();
@@ -1142,7 +1217,8 @@ public class UniversalScanner extends AbstractScanner {
                                                         RuleMatchPair pair,
                                                         List<PairEvaluationResult> allEvaluations,
                                                         Map<Integer, PairResponseFeatures> allPairFeatures,
-                                                        Map<String, String> accumulatedVars) {
+                                                        Map<String, String> accumulatedVars,
+                                                        Map<String, PairEvaluationResult> taskScopedCache) { 
         // ✅ 保存最后一个响应（用于记录未命中的请求）
         HttpResponse lastResponse = null;
         HttpRequest lastModifiedRequest = null;
@@ -1270,22 +1346,44 @@ public class UniversalScanner extends AbstractScanner {
                 // ✅ 检查请求是否被修改
                 boolean requestChanged = isRequestModified(originalRequest, modifiedRequest);
                 
-                // 发送请求
+                // 发送请求（支持多Pair共享请求复用：以最终 modifiedRequest 作为复用依据）
                 HttpResponse response = null;
                 long responseTime = 0;
-                if (!requestChanged) {
-                    response = getCachedResponse(originalRequest);
-                    if (response != null) {
-                        api.logging().raiseDebugEvent("♻️ 逐个模式未修改请求，复用原始响应");
+
+                // ✅ 复用Key：基于最终请求字节内容（避免“payload相同但注入位置/组合不同”的错误复用）
+                String requestHashKey = null;
+                if (config.isShareDeduplicationAcrossPairs()) {
+                    requestHashKey = computeRequestHash(modifiedRequest);
+                    if (requestHashKey != null) {
+                        PairEvaluationResult cached = taskScopedCache.get(requestHashKey);
+                        if (cached != null && cached.response != null) {
+                            response = cached.response;
+                            responseTime = cached.responseTime;
+                            api.logging().raiseDebugEvent("♻️ 多Pair复用：复用已发送响应 requestHash=" + requestHashKey);
+                        }
+                    }
+                }
+
+                if (response == null) {
+                    if (!requestChanged) {
+                        response = getCachedResponse(originalRequest);
+                        if (response != null) {
+                            api.logging().raiseDebugEvent("♻️ 逐个模式未修改请求，复用原始响应");
+                        } else {
+                            long startTime = System.currentTimeMillis();
+                            response = api.http().sendRequest(modifiedRequest).response();
+                            responseTime = System.currentTimeMillis() - startTime;
+                        }
                     } else {
                         long startTime = System.currentTimeMillis();
                         response = api.http().sendRequest(modifiedRequest).response();
                         responseTime = System.currentTimeMillis() - startTime;
                     }
-                } else {
-                    long startTime = System.currentTimeMillis();
-                    response = api.http().sendRequest(modifiedRequest).response();
-                    responseTime = System.currentTimeMillis() - startTime;
+
+                    // ✅ 写入本次扫描缓存（仅当开启共享且hash可用）
+                    if (config.isShareDeduplicationAcrossPairs() && requestHashKey != null) {
+                        taskScopedCache.put(requestHashKey, new PairEvaluationResult(false, response, modifiedRequest, responseTime));
+                    }
                 }
                 
                 // ✅ 立即标记所有targets为已处理（逐个模式：每个target单独标记）
