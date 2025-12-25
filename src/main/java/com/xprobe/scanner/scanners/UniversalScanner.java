@@ -632,9 +632,9 @@ public class UniversalScanner extends AbstractScanner {
             
             // 检查是否有未去重的目标
             for (InjectionTarget target : allTargets) {
-                Integer dedupPairId = config.isShareDeduplicationAcrossPairs() ? null : pair.getId();
+                // ✅ 全局去重仍按Pair隔离（避免跨Pair误剪枝导致无法构造modifiedRequest，也就无法触发请求复用）
                 String dedupKey = com.xprobe.scanner.core.DeduplicationKeyGenerator.generateKey(
-                    method, host, path, contentType, config, target.name, dedupPairId, null
+                    method, host, path, contentType, config, target.name, pair.getId(), null
                 );
                 
                 // 如果有一个目标未去重，就需要执行扫描
@@ -857,9 +857,9 @@ public class UniversalScanner extends AbstractScanner {
         for (InjectionTarget target : allTargets) {
             // ✅ 只检查是否重复，不标记（使用生成key的方式检查）
             // ✅ 修复：传入pairId，确保不同配对生成不同的Key
-            Integer dedupPairId = config.isShareDeduplicationAcrossPairs() ? null : pairId;
+            // ✅ 全局去重仍按Pair隔离；请求是否复用由 taskScopedCache(requestHash) 决定
             String dedupKey = com.xprobe.scanner.core.DeduplicationKeyGenerator.generateKey(
-                method, host, path, contentType, config, target.name, dedupPairId, null
+                method, host, path, contentType, config, target.name, pairId, null
             );
             
             // 检查这个key是否已经在去重集合中
@@ -1135,10 +1135,6 @@ public class UniversalScanner extends AbstractScanner {
     }
     
     /**
-     * ✅ 生成笛卡尔积（所有payload组合）
-     * 例如：[[A1, A2], [B1, B2, B3]] -> [[A1, B1], [A1, B2], [A1, B3], [A2, B1], [A2, B2], [A2, B3]]
-     */
-    /**
      * ✅ 计算请求哈希（用于多Pair共享请求复用）
      * 以最终 modifiedRequest 的字节内容作为唯一标识，避免“payload相同但注入位置不同”导致错误复用。
      */
@@ -1153,7 +1149,9 @@ public class UniversalScanner extends AbstractScanner {
             StringBuilder sb = new StringBuilder();
             for (int i = 0; i < Math.min(8, hash.length); i++) {
                 String hex = Integer.toHexString(0xff & hash[i]);
-                if (hex.length() == 1) sb.append('0');
+                if (hex.length() == 1) {
+                    sb.append('0');
+                }
                 sb.append(hex);
             }
             return sb.toString();
@@ -1167,6 +1165,10 @@ public class UniversalScanner extends AbstractScanner {
         }
     }
 
+    /**
+     * ✅ 生成笛卡尔积（所有payload组合）
+     * 例如：[[A1, A2], [B1, B2, B3]] -> [[A1, B1], [A1, B2], [A1, B3], [A2, B1], [A2, B2], [A2, B3]]
+     */
     private <T> List<List<T>> generateCartesianProduct(List<List<T>> lists) {
         if (lists == null || lists.isEmpty()) {
             return new ArrayList<>();
