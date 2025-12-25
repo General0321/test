@@ -28,7 +28,7 @@ public class Configuration implements Serializable {  // 定义 Configuration �
      *
      * 默认：false（兼容旧行为：不同Pair独立发包/独立去重）。
      */
-    private boolean shareDeduplicationAcrossPairs = false;
+    private boolean shareDeduplicationAcrossPairs = true;
 
 
     // 默认构造函数
