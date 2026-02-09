@@ -530,8 +530,25 @@ public class TaskScheduler {
             
             // ✅ 同步添加到日志模型（包含规则名称）
             synchronized (logModel) {
-                // ✅ 如果命中规则，传递规则名称；否则传递null
+                // ✅ P0修复：只有真正命中的结果才传递规则名称，避免所有数据包都变红
+                // 关键：只有 result.isVulnerable() = true 时才传递规则名称，否则传递 null
+                // 这样只有命中的数据包会在UI中显示为红色，其他测试请求保持正常颜色
                 String ruleName = result.isVulnerable() ? result.getScanType() : null;
+                
+                // ✅ 调试日志：确认只有命中的结果才有规则名称
+                if (result.isVulnerable()) {
+                    api.logging().raiseDebugEvent(
+                        "✅ [结果记录] 命中规则: " + ruleName + 
+                        ", isVulnerable=" + result.isVulnerable() + 
+                        ", scanType=" + result.getScanType()
+                    );
+                } else {
+                    api.logging().raiseDebugEvent(
+                        "⚠️ [结果记录] 未命中: ruleName=null" + 
+                        ", isVulnerable=" + result.isVulnerable() + 
+                        ", scanType=" + result.getScanType()
+                    );
+                }
                 
                 // ✅ 关键修复：从修改后的请求中提取method和url
                 HttpRequest modifiedRequest = result.getModifiedRequest();
@@ -550,7 +567,7 @@ public class TaskScheduler {
                     result.getResponseTime(),
                     modifiedRequest,    // ✅ 修改后的请求
                     response,           // ✅ 修改后的响应（扫描器收到的响应）
-                    ruleName  // ✅ 传递规则名称
+                    ruleName  // ✅ 传递规则名称（只有命中的结果才有，其他为null）
                 );
             }
             

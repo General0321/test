@@ -593,10 +593,12 @@ public class ParameterCollector {
     
     /**
      * 提取参数名（参考 GAP.py 的 addParameter 逻辑）
+     * ✅ P0修复：支持从JSON body中自动提取嵌套参数（如 user.name, items[0].id）
      */
     private Set<String> extractParameters(HttpRequest request) {
         Set<String> parameters = new HashSet<>();
         
+        // 1. 提取Burp API自动识别的参数（URL参数、表单参数、顶层JSON键）
         for (ParsedHttpParameter param : request.parameters()) {
             String paramName = cleanParameterName(param.name());
             
@@ -607,7 +609,105 @@ public class ParameterCollector {
             }
         }
         
+        // 2. ✅ P0修复：对于JSON body，额外提取所有嵌套参数
+        String contentType = getContentType(request);
+        if (contentType != null && contentType.toLowerCase().contains("application/json")) {
+            try {
+                String bodyStr = request.bodyToString();
+                if (bodyStr != null && !bodyStr.trim().isEmpty()) {
+                    // 提取JSON中的所有嵌套参数路径
+                    Set<String> jsonParams = extractNestedJsonParameters(bodyStr);
+                    parameters.addAll(jsonParams);
+                }
+            } catch (Exception e) {
+                api.logging().raiseDebugEvent("提取JSON嵌套参数失败: " + e.getMessage());
+            }
+        }
+        
         return parameters;
+    }
+    
+    /**
+     * ✅ P0修复：从JSON body中提取所有嵌套参数路径
+     * 例如：{"user": {"name": "test"}} → ["user", "user.name"]
+     *      {"items": [{"id": 1}]} → ["items", "items[0]", "items[0].id"]
+     */
+    private Set<String> extractNestedJsonParameters(String jsonBody) {
+        Set<String> parameters = new HashSet<>();
+        
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper jsonMapper = 
+                new com.fasterxml.jackson.databind.ObjectMapper();
+            com.fasterxml.jackson.databind.JsonNode rootNode = jsonMapper.readTree(jsonBody);
+            
+            if (rootNode != null) {
+                // 递归提取所有参数路径
+                extractJsonPaths(rootNode, "", parameters);
+            }
+        } catch (Exception e) {
+            // JSON解析失败，使用正则降级处理
+            api.logging().raiseDebugEvent("JSON解析失败，使用正则降级提取: " + e.getMessage());
+            // 降级：使用正则提取顶层键
+            java.util.regex.Matcher matcher = PATTERN_JSON_KEY.matcher(jsonBody);
+            while (matcher.find()) {
+                String paramName = matcher.group(1);
+                if (PATTERN_VALID_PARAM.matcher(paramName).matches()) {
+                    parameters.add(paramName);
+                }
+            }
+        }
+        
+        return parameters;
+    }
+    
+    /**
+     * ✅ 递归提取JSON中的所有路径（支持嵌套对象和数组）
+     * @param node 当前JSON节点
+     * @param currentPath 当前路径（如 "user" 或 "user.name"）
+     * @param parameters 参数集合（输出）
+     */
+    private void extractJsonPaths(com.fasterxml.jackson.databind.JsonNode node, 
+                                  String currentPath, 
+                                  Set<String> parameters) {
+        if (node == null) {
+            return;
+        }
+        
+        if (node.isObject()) {
+            // 对象：遍历所有键
+            node.fields().forEachRemaining(entry -> {
+                String key = entry.getKey();
+                com.fasterxml.jackson.databind.JsonNode value = entry.getValue();
+                
+                // 构建新路径
+                String newPath = currentPath.isEmpty() ? key : currentPath + "." + key;
+                
+                // 验证参数名格式
+                if (PATTERN_VALID_PARAM.matcher(key).matches()) {
+                    // 添加当前路径
+                    parameters.add(newPath);
+                    
+                    // 递归处理嵌套对象和数组
+                    if (value.isObject() || value.isArray()) {
+                        extractJsonPaths(value, newPath, parameters);
+                    }
+                }
+            });
+        } else if (node.isArray()) {
+            // 数组：遍历所有元素
+            for (int i = 0; i < node.size(); i++) {
+                com.fasterxml.jackson.databind.JsonNode element = node.get(i);
+                String arrayPath = currentPath + "[" + i + "]";
+                
+                // 添加数组索引路径（如 items[0]）
+                parameters.add(arrayPath);
+                
+                // 递归处理数组元素
+                if (element.isObject() || element.isArray()) {
+                    extractJsonPaths(element, arrayPath, parameters);
+                }
+            }
+        }
     }
     
     /**

@@ -530,8 +530,9 @@ public class UniversalScanner extends AbstractScanner {
                 if (firstEval.response == null) {
                     api.logging().raiseDebugEvent("⚠️ [扫描结果] 主结果响应为null，但仍创建ScanResult以保持计数准确");
                 }
+                // ✅ P0修复：只有主结果使用finalResult判断是否vulnerable，其他结果明确标记为false
                 ScanResult mainResult = new ScanResult.Builder()
-                    .vulnerable(finalResult)  // 使用最终评估结果
+                    .vulnerable(finalResult)  // ✅ 只有主结果使用最终评估结果
                     .scanType(config.getCustomLabel())
                     .evidence(finalResult ? "检测到漏洞" : "测试请求")
                     .originalRequest(originalRequest)
@@ -541,13 +542,20 @@ public class UniversalScanner extends AbstractScanner {
                     .build();
                 results.add(mainResult);
                 
+                // ✅ 调试日志：确认主结果的vulnerable状态
+                api.logging().raiseDebugEvent(
+                    "🔍 [结果创建] 主结果: isVulnerable=" + finalResult + 
+                    ", scanType=" + config.getCustomLabel() + 
+                    ", finalResult=" + finalResult
+                );
+                
                 if (finalResult) {
                     api.logging().raiseInfoEvent("✓ 规则 " + config.getCustomLabel() + " 检测到漏洞！");
                 } else {
                     api.logging().raiseDebugEvent("⚠️ [最终评估] 虽然有评估结果，但finalResult=false，未记录为漏洞");
                 }
                 
-                // 其余的请求作为额外条目（标记为未命中）
+                // ✅ P0修复：其余的请求作为额外条目（明确标记为未命中，isVulnerable=false）
                 for (int i = 1; i < allEvaluations.size(); i++) {
                     PairEvaluationResult eval = allEvaluations.get(i);
                     // ✅ 修复：即使response为null，也要创建ScanResult（确保计数准确）
@@ -555,7 +563,7 @@ public class UniversalScanner extends AbstractScanner {
                         api.logging().raiseDebugEvent("⚠️ [扫描结果] 评估结果 #" + (i + 1) + " 响应为null，但仍创建ScanResult以保持计数准确");
                     }
                     ScanResult additionalResult = new ScanResult.Builder()
-                        .vulnerable(false)  // 额外的流量条目标记为未命中
+                        .vulnerable(false)  // ✅ 关键：额外的流量条目标记为未命中（isVulnerable=false）
                         .scanType(config.getCustomLabel())
                         .evidence("测试请求 #" + (i + 1))
                         .originalRequest(originalRequest)
@@ -564,6 +572,12 @@ public class UniversalScanner extends AbstractScanner {
                         .responseTime(eval.responseTime)
                         .build();
                     results.add(additionalResult);
+                    
+                    // ✅ 调试日志：确认额外结果的vulnerable状态
+                    api.logging().raiseDebugEvent(
+                        "🔍 [结果创建] 额外结果 #" + (i + 1) + ": isVulnerable=false" + 
+                        ", scanType=" + config.getCustomLabel()
+                    );
                 }
             } else {
                 api.logging().raiseDebugEvent("⚠️ [扫描结果] 规则 " + config.getCustomLabel() + " 没有产生任何评估结果（allEvaluations为空）");
@@ -1488,6 +1502,7 @@ public class UniversalScanner extends AbstractScanner {
             case PARAMETER:
                 // ✅ 修复：PARAMETER类型只处理URL参数和POST参数，不包括Cookie参数
                 // Cookie参数应该使用COOKIE类型单独处理
+                // ✅ P0修复：支持收集嵌套JSON参数（如 user.name, items[0].id）
                 for (var param : request.parameters()) {
                     // 排除Cookie类型的参数
                     if (param.type() == burp.api.montoya.http.message.params.HttpParameterType.COOKIE) {
@@ -1495,6 +1510,24 @@ public class UniversalScanner extends AbstractScanner {
                     }
                     if (shouldMatchTarget(param.name(), element)) {
                         targets.add(new InjectionTarget(param.name(), param.value(), param.type(), element));
+                    }
+                }
+                
+                // ✅ P0修复：对于JSON body，额外收集嵌套参数
+                String contentType = request.headers().stream()
+                    .filter(h -> h.name().equalsIgnoreCase("Content-Type"))
+                    .map(h -> h.value())
+                    .findFirst()
+                    .orElse("");
+                
+                if (contentType != null && contentType.toLowerCase().contains("application/json")) {
+                    try {
+                        String bodyStr = request.bodyToString();
+                        if (bodyStr != null && !bodyStr.trim().isEmpty()) {
+                            collectNestedJsonTargets(bodyStr, "", element, targets);
+                        }
+                    } catch (Exception e) {
+                        api.logging().raiseDebugEvent("收集嵌套JSON参数失败: " + e.getMessage());
                     }
                 }
                 break;
@@ -1526,6 +1559,110 @@ public class UniversalScanner extends AbstractScanner {
         }
         
         return targets;
+    }
+    
+    /**
+     * ✅ P0修复：递归收集嵌套JSON参数作为注入目标
+     * 例如：{"user": {"name": "test"}} → 收集 "user" 和 "user.name"
+     */
+    private void collectNestedJsonTargets(String jsonBody, 
+                                          String currentPath, 
+                                          UnifiedHttpConfig.HttpElementConfig element,
+                                          List<InjectionTarget> targets) {
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper jsonMapper = 
+                new com.fasterxml.jackson.databind.ObjectMapper();
+            com.fasterxml.jackson.databind.JsonNode rootNode = jsonMapper.readTree(jsonBody);
+            
+            if (rootNode != null) {
+                collectJsonPathsAsTargets(rootNode, currentPath, element, targets);
+            }
+        } catch (Exception e) {
+            // 忽略JSON解析错误
+        }
+    }
+    
+    /**
+     * ✅ 递归收集JSON路径作为注入目标
+     */
+    private void collectJsonPathsAsTargets(com.fasterxml.jackson.databind.JsonNode node,
+                                          String currentPath,
+                                          UnifiedHttpConfig.HttpElementConfig element,
+                                          List<InjectionTarget> targets) {
+        if (node == null) {
+            return;
+        }
+        
+        if (node.isObject()) {
+            // 对象：遍历所有键
+            node.fields().forEachRemaining(entry -> {
+                String key = entry.getKey();
+                com.fasterxml.jackson.databind.JsonNode value = entry.getValue();
+                
+                // 构建新路径
+                String newPath = currentPath.isEmpty() ? key : currentPath + "." + key;
+                
+                // 检查是否匹配配置
+                if (shouldMatchTarget(newPath, element)) {
+                    // 获取参数值
+                    String paramValue = "";
+                    if (value.isTextual()) {
+                        paramValue = value.asText();
+                    } else if (value.isNumber()) {
+                        paramValue = value.asText();
+                    } else if (value.isBoolean()) {
+                        paramValue = String.valueOf(value.asBoolean());
+                    } else {
+                        paramValue = value.toString();
+                    }
+                    
+                    // 添加为注入目标（使用BODY类型，因为这是JSON body中的参数）
+                    targets.add(new InjectionTarget(
+                        newPath, 
+                        paramValue, 
+                        burp.api.montoya.http.message.params.HttpParameterType.BODY, 
+                        element
+                    ));
+                }
+                
+                // 递归处理嵌套对象和数组
+                if (value.isObject() || value.isArray()) {
+                    collectJsonPathsAsTargets(value, newPath, element, targets);
+                }
+            });
+        } else if (node.isArray()) {
+            // 数组：遍历所有元素
+            for (int i = 0; i < node.size(); i++) {
+                com.fasterxml.jackson.databind.JsonNode arrayElement = node.get(i);
+                String arrayPath = currentPath + "[" + i + "]";
+                
+                // 检查数组索引路径是否匹配
+                if (shouldMatchTarget(arrayPath, element)) {
+                    String paramValue = "";
+                    if (arrayElement.isTextual()) {
+                        paramValue = arrayElement.asText();
+                    } else if (arrayElement.isNumber()) {
+                        paramValue = arrayElement.asText();
+                    } else if (arrayElement.isBoolean()) {
+                        paramValue = String.valueOf(arrayElement.asBoolean());
+                    } else {
+                        paramValue = arrayElement.toString();
+                    }
+                    
+                    targets.add(new InjectionTarget(
+                        arrayPath,
+                        paramValue,
+                        burp.api.montoya.http.message.params.HttpParameterType.BODY,
+                        element
+                    ));
+                }
+                
+                // 递归处理数组元素
+                if (arrayElement.isObject() || arrayElement.isArray()) {
+                    collectJsonPathsAsTargets(arrayElement, arrayPath, element, targets);
+                }
+            }
+        }
     }
     
     /**
@@ -1618,17 +1755,89 @@ public class UniversalScanner extends AbstractScanner {
                     break;
                     
                 case PARAMETER:
-                    if (injTarget == UnifiedHttpConfig.InjectionTarget.VALUE) {
-                        var newParam = burp.api.montoya.http.message.params.HttpParameter
-                            .parameter(target.name, payload, target.paramType);
-                        modified = modified.withUpdatedParameters(newParam);
-                    } else if (injTarget == UnifiedHttpConfig.InjectionTarget.NAME) {
-                        modified = modified.withRemovedParameters(
-                            burp.api.montoya.http.message.params.HttpParameter.parameter(target.name, target.originalValue, target.paramType)
-                        );
-                        var newParam = burp.api.montoya.http.message.params.HttpParameter
-                            .parameter(payload, target.originalValue, target.paramType);
-                        modified = modified.withAddedParameters(newParam);
+                    // ✅ P0修复：JSON请求体需要特殊处理
+                    String contentType = originalRequest.headers().stream()
+                        .filter(h -> h.name().equalsIgnoreCase("Content-Type"))
+                        .map(h -> h.value())
+                        .findFirst()
+                        .orElse("");
+                    
+                    boolean isJsonBody = contentType != null && contentType.toLowerCase().contains("application/json");
+                    
+                    if (isJsonBody && target.paramType == burp.api.montoya.http.message.params.HttpParameterType.BODY) {
+                        // ✅ P0修复：JSON格式的body参数：手动解析和重建JSON（支持复杂JSON结构）
+                        try {
+                            String bodyStr = originalRequest.bodyToString();
+                            if (bodyStr == null || bodyStr.trim().isEmpty()) {
+                                bodyStr = "{}";
+                            }
+                            
+                            com.fasterxml.jackson.databind.ObjectMapper jsonMapper = 
+                                new com.fasterxml.jackson.databind.ObjectMapper();
+                            com.fasterxml.jackson.databind.JsonNode jsonNode;
+                            
+                            try {
+                                // ✅ 使用JsonNode保留完整的JSON结构（支持嵌套对象、数组等）
+                                jsonNode = jsonMapper.readTree(bodyStr);
+                                if (jsonNode == null || !jsonNode.isObject()) {
+                                    jsonNode = jsonMapper.createObjectNode();
+                                }
+                            } catch (Exception e) {
+                                // 如果解析失败，创建新的JSON对象
+                                jsonNode = jsonMapper.createObjectNode();
+                            }
+                            
+                            // ✅ 支持嵌套路径（如 user.name 或 items[0].name）
+                            if (injTarget == UnifiedHttpConfig.InjectionTarget.VALUE) {
+                                // 更新参数值（支持嵌套路径）
+                                updateJsonNodeValue(jsonMapper, jsonNode, target.name, payload);
+                            } else if (injTarget == UnifiedHttpConfig.InjectionTarget.NAME) {
+                                // 替换参数名（仅支持顶层键，嵌套路径不支持参数名替换）
+                                if (!target.name.contains(".") && !target.name.contains("[")) {
+                                    // 顶层键：直接替换
+                                    if (jsonNode.isObject()) {
+                                        com.fasterxml.jackson.databind.node.ObjectNode objNode = 
+                                            (com.fasterxml.jackson.databind.node.ObjectNode) jsonNode;
+                                        com.fasterxml.jackson.databind.JsonNode oldValue = objNode.remove(target.name);
+                                        if (oldValue != null) {
+                                            objNode.set(payload, oldValue);
+                                        }
+                                    }
+                                } else {
+                                    api.logging().raiseDebugEvent("⚠️ JSON嵌套路径不支持参数名替换: " + target.name);
+                                }
+                            }
+                            
+                            // 重新序列化为JSON（保留格式和结构）
+                            String newBody = jsonMapper.writeValueAsString(jsonNode);
+                            modified = modified.withBody(newBody);
+                            
+                            // 确保Content-Type头存在
+                            if (!contentType.toLowerCase().contains("application/json")) {
+                                modified = modified.withUpdatedHeader("Content-Type", "application/json");
+                            }
+                        } catch (Exception e) {
+                            api.logging().raiseErrorEvent("JSON参数注入失败: " + e.getMessage());
+                            e.printStackTrace();
+                            // 降级：尝试使用标准方法
+                            var newParam = burp.api.montoya.http.message.params.HttpParameter
+                                .parameter(target.name, payload, target.paramType);
+                            modified = modified.withUpdatedParameters(newParam);
+                        }
+                    } else {
+                        // 非JSON格式：使用标准方法
+                        if (injTarget == UnifiedHttpConfig.InjectionTarget.VALUE) {
+                            var newParam = burp.api.montoya.http.message.params.HttpParameter
+                                .parameter(target.name, payload, target.paramType);
+                            modified = modified.withUpdatedParameters(newParam);
+                        } else if (injTarget == UnifiedHttpConfig.InjectionTarget.NAME) {
+                            modified = modified.withRemovedParameters(
+                                burp.api.montoya.http.message.params.HttpParameter.parameter(target.name, target.originalValue, target.paramType)
+                            );
+                            var newParam = burp.api.montoya.http.message.params.HttpParameter
+                                .parameter(payload, target.originalValue, target.paramType);
+                            modified = modified.withAddedParameters(newParam);
+                        }
                     }
                     break;
                     
@@ -1679,6 +1888,162 @@ public class UniversalScanner extends AbstractScanner {
             this.paramType = paramType;
             this.injectionPoint = injectionPoint;
             this.dedupKey = null;
+        }
+    }
+    
+    /**
+     * ✅ 更新JSON节点值（支持嵌套路径和数组索引）
+     * 
+     * 支持的路径格式：
+     * - 顶层键：`username`
+     * - 嵌套对象：`user.name`
+     * - 数组索引：`items[0]`
+     * - 混合：`user.items[0].name`
+     * 
+     * @param jsonMapper Jackson ObjectMapper
+     * @param rootNode 根JSON节点
+     * @param path 参数路径（支持嵌套和数组）
+     * @param value 新值
+     */
+    private void updateJsonNodeValue(com.fasterxml.jackson.databind.ObjectMapper jsonMapper,
+                                     com.fasterxml.jackson.databind.JsonNode rootNode,
+                                     String path, String value) {
+        if (path == null || path.isEmpty() || rootNode == null) {
+            return;
+        }
+        
+        try {
+            // 如果路径不包含点号和方括号，直接更新顶层键（最常见的情况）
+            if (!path.contains(".") && !path.contains("[")) {
+                if (rootNode.isObject()) {
+                    com.fasterxml.jackson.databind.node.ObjectNode objNode = 
+                        (com.fasterxml.jackson.databind.node.ObjectNode) rootNode;
+                    objNode.put(path, value);
+                }
+                return;
+            }
+            
+            // ✅ 处理嵌套路径（如 user.name 或 items[0].name）
+            // 使用递归方式导航到目标节点
+            String[] parts = path.split("\\.");
+            com.fasterxml.jackson.databind.JsonNode currentNode = rootNode;
+            com.fasterxml.jackson.databind.node.ObjectNode currentObj = null;
+            
+            // 导航到目标节点的父节点
+            for (int i = 0; i < parts.length - 1; i++) {
+                String part = parts[i];
+                
+                // 检查是否包含数组索引（如 items[0]）
+                if (part.contains("[")) {
+                    int bracketIndex = part.indexOf('[');
+                    String key = part.substring(0, bracketIndex);
+                    String indexStr = part.substring(bracketIndex + 1, part.indexOf(']'));
+                    
+                    try {
+                        int arrayIndex = Integer.parseInt(indexStr);
+                        
+                        // 导航到对象键
+                        if (currentNode.isObject() && currentNode.has(key)) {
+                            currentNode = currentNode.get(key);
+                        } else {
+                            // 创建中间对象和数组
+                            if (currentNode.isObject()) {
+                                com.fasterxml.jackson.databind.node.ObjectNode objNode = 
+                                    (com.fasterxml.jackson.databind.node.ObjectNode) currentNode;
+                                com.fasterxml.jackson.databind.node.ArrayNode newArray = jsonMapper.createArrayNode();
+                                objNode.set(key, newArray);
+                                currentNode = newArray;
+                            }
+                        }
+                        
+                        // 导航到数组元素
+                        if (currentNode.isArray()) {
+                            com.fasterxml.jackson.databind.node.ArrayNode arrayNode = 
+                                (com.fasterxml.jackson.databind.node.ArrayNode) currentNode;
+                            // 确保数组足够大
+                            while (arrayNode.size() <= arrayIndex) {
+                                arrayNode.add(jsonMapper.createObjectNode());
+                            }
+                            currentNode = arrayNode.get(arrayIndex);
+                        }
+                    } catch (NumberFormatException e) {
+                        api.logging().raiseDebugEvent("无效的数组索引: " + indexStr);
+                        return;
+                    }
+                } else {
+                    // 普通对象键
+                    if (currentNode.isObject()) {
+                        if (currentNode.has(part)) {
+                            currentNode = currentNode.get(part);
+                        } else {
+                            // 创建中间对象
+                            com.fasterxml.jackson.databind.node.ObjectNode objNode = 
+                                (com.fasterxml.jackson.databind.node.ObjectNode) currentNode;
+                            com.fasterxml.jackson.databind.node.ObjectNode newObj = jsonMapper.createObjectNode();
+                            objNode.set(part, newObj);
+                            currentNode = newObj;
+                        }
+                    } else {
+                        // 当前节点不是对象，无法继续导航
+                        api.logging().raiseDebugEvent("路径导航失败，节点不是对象: " + part);
+                        return;
+                    }
+                }
+            }
+            
+            // 更新最后一个键的值
+            String lastPart = parts[parts.length - 1];
+            
+            // 检查最后一个部分是否包含数组索引
+            if (lastPart.contains("[")) {
+                int bracketIndex = lastPart.indexOf('[');
+                String key = lastPart.substring(0, bracketIndex);
+                String indexStr = lastPart.substring(bracketIndex + 1, lastPart.indexOf(']'));
+                
+                try {
+                    int arrayIndex = Integer.parseInt(indexStr);
+                    
+                    if (currentNode.isObject() && currentNode.has(key)) {
+                        com.fasterxml.jackson.databind.JsonNode arrayNode = currentNode.get(key);
+                        if (arrayNode.isArray()) {
+                            com.fasterxml.jackson.databind.node.ArrayNode arr = 
+                                (com.fasterxml.jackson.databind.node.ArrayNode) arrayNode;
+                            while (arr.size() <= arrayIndex) {
+                                arr.add(jsonMapper.createObjectNode());
+                            }
+                            arr.set(arrayIndex, jsonMapper.valueToTree(value));
+                        }
+                    } else if (currentNode.isObject()) {
+                        com.fasterxml.jackson.databind.node.ObjectNode objNode = 
+                            (com.fasterxml.jackson.databind.node.ObjectNode) currentNode;
+                        com.fasterxml.jackson.databind.node.ArrayNode newArray = jsonMapper.createArrayNode();
+                        while (newArray.size() <= arrayIndex) {
+                            newArray.add(jsonMapper.createObjectNode());
+                        }
+                        newArray.set(arrayIndex, jsonMapper.valueToTree(value));
+                        objNode.set(key, newArray);
+                    }
+                } catch (NumberFormatException e) {
+                    api.logging().raiseDebugEvent("无效的数组索引: " + indexStr);
+                }
+            } else {
+                // 普通对象键
+                if (currentNode.isObject()) {
+                    com.fasterxml.jackson.databind.node.ObjectNode objNode = 
+                        (com.fasterxml.jackson.databind.node.ObjectNode) currentNode;
+                    objNode.put(lastPart, value);
+                }
+            }
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("更新JSON节点值失败: " + e.getMessage() + ", path: " + path);
+            // 降级：如果是顶层键，直接更新
+            if (!path.contains(".") && !path.contains("[")) {
+                if (rootNode.isObject()) {
+                    com.fasterxml.jackson.databind.node.ObjectNode objNode = 
+                        (com.fasterxml.jackson.databind.node.ObjectNode) rootNode;
+                    objNode.put(path, value);
+                }
+            }
         }
     }
     
@@ -1818,17 +2183,89 @@ public class UniversalScanner extends AbstractScanner {
                         
                         // 如果匹配成功，执行注入
                         if (shouldInject) {
-                            if (target == UnifiedHttpConfig.InjectionTarget.VALUE) {
-                                // ✅ 使用withUpdatedParameters()直接更新参数值
-                                var newParam = burp.api.montoya.http.message.params.HttpParameter
-                                    .parameter(param.name(), payload, param.type());
-                                modified = modified.withUpdatedParameters(newParam);
-                            } else if (target == UnifiedHttpConfig.InjectionTarget.NAME) {
-                                // 替换参数名（必须先删除旧的，再添加新的）
-                                modified = modified.withRemovedParameters(param);
-                                var newParam = burp.api.montoya.http.message.params.HttpParameter
-                                    .parameter(payload, param.value(), param.type());
-                                modified = modified.withAddedParameters(newParam);
+                            // ✅ P0修复：JSON请求体需要特殊处理
+                            String contentType = originalRequest.headers().stream()
+                                .filter(h -> h.name().equalsIgnoreCase("Content-Type"))
+                                .map(h -> h.value())
+                                .findFirst()
+                                .orElse("");
+                            
+                            boolean isJsonBody = contentType != null && contentType.toLowerCase().contains("application/json");
+                            
+                            if (isJsonBody && param.type() == burp.api.montoya.http.message.params.HttpParameterType.BODY) {
+                                // ✅ P0修复：JSON格式的body参数：手动解析和重建JSON（支持复杂JSON结构）
+                                try {
+                                    String bodyStr = originalRequest.bodyToString();
+                                    if (bodyStr == null || bodyStr.trim().isEmpty()) {
+                                        bodyStr = "{}";
+                                    }
+                                    
+                                    com.fasterxml.jackson.databind.ObjectMapper jsonMapper = 
+                                        new com.fasterxml.jackson.databind.ObjectMapper();
+                                    com.fasterxml.jackson.databind.JsonNode jsonNode;
+                                    
+                                    try {
+                                        // ✅ 使用JsonNode保留完整的JSON结构（支持嵌套对象、数组等）
+                                        jsonNode = jsonMapper.readTree(bodyStr);
+                                        if (jsonNode == null || !jsonNode.isObject()) {
+                                            jsonNode = jsonMapper.createObjectNode();
+                                        }
+                                    } catch (Exception e) {
+                                        // 如果解析失败，创建新的JSON对象
+                                        jsonNode = jsonMapper.createObjectNode();
+                                    }
+                                    
+                                    // ✅ 支持嵌套路径（如 user.name 或 items[0].name）
+                                    if (target == UnifiedHttpConfig.InjectionTarget.VALUE) {
+                                        // 更新参数值（支持嵌套路径）
+                                        updateJsonNodeValue(jsonMapper, jsonNode, param.name(), payload);
+                                    } else if (target == UnifiedHttpConfig.InjectionTarget.NAME) {
+                                        // 替换参数名（仅支持顶层键，嵌套路径不支持参数名替换）
+                                        if (!param.name().contains(".") && !param.name().contains("[")) {
+                                            // 顶层键：直接替换
+                                            if (jsonNode.isObject()) {
+                                                com.fasterxml.jackson.databind.node.ObjectNode objNode = 
+                                                    (com.fasterxml.jackson.databind.node.ObjectNode) jsonNode;
+                                                com.fasterxml.jackson.databind.JsonNode oldValue = objNode.remove(param.name());
+                                                if (oldValue != null) {
+                                                    objNode.set(payload, oldValue);
+                                                }
+                                            }
+                                        } else {
+                                            api.logging().raiseDebugEvent("⚠️ JSON嵌套路径不支持参数名替换: " + param.name());
+                                        }
+                                    }
+                                    
+                                    // 重新序列化为JSON（保留格式和结构）
+                                    String newBody = jsonMapper.writeValueAsString(jsonNode);
+                                    modified = modified.withBody(newBody);
+                                    
+                                    // 确保Content-Type头存在
+                                    if (!contentType.toLowerCase().contains("application/json")) {
+                                        modified = modified.withUpdatedHeader("Content-Type", "application/json");
+                                    }
+                                } catch (Exception e) {
+                                    api.logging().raiseErrorEvent("JSON参数注入失败: " + e.getMessage());
+                                    e.printStackTrace();
+                                    // 降级：尝试使用标准方法
+                                    var newParam = burp.api.montoya.http.message.params.HttpParameter
+                                        .parameter(param.name(), payload, param.type());
+                                    modified = modified.withUpdatedParameters(newParam);
+                                }
+                            } else {
+                                // 非JSON格式：使用标准方法
+                                if (target == UnifiedHttpConfig.InjectionTarget.VALUE) {
+                                    // ✅ 使用withUpdatedParameters()直接更新参数值
+                                    var newParam = burp.api.montoya.http.message.params.HttpParameter
+                                        .parameter(param.name(), payload, param.type());
+                                    modified = modified.withUpdatedParameters(newParam);
+                                } else if (target == UnifiedHttpConfig.InjectionTarget.NAME) {
+                                    // 替换参数名（必须先删除旧的，再添加新的）
+                                    modified = modified.withRemovedParameters(param);
+                                    var newParam = burp.api.montoya.http.message.params.HttpParameter
+                                        .parameter(payload, param.value(), param.type());
+                                    modified = modified.withAddedParameters(newParam);
+                                }
                             }
                         }
                     }

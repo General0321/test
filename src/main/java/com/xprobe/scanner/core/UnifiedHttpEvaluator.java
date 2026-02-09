@@ -193,11 +193,12 @@ public class UnifiedHttpEvaluator {
     /**
      * 评估参数
      * ✅ 修复：PARAMETER类型只处理URL参数和POST参数，不包括Cookie参数
+     * ✅ P0修复：支持匹配嵌套JSON参数（如 user.name, items[0].id）
      */
     private static boolean evaluateParameter(HttpRequest request, HttpElementConfig element) {
         List<ParsedHttpParameter> parameters = request.parameters();
         
-        // 遍历所有参数（排除Cookie类型）
+        // 1. 遍历Burp API自动识别的参数（URL参数、表单参数、顶层JSON键）
         for (ParsedHttpParameter param : parameters) {
             // ✅ 修复：排除Cookie类型的参数
             if (param.type() == HttpParameterType.COOKIE) {
@@ -214,6 +215,134 @@ public class UnifiedHttpEvaluator {
             boolean valueMatches = matchValue(param.value(), element.getValueMatchConfig());
             if (valueMatches) {
                 return true;
+            }
+        }
+        
+        // 2. ✅ P0修复：对于JSON body，额外检查嵌套参数
+        String contentType = request.headers().stream()
+            .filter(h -> h.name().equalsIgnoreCase("Content-Type"))
+            .map(h -> h.value())
+            .findFirst()
+            .orElse("");
+        
+        if (contentType != null && contentType.toLowerCase().contains("application/json")) {
+            try {
+                String bodyStr = request.bodyToString();
+                if (bodyStr != null && !bodyStr.trim().isEmpty()) {
+                    // 检查嵌套JSON参数
+                    if (evaluateNestedJsonParameters(bodyStr, element)) {
+                        return true;
+                    }
+                }
+            } catch (Exception e) {
+                // 忽略JSON解析错误
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * ✅ P0修复：评估嵌套JSON参数（如 user.name, items[0].id）
+     */
+    private static boolean evaluateNestedJsonParameters(String jsonBody, HttpElementConfig element) {
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper jsonMapper = 
+                new com.fasterxml.jackson.databind.ObjectMapper();
+            com.fasterxml.jackson.databind.JsonNode rootNode = jsonMapper.readTree(jsonBody);
+            
+            if (rootNode == null) {
+                return false;
+            }
+            
+            // 递归检查所有嵌套参数
+            return checkJsonPaths(rootNode, "", element);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+    
+    /**
+     * ✅ 递归检查JSON路径是否匹配配置
+     */
+    private static boolean checkJsonPaths(com.fasterxml.jackson.databind.JsonNode node, 
+                                          String currentPath, 
+                                          HttpElementConfig element) {
+        if (node == null) {
+            return false;
+        }
+        
+        if (node.isObject()) {
+            // 对象：遍历所有键
+            java.util.Iterator<java.util.Map.Entry<String, com.fasterxml.jackson.databind.JsonNode>> fields = 
+                node.fields();
+            while (fields.hasNext()) {
+                java.util.Map.Entry<String, com.fasterxml.jackson.databind.JsonNode> entry = fields.next();
+                String key = entry.getKey();
+                com.fasterxml.jackson.databind.JsonNode value = entry.getValue();
+                
+                // 构建新路径
+                String newPath = currentPath.isEmpty() ? key : currentPath + "." + key;
+                
+                // 检查参数名是否匹配
+                boolean nameMatches = matchValue(newPath, element.getNameMatchConfig());
+                if (nameMatches) {
+                    // 检查参数值是否匹配（支持多种类型）
+                    String valueStr = "";
+                    if (value.isTextual()) {
+                        valueStr = value.asText();
+                    } else if (value.isNumber()) {
+                        valueStr = value.asText();
+                    } else if (value.isBoolean()) {
+                        valueStr = String.valueOf(value.asBoolean());
+                    } else {
+                        valueStr = value.toString();
+                    }
+                    boolean valueMatches = matchValue(valueStr, element.getValueMatchConfig());
+                    if (valueMatches) {
+                        return true;
+                    }
+                }
+                
+                // 递归检查嵌套对象和数组
+                if (value.isObject() || value.isArray()) {
+                    if (checkJsonPaths(value, newPath, element)) {
+                        return true;
+                    }
+                }
+            }
+        } else if (node.isArray()) {
+            // 数组：遍历所有元素
+            for (int i = 0; i < node.size(); i++) {
+                com.fasterxml.jackson.databind.JsonNode arrayElement = node.get(i);
+                String arrayPath = currentPath + "[" + i + "]";
+                
+                // 检查数组索引路径是否匹配
+                boolean nameMatches = matchValue(arrayPath, element.getNameMatchConfig());
+                if (nameMatches) {
+                    // 检查参数值是否匹配（支持多种类型）
+                    String valueStr = "";
+                    if (arrayElement.isTextual()) {
+                        valueStr = arrayElement.asText();
+                    } else if (arrayElement.isNumber()) {
+                        valueStr = arrayElement.asText();
+                    } else if (arrayElement.isBoolean()) {
+                        valueStr = String.valueOf(arrayElement.asBoolean());
+                    } else {
+                        valueStr = arrayElement.toString();
+                    }
+                    boolean valueMatches = matchValue(valueStr, element.getValueMatchConfig());
+                    if (valueMatches) {
+                        return true;
+                    }
+                }
+                
+                // 递归检查数组元素
+                if (arrayElement.isObject() || arrayElement.isArray()) {
+                    if (checkJsonPaths(arrayElement, arrayPath, element)) {
+                        return true;
+                    }
+                }
             }
         }
         
