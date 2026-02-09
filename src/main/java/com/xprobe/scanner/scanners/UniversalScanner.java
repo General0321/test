@@ -1563,7 +1563,8 @@ public class UniversalScanner extends AbstractScanner {
     
     /**
      * ✅ P0修复：递归收集嵌套JSON参数作为注入目标
-     * 例如：{"user": {"name": "test"}} → 收集 "user" 和 "user.name"
+     * 例如：{"user": {"name": "test"}} → 如果匹配 "name"，收集路径 "user.name"
+     *      {"items": [{"id": 1}]} → 如果匹配 "id"，收集路径 "items[0].id"
      */
     private void collectNestedJsonTargets(String jsonBody, 
                                           String currentPath, 
@@ -1583,7 +1584,9 @@ public class UniversalScanner extends AbstractScanner {
     }
     
     /**
-     * ✅ 递归收集JSON路径作为注入目标
+     * ✅ 递归收集JSON路径作为注入目标（按键名匹配，但保留完整路径用于注入）
+     * 例如：{"user": {"name": "test"}} → 如果匹配 "name"，收集路径 "user.name"
+     *      {"items": [{"id": 1}]} → 如果匹配 "id"，收集路径 "items[0].id"
      */
     private void collectJsonPathsAsTargets(com.fasterxml.jackson.databind.JsonNode node,
                                           String currentPath,
@@ -1599,11 +1602,11 @@ public class UniversalScanner extends AbstractScanner {
                 String key = entry.getKey();
                 com.fasterxml.jackson.databind.JsonNode value = entry.getValue();
                 
-                // 构建新路径
+                // 构建新路径（用于注入）
                 String newPath = currentPath.isEmpty() ? key : currentPath + "." + key;
                 
-                // 检查是否匹配配置
-                if (shouldMatchTarget(newPath, element)) {
+                // ✅ 修改：检查键名是否匹配（而不是路径）
+                if (shouldMatchTarget(key, element)) {
                     // 获取参数值
                     String paramValue = "";
                     if (value.isTextual()) {
@@ -1616,9 +1619,9 @@ public class UniversalScanner extends AbstractScanner {
                         paramValue = value.toString();
                     }
                     
-                    // 添加为注入目标（使用BODY类型，因为这是JSON body中的参数）
+                    // 添加为注入目标（使用完整路径，因为注入时需要路径）
                     targets.add(new InjectionTarget(
-                        newPath, 
+                        newPath,  // 完整路径，如 "user.name"
                         paramValue, 
                         burp.api.montoya.http.message.params.HttpParameterType.BODY, 
                         element
@@ -1631,33 +1634,12 @@ public class UniversalScanner extends AbstractScanner {
                 }
             });
         } else if (node.isArray()) {
-            // 数组：遍历所有元素
+            // 数组：遍历所有元素，提取元素中的键名
             for (int i = 0; i < node.size(); i++) {
                 com.fasterxml.jackson.databind.JsonNode arrayElement = node.get(i);
                 String arrayPath = currentPath + "[" + i + "]";
                 
-                // 检查数组索引路径是否匹配
-                if (shouldMatchTarget(arrayPath, element)) {
-                    String paramValue = "";
-                    if (arrayElement.isTextual()) {
-                        paramValue = arrayElement.asText();
-                    } else if (arrayElement.isNumber()) {
-                        paramValue = arrayElement.asText();
-                    } else if (arrayElement.isBoolean()) {
-                        paramValue = String.valueOf(arrayElement.asBoolean());
-                    } else {
-                        paramValue = arrayElement.toString();
-                    }
-                    
-                    targets.add(new InjectionTarget(
-                        arrayPath,
-                        paramValue,
-                        burp.api.montoya.http.message.params.HttpParameterType.BODY,
-                        element
-                    ));
-                }
-                
-                // 递归处理数组元素
+                // ✅ 修改：数组元素不检查数组索引路径，只递归检查元素内容
                 if (arrayElement.isObject() || arrayElement.isArray()) {
                     collectJsonPathsAsTargets(arrayElement, arrayPath, element, targets);
                 }

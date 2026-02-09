@@ -243,7 +243,9 @@ public class UnifiedHttpEvaluator {
     }
     
     /**
-     * ✅ P0修复：评估嵌套JSON参数（如 user.name, items[0].id）
+     * ✅ P0修复：评估嵌套JSON参数（按键名匹配，如 "name" 或 "id"）
+     * 例如：{"user": {"name": "test"}} → 匹配键名 "name"
+     *      {"items": [{"id": 1}]} → 匹配键名 "id"
      */
     private static boolean evaluateNestedJsonParameters(String jsonBody, HttpElementConfig element) {
         try {
@@ -263,7 +265,9 @@ public class UnifiedHttpEvaluator {
     }
     
     /**
-     * ✅ 递归检查JSON路径是否匹配配置
+     * ✅ 递归检查JSON键名是否匹配配置（与参数收集逻辑一致）
+     * 例如：{"user": {"name": "test"}} → 匹配键名 "user" 或 "name"
+     *      {"items": [{"id": 1}]} → 匹配键名 "items" 或 "id"
      */
     private static boolean checkJsonPaths(com.fasterxml.jackson.databind.JsonNode node, 
                                           String currentPath, 
@@ -281,15 +285,14 @@ public class UnifiedHttpEvaluator {
                 String key = entry.getKey();
                 com.fasterxml.jackson.databind.JsonNode value = entry.getValue();
                 
-                // 构建新路径
-                String newPath = currentPath.isEmpty() ? key : currentPath + "." + key;
-                
-                // 检查参数名是否匹配
-                boolean nameMatches = matchValue(newPath, element.getNameMatchConfig());
+                // ✅ 修改：检查键名是否匹配（而不是路径）
+                boolean nameMatches = matchValue(key, element.getNameMatchConfig());
                 if (nameMatches) {
                     // 检查参数值是否匹配（支持多种类型）
                     String valueStr = "";
-                    if (value.isTextual()) {
+                    if (value.isNull()) {
+                        valueStr = "null";  // ✅ 修复：显式处理null值
+                    } else if (value.isTextual()) {
                         valueStr = value.asText();
                     } else if (value.isNumber()) {
                         valueStr = value.asText();
@@ -306,40 +309,20 @@ public class UnifiedHttpEvaluator {
                 
                 // 递归检查嵌套对象和数组
                 if (value.isObject() || value.isArray()) {
+                    String newPath = currentPath.isEmpty() ? key : currentPath + "." + key;
                     if (checkJsonPaths(value, newPath, element)) {
                         return true;
                     }
                 }
             }
         } else if (node.isArray()) {
-            // 数组：遍历所有元素
+            // 数组：遍历所有元素，提取元素中的键名
             for (int i = 0; i < node.size(); i++) {
                 com.fasterxml.jackson.databind.JsonNode arrayElement = node.get(i);
-                String arrayPath = currentPath + "[" + i + "]";
                 
-                // 检查数组索引路径是否匹配
-                boolean nameMatches = matchValue(arrayPath, element.getNameMatchConfig());
-                if (nameMatches) {
-                    // 检查参数值是否匹配（支持多种类型）
-                    String valueStr = "";
-                    if (arrayElement.isTextual()) {
-                        valueStr = arrayElement.asText();
-                    } else if (arrayElement.isNumber()) {
-                        valueStr = arrayElement.asText();
-                    } else if (arrayElement.isBoolean()) {
-                        valueStr = String.valueOf(arrayElement.asBoolean());
-                    } else {
-                        valueStr = arrayElement.toString();
-                    }
-                    boolean valueMatches = matchValue(valueStr, element.getValueMatchConfig());
-                    if (valueMatches) {
-                        return true;
-                    }
-                }
-                
-                // 递归检查数组元素
+                // ✅ 修改：数组元素不检查数组索引路径，只递归检查元素内容
                 if (arrayElement.isObject() || arrayElement.isArray()) {
-                    if (checkJsonPaths(arrayElement, arrayPath, element)) {
+                    if (checkJsonPaths(arrayElement, currentPath, element)) {
                         return true;
                     }
                 }
@@ -399,35 +382,53 @@ public class UnifiedHttpEvaluator {
     /**
      * 评估Cookie
      * ✅ 修复：支持区分大小写配置
+     * ✅ 修复：统一与Header的匹配逻辑，支持nameMatchConfig
      */
     private static boolean evaluateCookie(HttpRequest request, HttpElementConfig element) {
-        String cookieName = element.getName();
-        if (cookieName == null || cookieName.isEmpty()) {
-            return false;
-        }
-        
-        // ✅ 获取区分大小写设置
-        boolean caseSensitive = element.getNameMatchConfig() != null 
-            ? element.getNameMatchConfig().isCaseSensitive() 
-            : true;  // Cookie名称默认区分大小写
-        
-        // 查找Cookie
+        // 遍历所有Cookie参数
         for (ParsedHttpParameter param : request.parameters()) {
-            if (param.type() == HttpParameterType.COOKIE) {
-                boolean nameMatches;
+            if (param.type() != HttpParameterType.COOKIE) {
+                continue;
+            }
+            
+            // 1. 检查Cookie名称是否匹配
+            boolean nameMatches = false;
+            
+            // 优先使用element.name（精确匹配，支持区分大小写）
+            String elementName = element.getName();
+            if (elementName != null && !elementName.isEmpty()) {
+                // ✅ 使用nameMatchConfig的caseSensitive设置
+                boolean caseSensitive = element.getNameMatchConfig() != null 
+                    ? element.getNameMatchConfig().isCaseSensitive() 
+                    : true;  // Cookie名称默认区分大小写
+                    
                 if (caseSensitive) {
-                    nameMatches = param.name().equals(cookieName);
+                    nameMatches = param.name().equals(elementName);
                 } else {
-                    nameMatches = param.name().equalsIgnoreCase(cookieName);
+                    nameMatches = param.name().equalsIgnoreCase(elementName);
                 }
-                
-                if (nameMatches) {
-                    return matchValue(param.value(), element.getValueMatchConfig());
-                }
+            } 
+            // 其次使用nameMatchConfig（支持多种匹配模式和大小写）
+            else if (element.getNameMatchConfig() != null) {
+                nameMatches = matchValue(param.name(), element.getNameMatchConfig());
+            } 
+            // 如果两者都没有，跳过（必须指定Cookie名称）
+            else {
+                continue;
+            }
+            
+            if (!nameMatches) {
+                continue;
+            }
+            
+            // 2. 检查Cookie值是否匹配（支持区分大小写）
+            boolean valueMatches = matchValue(param.value(), element.getValueMatchConfig());
+            if (valueMatches) {
+                return true;  // 找到匹配的Cookie
             }
         }
         
-        return false;
+        return false;  // 没有找到匹配的Cookie
     }
     
     /**
@@ -565,6 +566,7 @@ public class UnifiedHttpEvaluator {
     /**
      * 获取匹配的参数名列表（用于注入）
      * ✅ 修复：PARAMETER类型只处理URL参数和POST参数，不包括Cookie参数
+     * ✅ P0修复：支持嵌套JSON参数路径
      */
     public static List<String> getMatchedParameterNames(HttpRequest request, HttpElementConfig element) {
         List<String> matchedNames = new java.util.ArrayList<>();
@@ -573,6 +575,7 @@ public class UnifiedHttpEvaluator {
             return matchedNames;
         }
         
+        // 1. 检查顶层参数（URL参数、表单参数、顶层JSON键）
         List<ParsedHttpParameter> parameters = request.parameters();
         for (ParsedHttpParameter param : parameters) {
             // ✅ 修复：排除Cookie类型的参数
@@ -586,7 +589,153 @@ public class UnifiedHttpEvaluator {
             }
         }
         
+        // 2. ✅ P0修复：对于JSON body，额外收集嵌套参数路径
+        String contentType = request.headers().stream()
+            .filter(h -> h.name().equalsIgnoreCase("Content-Type"))
+            .map(h -> h.value())
+            .findFirst()
+            .orElse("");
+        
+        if (contentType != null && contentType.toLowerCase().contains("application/json")) {
+            try {
+                String bodyStr = request.bodyToString();
+                if (bodyStr != null && !bodyStr.trim().isEmpty()) {
+                    collectMatchedJsonPaths(bodyStr, "", element, matchedNames);
+                }
+            } catch (Exception e) {
+                // 忽略JSON解析错误
+            }
+        }
+        
         return matchedNames;
+    }
+    
+    /**
+     * ✅ 从JSON中提取指定路径的值
+     * 支持路径格式：user.name, items[0].id
+     */
+    private static String getJsonPathValue(String jsonBody, String path) {
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper jsonMapper = 
+                new com.fasterxml.jackson.databind.ObjectMapper();
+            com.fasterxml.jackson.databind.JsonNode rootNode = jsonMapper.readTree(jsonBody);
+            
+            if (rootNode == null) {
+                return "";
+            }
+            
+            // 解析路径
+            com.fasterxml.jackson.databind.JsonNode currentNode = rootNode;
+            String[] parts = path.split("\\.");
+            
+            for (String part : parts) {
+                if (part.contains("[")) {
+                    // 处理数组索引，如 items[0]
+                    int bracketIndex = part.indexOf('[');
+                    String key = part.substring(0, bracketIndex);
+                    String indexStr = part.substring(bracketIndex + 1, part.indexOf(']'));
+                    
+                    try {
+                        int arrayIndex = Integer.parseInt(indexStr);
+                        if (currentNode.isObject() && currentNode.has(key)) {
+                            currentNode = currentNode.get(key);
+                            if (currentNode.isArray() && arrayIndex >= 0 && arrayIndex < currentNode.size()) {
+                                currentNode = currentNode.get(arrayIndex);
+                            } else {
+                                return "";
+                            }
+                        } else {
+                            return "";
+                        }
+                    } catch (NumberFormatException e) {
+                        return "";
+                    }
+                } else {
+                    // 普通对象键
+                    if (currentNode.isObject() && currentNode.has(part)) {
+                        currentNode = currentNode.get(part);
+                    } else {
+                        return "";
+                    }
+                }
+            }
+            
+            // 提取值
+            if (currentNode.isNull()) {
+                return "null";
+            } else if (currentNode.isTextual()) {
+                return currentNode.asText();
+            } else if (currentNode.isNumber()) {
+                return currentNode.asText();
+            } else if (currentNode.isBoolean()) {
+                return String.valueOf(currentNode.asBoolean());
+            } else {
+                return currentNode.toString();
+            }
+        } catch (Exception e) {
+            return "";
+        }
+    }
+    
+    /**
+     * ✅ 收集匹配的JSON路径（用于getMatchedParameterNames）
+     */
+    private static void collectMatchedJsonPaths(String jsonBody, 
+                                                 String currentPath,
+                                                 HttpElementConfig element,
+                                                 List<String> matchedPaths) {
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper jsonMapper = 
+                new com.fasterxml.jackson.databind.ObjectMapper();
+            com.fasterxml.jackson.databind.JsonNode rootNode = jsonMapper.readTree(jsonBody);
+            
+            if (rootNode != null) {
+                collectJsonPathsForNames(rootNode, currentPath, element, matchedPaths);
+            }
+        } catch (Exception e) {
+            // 忽略JSON解析错误
+        }
+    }
+    
+    /**
+     * ✅ 递归收集匹配的JSON路径
+     */
+    private static void collectJsonPathsForNames(com.fasterxml.jackson.databind.JsonNode node,
+                                                 String currentPath,
+                                                 HttpElementConfig element,
+                                                 List<String> matchedPaths) {
+        if (node == null) {
+            return;
+        }
+        
+        if (node.isObject()) {
+            node.fields().forEachRemaining(entry -> {
+                String key = entry.getKey();
+                com.fasterxml.jackson.databind.JsonNode value = entry.getValue();
+                
+                // 构建新路径
+                String newPath = currentPath.isEmpty() ? key : currentPath + "." + key;
+                
+                // 检查键名是否匹配
+                if (matchValue(key, element.getNameMatchConfig())) {
+                    matchedPaths.add(newPath);
+                }
+                
+                // 递归处理嵌套对象和数组
+                if (value.isObject() || value.isArray()) {
+                    collectJsonPathsForNames(value, newPath, element, matchedPaths);
+                }
+            });
+        } else if (node.isArray()) {
+            for (int i = 0; i < node.size(); i++) {
+                com.fasterxml.jackson.databind.JsonNode arrayElement = node.get(i);
+                String arrayPath = currentPath + "[" + i + "]";
+                
+                if (arrayElement.isObject() || arrayElement.isArray()) {
+                    collectJsonPathsForNames(arrayElement, arrayPath, element, matchedPaths);
+                }
+            }
+        }
     }
     
     /**
@@ -620,6 +769,7 @@ public class UnifiedHttpEvaluator {
             case PARAMETER:
                 // ✅ 修复：PARAMETER类型只处理URL参数和POST参数，不包括Cookie参数
                 if (name != null && !name.isEmpty()) {
+                    // 1. 先检查顶层参数（URL参数、表单参数、顶层JSON键）
                     for (var param : request.parameters()) {
                         // ✅ 修复：排除Cookie类型的参数
                         if (param.type() == HttpParameterType.COOKIE) {
@@ -627,6 +777,26 @@ public class UnifiedHttpEvaluator {
                         }
                         if (param.name().equals(name)) {
                             return param.value();
+                        }
+                    }
+                    
+                    // 2. ✅ P0修复：如果是嵌套JSON路径（包含.或[），从JSON body中提取
+                    if (name.contains(".") || name.contains("[")) {
+                        String contentType = request.headers().stream()
+                            .filter(h -> h.name().equalsIgnoreCase("Content-Type"))
+                            .map(h -> h.value())
+                            .findFirst()
+                            .orElse("");
+                        
+                        if (contentType != null && contentType.toLowerCase().contains("application/json")) {
+                            try {
+                                String bodyStr = request.bodyToString();
+                                if (bodyStr != null && !bodyStr.trim().isEmpty()) {
+                                    return getJsonPathValue(bodyStr, name);
+                                }
+                            } catch (Exception e) {
+                                // 忽略JSON解析错误
+                            }
                         }
                     }
                 }

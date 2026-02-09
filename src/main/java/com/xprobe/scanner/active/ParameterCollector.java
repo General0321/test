@@ -628,9 +628,9 @@ public class ParameterCollector {
     }
     
     /**
-     * ✅ P0修复：从JSON body中提取所有嵌套参数路径
-     * 例如：{"user": {"name": "test"}} → ["user", "user.name"]
-     *      {"items": [{"id": 1}]} → ["items", "items[0]", "items[0].id"]
+     * ✅ P0修复：从JSON body中提取所有嵌套参数的键名（不保留路径）
+     * 例如：{"user": {"name": "test"}} → ["user", "name"]
+     *      {"items": [{"id": 1}]} → ["items", "id"]
      */
     private Set<String> extractNestedJsonParameters(String jsonBody) {
         Set<String> parameters = new HashSet<>();
@@ -661,10 +661,12 @@ public class ParameterCollector {
     }
     
     /**
-     * ✅ 递归提取JSON中的所有路径（支持嵌套对象和数组）
+     * ✅ 递归提取JSON中的所有键名（不保留路径，只收集键名）
+     * 例如：{"user": {"name": "test"}} → ["user", "name"]
+     *      {"items": [{"id": 1}]} → ["items", "id"]
      * @param node 当前JSON节点
-     * @param currentPath 当前路径（如 "user" 或 "user.name"）
-     * @param parameters 参数集合（输出）
+     * @param currentPath 当前路径（用于递归，但不添加到结果中）
+     * @param parameters 参数集合（输出，只包含键名，不包含路径）
      */
     private void extractJsonPaths(com.fasterxml.jackson.databind.JsonNode node, 
                                   String currentPath, 
@@ -679,32 +681,25 @@ public class ParameterCollector {
                 String key = entry.getKey();
                 com.fasterxml.jackson.databind.JsonNode value = entry.getValue();
                 
-                // 构建新路径
-                String newPath = currentPath.isEmpty() ? key : currentPath + "." + key;
-                
                 // 验证参数名格式
                 if (PATTERN_VALID_PARAM.matcher(key).matches()) {
-                    // 添加当前路径
-                    parameters.add(newPath);
+                    // ✅ 只添加键名，不添加路径
+                    parameters.add(key);
                     
                     // 递归处理嵌套对象和数组
                     if (value.isObject() || value.isArray()) {
-                        extractJsonPaths(value, newPath, parameters);
+                        extractJsonPaths(value, key, parameters);
                     }
                 }
             });
         } else if (node.isArray()) {
-            // 数组：遍历所有元素
+            // 数组：遍历所有元素，提取元素中的键名
             for (int i = 0; i < node.size(); i++) {
                 com.fasterxml.jackson.databind.JsonNode element = node.get(i);
-                String arrayPath = currentPath + "[" + i + "]";
                 
-                // 添加数组索引路径（如 items[0]）
-                parameters.add(arrayPath);
-                
-                // 递归处理数组元素
+                // 递归处理数组元素（不添加数组索引路径）
                 if (element.isObject() || element.isArray()) {
-                    extractJsonPaths(element, arrayPath, parameters);
+                    extractJsonPaths(element, currentPath, parameters);
                 }
             }
         }
@@ -738,19 +733,26 @@ public class ParameterCollector {
                 return parameters;
             }
             
-            // 从JSON响应中提取参数名
+            // ✅ 从JSON响应中提取参数名（支持嵌套参数）
             if (body.trim().startsWith("{") || body.trim().startsWith("[")) {
                 try {
-                    // ✅ 性能优化：使用静态编译的正则
-                    java.util.regex.Matcher matcher = PATTERN_JSON_KEY.matcher(body);
-                    while (matcher.find()) {
-                        String paramName = matcher.group(1);
-                        if (PATTERN_VALID_PARAM.matcher(paramName).matches()) {
-                            parameters.add(paramName);
-                        }
-                    }
+                    // 使用递归提取，与请求中的JSON提取保持一致
+                    Set<String> jsonParams = extractNestedJsonParameters(body);
+                    parameters.addAll(jsonParams);
                 } catch (Exception e) {
                     api.logging().raiseDebugEvent("解析JSON响应失败: " + e.getMessage());
+                    // 降级：使用正则提取顶层键
+                    try {
+                        java.util.regex.Matcher matcher = PATTERN_JSON_KEY.matcher(body);
+                        while (matcher.find()) {
+                            String paramName = matcher.group(1);
+                            if (PATTERN_VALID_PARAM.matcher(paramName).matches()) {
+                                parameters.add(paramName);
+                            }
+                        }
+                    } catch (Exception e2) {
+                        api.logging().raiseDebugEvent("正则提取JSON响应失败: " + e2.getMessage());
+                    }
                 }
             }
             

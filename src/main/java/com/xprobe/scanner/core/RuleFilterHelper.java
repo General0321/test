@@ -61,44 +61,68 @@ public class RuleFilterHelper {
     
     /**
      * 白名单模式：检查是否所有条件都匹配（都匹配才通过）
+     * ✅ 修复：如果启用了某个条件但列表为空，该条件视为"不参与过滤"（不影响结果）
      */
     private static boolean checkAllFilters(HttpRequest request, HttpResponse response, Configuration.RuleFilter filter) {
         // 如果所有启用的过滤条件都匹配，才通过
         boolean allMatch = true;
-        boolean hasAnyFilter = false;  // 是否有任何启用的过滤条件
+        boolean hasAnyFilter = false;  // 是否有任何启用的过滤条件（且列表不为空）
         
         if (filter.isFilterRequestContentType()) {
-            hasAnyFilter = true;
-            allMatch = allMatch && checkRequestContentType(request, filter);
+            List<String> filterTypes = filter.getRequestContentTypes();
+            if (filterTypes != null && !filterTypes.isEmpty()) {
+                hasAnyFilter = true;
+                allMatch = allMatch && checkRequestContentType(request, filter);
+            }
+            // ✅ 修复：如果列表为空，该条件不参与过滤（不影响allMatch）
         }
         if (filter.isFilterRequestMethod()) {
-            hasAnyFilter = true;
-            allMatch = allMatch && checkRequestMethod(request, filter);
+            List<String> filterMethods = filter.getRequestMethods();
+            if (filterMethods != null && !filterMethods.isEmpty()) {
+                hasAnyFilter = true;
+                allMatch = allMatch && checkRequestMethod(request, filter);
+            }
+            // ✅ 修复：如果列表为空，该条件不参与过滤（不影响allMatch）
         }
         if (filter.isFilterResponseContentType()) {
-            hasAnyFilter = true;
-            if (response != null) {
-                allMatch = allMatch && checkResponseContentType(response, filter);
-            } else {
-                // 如果启用了响应Content-Type过滤但没有响应，则不匹配
-                allMatch = false;
+            List<String> filterTypes = filter.getResponseContentTypes();
+            if (filterTypes != null && !filterTypes.isEmpty()) {
+                hasAnyFilter = true;
+                if (response != null) {
+                    allMatch = allMatch && checkResponseContentType(response, filter);
+                } else {
+                    // 如果启用了响应Content-Type过滤但没有响应，则不匹配
+                    allMatch = false;
+                }
             }
+            // ✅ 修复：如果列表为空，该条件不参与过滤（不影响allMatch）
         }
         if (filter.isFilterResponseStatusCode()) {
-            hasAnyFilter = true;
-            if (response != null) {
-                allMatch = allMatch && checkResponseStatusCode(response, filter);
-            } else {
-                // 如果启用了响应状态码过滤但没有响应，则不匹配
-                allMatch = false;
+            List<Integer> statusCodes = filter.getResponseStatusCodes();
+            Configuration.RuleFilter.StatusCodeRange range = filter.getStatusCodeRange();
+            boolean hasStatusCodeFilter = (statusCodes != null && !statusCodes.isEmpty()) ||
+                                         (range != null && range.isEnabled());
+            if (hasStatusCodeFilter) {
+                hasAnyFilter = true;
+                if (response != null) {
+                    allMatch = allMatch && checkResponseStatusCode(response, filter);
+                } else {
+                    // 如果启用了响应状态码过滤但没有响应，则不匹配
+                    allMatch = false;
+                }
             }
+            // ✅ 修复：如果列表为空且范围未启用，该条件不参与过滤（不影响allMatch）
         }
         if (filter.isFilterFileExtension()) {
-            hasAnyFilter = true;
-            allMatch = allMatch && checkFileExtension(request, filter);
+            List<String> filterExtensions = filter.getFileExtensions();
+            if (filterExtensions != null && !filterExtensions.isEmpty()) {
+                hasAnyFilter = true;
+                allMatch = allMatch && checkFileExtension(request, filter);
+            }
+            // ✅ 修复：如果列表为空，该条件不参与过滤（不影响allMatch）
         }
         
-        // ✅ 如果没有任何启用的过滤条件，白名单模式应该拒绝所有请求（安全默认行为）
+        // ✅ 如果没有任何启用的过滤条件（或所有条件的列表都为空），白名单模式应该拒绝所有请求（安全默认行为）
         if (!hasAnyFilter) {
             return false;
         }
@@ -272,6 +296,7 @@ public class RuleFilterHelper {
     
     /**
      * 从URL中提取文件后缀名
+     * ✅ 修复：改进回退逻辑，正确处理URL的path部分
      */
     private static String extractFileExtension(String url) {
         if (url == null || url.isEmpty()) {
@@ -295,18 +320,59 @@ public class RuleFilterHelper {
                 return path.substring(lastDot + 1).toLowerCase();
             }
         } catch (Exception e) {
-            // 如果URI解析失败，使用简单的字符串匹配作为回退
+            // ✅ 修复：如果URI解析失败，使用改进的字符串匹配作为回退
+            // 需要正确提取path部分，避免匹配到域名中的点
             String lowerUrl = url.toLowerCase();
+            
+            // 移除查询参数和fragment
             int queryIndex = lowerUrl.indexOf('?');
+            int fragmentIndex = lowerUrl.indexOf('#');
             if (queryIndex != -1) {
                 lowerUrl = lowerUrl.substring(0, queryIndex);
+            } else if (fragmentIndex != -1) {
+                lowerUrl = lowerUrl.substring(0, fragmentIndex);
             }
             
-            int lastDot = lowerUrl.lastIndexOf('.');
-            int lastSlash = lowerUrl.lastIndexOf('/');
+            // 查找path开始位置（第一个/在协议之后，或第一个/）
+            int protocolIndex = lowerUrl.indexOf("://");
+            int pathStart = -1;
+            if (protocolIndex != -1) {
+                pathStart = lowerUrl.indexOf('/', protocolIndex + 3);
+            } else {
+                pathStart = lowerUrl.indexOf('/');
+            }
             
-            if (lastDot > lastSlash && lastDot < lowerUrl.length() - 1) {
-                return lowerUrl.substring(lastDot + 1);
+            if (pathStart != -1) {
+                String path = lowerUrl.substring(pathStart);
+                int lastDot = path.lastIndexOf('.');
+                int lastSlash = path.lastIndexOf('/');
+                
+                // 确保.在/之后（是扩展名，不是域名中的.）
+                if (lastDot > lastSlash && lastDot < path.length() - 1) {
+                    return path.substring(lastDot + 1);
+                }
+            } else {
+                // 没有path部分，尝试在整个URL中查找（但需要确保不是域名中的点）
+                // 这种情况很少见，但为了完整性还是处理
+                int lastDot = lowerUrl.lastIndexOf('.');
+                int protocolIndex2 = lowerUrl.indexOf("://");
+                int domainEnd = -1;
+                if (protocolIndex2 != -1) {
+                    domainEnd = lowerUrl.indexOf('/', protocolIndex2 + 3);
+                    if (domainEnd == -1) {
+                        domainEnd = lowerUrl.length();
+                    }
+                } else {
+                    domainEnd = lowerUrl.indexOf('/');
+                    if (domainEnd == -1) {
+                        domainEnd = lowerUrl.length();
+                    }
+                }
+                
+                // 确保点在域名之后
+                if (lastDot >= domainEnd && lastDot < lowerUrl.length() - 1) {
+                    return lowerUrl.substring(lastDot + 1);
+                }
             }
         }
         
