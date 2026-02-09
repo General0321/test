@@ -29,6 +29,13 @@ public class Configuration implements Serializable {  // 定义 Configuration �
      * 默认：false（兼容旧行为：不同Pair独立发包/独立去重）。
      */
     private boolean shareDeduplicationAcrossPairs = true;
+    
+    // ========== 规则过滤器 ==========
+    /**
+     * 规则过滤器 - 用于减少无用流量，提升扫描性能
+     * 支持按请求方法、Content-Type、响应状态码、文件后缀名等过滤
+     */
+    private RuleFilter ruleFilter;
 
 
     // 默认构造函数
@@ -483,5 +490,157 @@ public class Configuration implements Serializable {  // 定义 Configuration �
 
     public void setShareDeduplicationAcrossPairs(boolean shareDeduplicationAcrossPairs) {
         this.shareDeduplicationAcrossPairs = shareDeduplicationAcrossPairs;
+    }
+    
+    // ========== 规则过滤器相关方法 ==========
+    
+    public RuleFilter getRuleFilter() {
+        if (ruleFilter == null) {
+            ruleFilter = new RuleFilter();
+        }
+        return ruleFilter;
+    }
+    
+    public void setRuleFilter(RuleFilter ruleFilter) {
+        this.ruleFilter = ruleFilter;
+    }
+    
+    /**
+     * 规则过滤器 - 用于减少无用流量，提升扫描性能
+     * 支持按请求方法、Content-Type、响应状态码、文件后缀名等过滤
+     */
+    public static class RuleFilter implements Serializable {
+        private static final long serialVersionUID = 1L;
+        
+        private boolean enabled = false;  // 是否启用过滤器
+        
+        // 过滤模式：BLACKLIST（排除）或 WHITELIST（只检测）
+        private FilterMode mode = FilterMode.BLACKLIST;
+        
+        // ========== 请求过滤 ==========
+        private boolean filterRequestContentType = false;
+        private List<String> requestContentTypes = new ArrayList<>();  // 如: ["application/json"]
+        
+        private boolean filterRequestMethod = false;
+        private List<String> requestMethods = new ArrayList<>();  // 如: ["GET", "POST"]
+        
+        // ========== 响应过滤 ==========
+        private boolean filterResponseContentType = false;
+        private List<String> responseContentTypes = new ArrayList<>();  // 如: ["text/html"]
+        
+        private boolean filterResponseStatusCode = false;
+        private List<Integer> responseStatusCodes = new ArrayList<>();  // 如: [200, 404]
+        private StatusCodeRange statusCodeRange = new StatusCodeRange();  // 状态码范围（可选）
+        
+        // ========== 文件后缀名过滤 ==========
+        private boolean filterFileExtension = false;
+        private List<String> fileExtensions = new ArrayList<>();  // 如: ["js", "css"]
+        
+        public RuleFilter() {
+        }
+        
+        // ========== 过滤模式枚举 ==========
+        public enum FilterMode {
+            BLACKLIST("排除模式", "排除列表中的项，检测其他所有流量"),
+            WHITELIST("只检测模式", "只检测列表中的项，排除其他所有流量");
+            
+            private final String displayName;
+            private final String description;
+            
+            FilterMode(String displayName, String description) {
+                this.displayName = displayName;
+                this.description = description;
+            }
+            
+            public String getDisplayName() { return displayName; }
+            public String getDescription() { return description; }
+            
+            @Override
+            public String toString() {
+                return displayName;
+            }
+        }
+        
+        // ========== 状态码范围 ==========
+        public static class StatusCodeRange implements Serializable {
+            private static final long serialVersionUID = 1L;
+            private Integer min;  // 最小状态码（如 200）
+            private Integer max;  // 最大状态码（如 299）
+            private boolean enabled = false;
+            
+            public StatusCodeRange() {
+            }
+            
+            public Integer getMin() { return min; }
+            public void setMin(Integer min) { this.min = min; }
+            
+            public Integer getMax() { return max; }
+            public void setMax(Integer max) { this.max = max; }
+            
+            public boolean isEnabled() { return enabled; }
+            public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        }
+        
+        // ========== Getters and Setters ==========
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        
+        public FilterMode getMode() { return mode; }
+        public void setMode(FilterMode mode) { this.mode = mode; }
+        
+        public boolean isFilterRequestContentType() { return filterRequestContentType; }
+        public void setFilterRequestContentType(boolean filterRequestContentType) { 
+            this.filterRequestContentType = filterRequestContentType; 
+        }
+        
+        public List<String> getRequestContentTypes() { return requestContentTypes; }
+        public void setRequestContentTypes(List<String> requestContentTypes) { 
+            this.requestContentTypes = requestContentTypes != null ? new ArrayList<>(requestContentTypes) : new ArrayList<>(); 
+        }
+        
+        public boolean isFilterRequestMethod() { return filterRequestMethod; }
+        public void setFilterRequestMethod(boolean filterRequestMethod) { 
+            this.filterRequestMethod = filterRequestMethod; 
+        }
+        
+        public List<String> getRequestMethods() { return requestMethods; }
+        public void setRequestMethods(List<String> requestMethods) { 
+            this.requestMethods = requestMethods != null ? new ArrayList<>(requestMethods) : new ArrayList<>(); 
+        }
+        
+        public boolean isFilterResponseContentType() { return filterResponseContentType; }
+        public void setFilterResponseContentType(boolean filterResponseContentType) { 
+            this.filterResponseContentType = filterResponseContentType; 
+        }
+        
+        public List<String> getResponseContentTypes() { return responseContentTypes; }
+        public void setResponseContentTypes(List<String> responseContentTypes) { 
+            this.responseContentTypes = responseContentTypes != null ? new ArrayList<>(responseContentTypes) : new ArrayList<>(); 
+        }
+        
+        public boolean isFilterResponseStatusCode() { return filterResponseStatusCode; }
+        public void setFilterResponseStatusCode(boolean filterResponseStatusCode) { 
+            this.filterResponseStatusCode = filterResponseStatusCode; 
+        }
+        
+        public List<Integer> getResponseStatusCodes() { return responseStatusCodes; }
+        public void setResponseStatusCodes(List<Integer> responseStatusCodes) { 
+            this.responseStatusCodes = responseStatusCodes != null ? new ArrayList<>(responseStatusCodes) : new ArrayList<>(); 
+        }
+        
+        public StatusCodeRange getStatusCodeRange() { return statusCodeRange; }
+        public void setStatusCodeRange(StatusCodeRange statusCodeRange) { 
+            this.statusCodeRange = statusCodeRange != null ? statusCodeRange : new StatusCodeRange(); 
+        }
+        
+        public boolean isFilterFileExtension() { return filterFileExtension; }
+        public void setFilterFileExtension(boolean filterFileExtension) { 
+            this.filterFileExtension = filterFileExtension; 
+        }
+        
+        public List<String> getFileExtensions() { return fileExtensions; }
+        public void setFileExtensions(List<String> fileExtensions) { 
+            this.fileExtensions = fileExtensions != null ? new ArrayList<>(fileExtensions) : new ArrayList<>(); 
+        }
     }
 }

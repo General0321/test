@@ -3,6 +3,7 @@ package com.xprobe.scanner.core;
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.handler.*;
 import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.http.message.responses.HttpResponse;
 import com.xprobe.scanner.config.Configuration;
 import com.xprobe.scanner.config.ConfigurationManager;
 import com.xprobe.scanner.config.XProbeConfigManager;
@@ -61,9 +62,10 @@ public class RequestHandler implements HttpHandler {
                 HttpRequest initiatingRequest = responseReceived.initiatingRequest();
                 
                 // ✅ 1. 先缓存原始响应
+                // 注意：HttpResponseReceived 可以直接作为 HttpResponse 使用（实现了 HttpResponse 接口）
                 responseCache.put(
                     initiatingRequest,
-                    responseReceived
+                    (HttpResponse) responseReceived
                 );
                 
                 // ✅ 2. 收集响应中的参数和关键词
@@ -86,8 +88,8 @@ public class RequestHandler implements HttpHandler {
                             initiatingRequest.toString().hashCode()
                         );
                         
-                        // 收集扫描任务
-                        List<ScanTask> scanTasks = collectScanTasks(initiatingRequest, context);
+                        // 收集扫描任务（传递响应用于过滤器检查）
+                        List<ScanTask> scanTasks = collectScanTasks(initiatingRequest, responseReceived, context);
                         
                         // 调度扫描任务（原始响应已在缓存中）
                         if (!scanTasks.isEmpty()) {
@@ -106,12 +108,33 @@ public class RequestHandler implements HttpHandler {
     
     /**
      * 收集所有需要扫描的任务
+     * ✅ P0修复：添加响应参数，用于规则过滤器检查
      */
-    private List<ScanTask> collectScanTasks(HttpRequest request, RequestContext context) {
+    private List<ScanTask> collectScanTasks(HttpRequest request, 
+                                           burp.api.montoya.http.handler.HttpResponseReceived responseReceived,
+                                           RequestContext context) {
         List<ScanTask> tasks = new ArrayList<>();
+        // 注意：HttpResponseReceived 可以直接作为 HttpResponse 使用（实现了 HttpResponse 接口）
+        HttpResponse response = responseReceived != null ? (HttpResponse) responseReceived : null;
         
         // 遍历所有启用的配置
         for (Configuration config : configManager.getEnabledConfigurations()) {
+            // ✅ P0修复：检查规则过滤器（在创建任务之前，避免创建不必要的任务对象）
+            Configuration.RuleFilter filter = config.getRuleFilter();
+            if (filter != null && filter.isEnabled()) {
+                if (com.xprobe.scanner.core.RuleFilterHelper.shouldFilter(request, response, filter)) {
+                    // 被过滤器排除，跳过此规则
+                    String ruleName = config.getCustomLabel();
+                    if (ruleName == null || ruleName.isEmpty()) {
+                        ruleName = "未命名规则";
+                    }
+                    api.logging().raiseDebugEvent(
+                        "规则 [" + ruleName + "] 被过滤器排除: " + request.url()
+                    );
+                    continue;
+                }
+            }
+            
             // 配对架构：创建一个基于整个请求的扫描任务
             if (config.getPairs() != null && !config.getPairs().isEmpty()) {
                 ScanTask task = new ScanTask(null, config, request, context);

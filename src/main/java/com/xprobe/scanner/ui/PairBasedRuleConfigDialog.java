@@ -35,6 +35,9 @@ public class PairBasedRuleConfigDialog extends JDialog {
     private UnifiedResponseConfigPanel simpleResponsePanel;
     private boolean isSimpleMode;
     
+    // 规则过滤器组件
+    private RuleFilterPanel ruleFilterPanel;
+    
     public PairBasedRuleConfigDialog(Window owner, MontoyaApi api,
                                     ConfigurationManager configManager,
                                     Configuration config) {
@@ -181,12 +184,14 @@ public class PairBasedRuleConfigDialog extends JDialog {
             // ✅ 简单模式：分离的请求和响应标签页
             tabbedPane.addTab("📥 请求配置", createSimpleRequestPanel());
             tabbedPane.addTab("📤 响应配置", createSimpleResponsePanel());
+            tabbedPane.addTab("🔍 流量过滤器", createFilterPanel());
             tabbedPane.addTab("⚙️ 高级选项", createAdvancedPanel());
             tabbedPane.addTab("❓ 帮助", createSimpleHelpPanel());
         } else {
             // ✅ 高级模式：保留原有的配对管理
             pairContainerPanel = new JPanel(new BorderLayout());
             tabbedPane.addTab("🔗 请求-响应配对", pairContainerPanel);
+            tabbedPane.addTab("🔍 流量过滤器", createFilterPanel());
             tabbedPane.addTab("⚙️ 高级选项", createAdvancedPanel());
             tabbedPane.addTab("❓ 帮助", createHelpPanel());
             
@@ -433,6 +438,18 @@ public class PairBasedRuleConfigDialog extends JDialog {
         panel.add(simpleResponsePanel, BorderLayout.CENTER);
         
         return panel;
+    }
+    
+    /**
+     * 创建规则过滤器面板
+     */
+    private JPanel createFilterPanel() {
+        if (ruleFilterPanel == null) {
+            ruleFilterPanel = new RuleFilterPanel(api);
+        }
+        // 加载过滤器配置
+        ruleFilterPanel.loadFilter(configuration.getRuleFilter());
+        return ruleFilterPanel;
     }
     
     /**
@@ -852,6 +869,11 @@ public class PairBasedRuleConfigDialog extends JDialog {
         if (configuration.getDeduplicationGranularity() != null) {
             deduplicationCombo.setSelectedItem(configuration.getDeduplicationGranularity());
         }
+        
+        // ✅ 加载规则过滤器配置
+        if (ruleFilterPanel != null) {
+            ruleFilterPanel.loadFilter(configuration.getRuleFilter());
+        }
     }
     
     /**
@@ -993,6 +1015,11 @@ public class PairBasedRuleConfigDialog extends JDialog {
         configuration.setDeduplicationGranularity(
             (Configuration.DeduplicationGranularity) deduplicationCombo.getSelectedItem()
         );
+        
+        // ✅ 保存规则过滤器配置
+        if (ruleFilterPanel != null) {
+            configuration.setRuleFilter(ruleFilterPanel.getFilter());
+        }
         
         saved = true;
         dispose();
