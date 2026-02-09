@@ -14,6 +14,7 @@ import com.xprobe.scanner.core.OriginalResponseCache;
 import com.xprobe.scanner.core.RequestFilter;
 import com.xprobe.scanner.core.RequestHandler;
 import com.xprobe.scanner.core.TaskScheduler;
+import com.xprobe.scanner.core.ScanTaskCollector;
 import com.xprobe.scanner.scanners.ScannerFactory;
 import com.xprobe.scanner.ui.DashboardTab;
 import com.xprobe.scanner.ui.ActiveProbeTab;
@@ -147,6 +148,13 @@ public class XProbe implements BurpExtension {
 
         // ✅ 创建并注册UI界面（传入 realtimeScanner 和 xprobeConfigManager）
         api.userInterface().registerSuiteTab("XProbe", constructMainTab(api, logModel, configManager, requestFilter, globalFilter, realtimeScanner, responseCache));
+        
+        // ✅ 注册右键菜单：Send to XProbe
+        ScanTaskCollector scanTaskCollector = new ScanTaskCollector(api, configManager);
+        api.userInterface().registerContextMenuItemsProvider(
+            new com.xprobe.scanner.ui.XProbeContextMenuProvider(api, scanTaskCollector, taskScheduler, responseCache)
+        );
+
         
         // ✅ P0修复：注册完整的资源清理处理器
         api.extension().registerUnloadingHandler(() -> {

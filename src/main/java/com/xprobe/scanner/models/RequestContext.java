@@ -8,12 +8,18 @@ public class RequestContext {
     private final String method;
     private final String url;
     private final int requestHash;
+    private final boolean skipDeduplication;
     
     public RequestContext(String toolSource, String method, String url, int requestHash) {
+        this(toolSource, method, url, requestHash, false);
+    }
+    
+    public RequestContext(String toolSource, String method, String url, int requestHash, boolean skipDeduplication) {
         this.toolSource = toolSource;
         this.method = method;
         this.url = url;
         this.requestHash = requestHash;
+        this.skipDeduplication = skipDeduplication;
     }
     
     public String getToolSource() {
@@ -30,5 +36,9 @@ public class RequestContext {
     
     public int getRequestHash() {
         return requestHash;
+    }
+
+    public boolean isSkipDeduplication() {
+        return skipDeduplication;
     }
 }

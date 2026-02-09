@@ -166,9 +166,12 @@ public class UniversalScanner extends AbstractScanner {
         
         // ✅ 修复：检查是否所有目标都已去重
         // 如果所有目标都已去重，返回false，不创建任务，避免显示在进度条中
+        // ✅ 右键送检等手动触发：跳过去重，强制执行验证
+        if (task.getContext() == null || !task.getContext().isSkipDeduplication()) {
         if (areAllTargetsDeduplicated(request, config, pairs)) {
             api.logging().raiseDebugEvent("规则 [" + config.getCustomLabel() + "] 的所有目标都已去重，跳过任务创建: " + request.url());
             return false;
+            }
         }
         
         // 匹配成功，输出一条INFO日志
@@ -406,11 +409,17 @@ public class UniversalScanner extends AbstractScanner {
                 return results;
             }
             
+            // ✅ 修复：获取 skipDeduplication 标记并透传
+            boolean skipDeduplication = task.getContext() != null && task.getContext().isSkipDeduplication();
+            
             // ✅ 修复：在扫描开始前检查是否所有目标都已去重
             // 如果所有目标都已去重，立即返回空结果，避免创建无意义的任务进度
-            if (areAllTargetsDeduplicated(originalRequest, config, pairs)) {
-                api.logging().raiseDebugEvent("规则 " + config.getCustomLabel() + " 的所有目标都已去重，跳过扫描");
-                return results;  // 返回空结果，不创建任何ScanResult
+            // ✅ 右键送检等手动触发：跳过去重，强制执行验证
+            if (!skipDeduplication) {
+                if (areAllTargetsDeduplicated(originalRequest, config, pairs)) {
+                    api.logging().raiseDebugEvent("规则 " + config.getCustomLabel() + " 的所有目标都已去重，跳过扫描");
+                    return results;  // 返回空结果，不创建任何ScanResult
+                }
             }
             
             // 初始化Payload解析器
@@ -439,10 +448,9 @@ public class UniversalScanner extends AbstractScanner {
                 // 如果使用了变量但变量未提取，会在变量替换时处理（保持占位符或使用空值）
                 
                 try {
-                    // ✅ 所有Pair都基于同一个拦截到的请求
-                    // ✅ 传递allEvaluations列表和allPairFeatures，让评估方法能够记录所有请求并引用前面的特征
+                    // ✅ 修复：透传 skipDeduplication 标记
                     PairEvaluationResult evaluation = evaluatePair(
-                        pair, originalRequest, payloadResolver, config, allEvaluations, allPairFeatures, accumulatedVars, taskScopedCache
+                        pair, originalRequest, payloadResolver, config, allEvaluations, allPairFeatures, accumulatedVars, taskScopedCache, skipDeduplication
                     );
                     pairResults.put(pair.getId(), evaluation.matched);
                     pairEvaluations.put(pair.getId(), evaluation);
@@ -702,7 +710,8 @@ public class UniversalScanner extends AbstractScanner {
                                               List<PairEvaluationResult> allEvaluations,
                                               Map<Integer, PairResponseFeatures> allPairFeatures,
                                               Map<String, String> accumulatedVars,
-                                              Map<String, PairEvaluationResult> taskScopedCache) {
+                                              Map<String, PairEvaluationResult> taskScopedCache,
+                                              boolean skipDeduplication) {
         // ✅ 防御：避免空指针
         if (taskScopedCache == null) {
             taskScopedCache = new HashMap<>();
@@ -818,7 +827,9 @@ public class UniversalScanner extends AbstractScanner {
         // 4. ✅ 统一去重过滤（与批量/逐个模式无关）
         //    去重决定"打不打"，批量/逐个决定"怎么打"
         //    ✅ 修复：传递pairId，确保不同配对即使针对同一参数也能分别执行
-        List<InjectionTarget> validTargets = filterDuplicateTargets(allTargets, config, originalRequest, pair.getId());
+        // skipDeduplication 由上层 scan() 透传，避免在此处引用 task
+        // （此处不应重新计算）
+        List<InjectionTarget> validTargets = filterDuplicateTargets(allTargets, config, originalRequest, pair.getId(), skipDeduplication);
 
         // ✅ 多Pair共享去重：即使本Pair的targets全部被去重，也不代表本Pair必定失败
         // 场景：pair1 已经发送过相同注入请求并缓存了响应，pair2 可以复用响应进行判断
@@ -839,10 +850,10 @@ public class UniversalScanner extends AbstractScanner {
         // 📌 批量模式 vs 逐个模式
         if (injectionMode == Configuration.InjectionMode.BATCH) {
             // ========== 批量模式（BATCH）：所有validTargets同时注入相同payload ==========
-            return evaluateBatchMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures, accumulatedVars, taskScopedCache);
+            return evaluateBatchMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures, accumulatedVars, taskScopedCache, skipDeduplication);
         } else {
             // ========== 逐个模式（INDIVIDUAL）：每个validTarget分别注入 ==========
-            return evaluateIndividualMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures, accumulatedVars, taskScopedCache);
+            return evaluateIndividualMode(validTargets, injectionPoints, originalRequest, responseConfig, payloadResolver, config, pair, allEvaluations, allPairFeatures, accumulatedVars, taskScopedCache, skipDeduplication);
         }
     }
     
@@ -855,7 +866,8 @@ public class UniversalScanner extends AbstractScanner {
     private List<InjectionTarget> filterDuplicateTargets(List<InjectionTarget> allTargets, 
                                                          Configuration config, 
                                                          HttpRequest originalRequest,
-                                                         Integer pairId) {
+                                                         Integer pairId,
+                                                         boolean skipDeduplication) {
         // 获取请求上下文信息
         String method = originalRequest.method();
         String host = originalRequest.httpService().host();
@@ -877,7 +889,7 @@ public class UniversalScanner extends AbstractScanner {
             );
             
             // 检查这个key是否已经在去重集合中
-            boolean isDuplicate = realtimeScanner != null && 
+            boolean isDuplicate = !skipDeduplication && realtimeScanner != null && 
                 realtimeScanner.isAlreadyProcessed(dedupKey);
             
             if (!isDuplicate) {
@@ -895,8 +907,8 @@ public class UniversalScanner extends AbstractScanner {
      * ✅ 标记目标为已测试
      * 在真正发送请求并注入payload后调用
      */
-    private void markTargetAsProcessed(InjectionTarget target) {
-        if (realtimeScanner != null && target.dedupKey != null) {
+    private void markTargetAsProcessed(InjectionTarget target, boolean skipDeduplication) {
+        if (!skipDeduplication && realtimeScanner != null && target.dedupKey != null) {
             realtimeScanner.markAsProcessed(target.dedupKey);
         }
     }
@@ -927,7 +939,8 @@ public class UniversalScanner extends AbstractScanner {
                                                    List<PairEvaluationResult> allEvaluations,
                                                    Map<Integer, PairResponseFeatures> allPairFeatures,
                                                    Map<String, String> accumulatedVars,
-                                                   Map<String, PairEvaluationResult> taskScopedCache) {
+                                                   Map<String, PairEvaluationResult> taskScopedCache,
+                                                   boolean skipDeduplication) {
         // ✅ 保存最后一个响应（用于记录未命中的请求）
         HttpResponse lastResponse = null;
         HttpRequest lastModifiedRequest = null;
@@ -1062,7 +1075,7 @@ public class UniversalScanner extends AbstractScanner {
 
                 // ✅ 立即标记所有targets为已处理（遵循颗粒度）
                 for (InjectionTarget target : allTargetsToMark) {
-                    markTargetAsProcessed(target);
+                    markTargetAsProcessed(target, skipDeduplication);
                 }
                 
                 // ✅ 安全检查：确保响应不为null
@@ -1234,7 +1247,8 @@ public class UniversalScanner extends AbstractScanner {
                                                         List<PairEvaluationResult> allEvaluations,
                                                         Map<Integer, PairResponseFeatures> allPairFeatures,
                                                         Map<String, String> accumulatedVars,
-                                                        Map<String, PairEvaluationResult> taskScopedCache) { 
+                                                        Map<String, PairEvaluationResult> taskScopedCache,
+                                                        boolean skipDeduplication) { 
         // ✅ 保存最后一个响应（用于记录未命中的请求）
         HttpResponse lastResponse = null;
         HttpRequest lastModifiedRequest = null;
@@ -1404,7 +1418,7 @@ public class UniversalScanner extends AbstractScanner {
                 
                 // ✅ 立即标记所有targets为已处理（逐个模式：每个target单独标记）
                 for (InjectionTarget target : allTargetsToMark) {
-                    markTargetAsProcessed(target);
+                    markTargetAsProcessed(target, skipDeduplication);
                 }
                 
                 // ✅ 安全检查：确保响应不为null
