@@ -174,8 +174,8 @@ public class UniversalScanner extends AbstractScanner {
             }
         }
         
-        // 匹配成功，输出一条INFO日志
-        api.logging().raiseInfoEvent("✅ 规则 [" + config.getCustomLabel() + "] 匹配，准备扫描: " + request.url());
+        // 匹配成功，输出一条DEBUG日志（高并发下避免INFO日志过多影响性能）
+        api.logging().raiseDebugEvent("✅ 规则 [" + config.getCustomLabel() + "] 匹配，准备扫描: " + request.url());
         return true;
     }
     

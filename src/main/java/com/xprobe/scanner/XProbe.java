@@ -41,154 +41,138 @@ public class XProbe implements BurpExtension {
     public void initialize(MontoyaApi api) {
         api.extension().setName("XProbe - Passive Security Scanner");
 
-        // ✅ 初始化配置管理器（单例模式）
-        xprobeConfigManager = new XProbeConfigManager(new ConfigPersistence());
-        
-        // ✅ 初始化配置（加载一次到内存）
-        XProbeConfig config;
-        try {
-            xprobeConfigManager.initialize();
-            api.logging().raiseInfoEvent("✅ 配置管理器初始化成功: " + xprobeConfigManager.getConfigFilePath());
-        } catch (Exception e) {
-            api.logging().raiseErrorEvent("⚠️ 配置加载失败，使用默认配置: " + e.getMessage());
-            
-            // ✅ 关键修复：保存默认配置到configManager
-            try {
-                XProbeConfig defaultConfig = new XProbeConfig();
-                xprobeConfigManager.saveConfig(defaultConfig);
-                api.logging().raiseInfoEvent("✅ 默认配置已保存到: " + xprobeConfigManager.getConfigFilePath());
-            } catch (Exception ex) {
-                api.logging().raiseErrorEvent("❌ 致命错误：无法保存默认配置: " + ex.getMessage());
-                api.logging().raiseErrorEvent("❌ 插件可能无法正常工作，请检查磁盘空间和权限");
-            }
-        }
-        
-        // ✅ 获取配置（现在一定有配置了）
-        config = xprobeConfigManager.getConfig();
-
-        // 创建核心组件
-        LogModel logModel = new LogModel();
-        ConfigurationManager configManager = new ConfigurationManager();
-        
-        // 应用扫描规则配置
-        if (config.getScanConfigurations() != null && !config.getScanConfigurations().isEmpty()) {
-            for (Configuration scanConfig : config.getScanConfigurations()) {
-                configManager.addConfiguration(scanConfig);
-            }
-            api.logging().raiseInfoEvent("✅ 加载了 " + config.getScanConfigurations().size() + " 条扫描规则");
-        }
-        
-        GlobalFilter globalFilter = new GlobalFilter();
-        
-        // 应用黑白名单配置
-        globalFilter.updateWhitelist(config.getWhitelist(), config.isWhitelistEnabled());
-        globalFilter.updateBlacklist(config.getBlacklist(), config.isBlacklistEnabled());
-        if (config.isWhitelistEnabled()) {
-            api.logging().raiseInfoEvent("✅ 白名单已启用，包含 " + config.getWhitelist().size() + " 条规则");
-        }
-        if (config.isBlacklistEnabled()) {
-            api.logging().raiseInfoEvent("✅ 黑名单已启用，包含 " + config.getBlacklist().size() + " 条规则");
-        }
-        
-        RequestFilter requestFilter = new RequestFilter(api, globalFilter);
-        
-        // 创建重构后的RealtimeScanner (必须在ScannerFactory之前创建)
-        // ✅ 传入 XProbeConfig 以正确初始化 ArjunService
-        realtimeScanner = 
-            new com.xprobe.scanner.active.RealtimeScannerRefactored(api, configManager, globalFilter, logModel, config);
-        
-        // 应用参数收集模式
-        if ("PARAMETERS_AND_KEYWORDS".equals(config.getCollectionMode())) {
-            realtimeScanner.setCollectionMode(ParameterCollector.CollectionMode.PARAMETERS_AND_KEYWORDS);
-            api.logging().raiseInfoEvent("✅ 参数收集模式: 参数名+关键词");
-        } else {
-            realtimeScanner.setCollectionMode(ParameterCollector.CollectionMode.PARAMETERS_ONLY);
-            api.logging().raiseInfoEvent("✅ 参数收集模式: 仅参数名");
-        }
-        
-        // 应用全局参数
-        if (config.getGlobalParameters() != null && !config.getGlobalParameters().isEmpty()) {
-            realtimeScanner.addGlobalCustomParameters(config.getGlobalParameters());
-            api.logging().raiseInfoEvent("✅ 加载了 " + config.getGlobalParameters().size() + " 个全局参数");
-        }
-        
-        // ✅ 应用Arjun实时模式配置（智能触发）
-        realtimeScanner.setMinParameterThreshold(config.getArjunRealtimeThreshold());
-        realtimeScanner.setCooldownSeconds(config.getArjunRealtimeInterval());
-        api.logging().raiseInfoEvent(String.format(
-            "✅ Arjun实时模式配置: 阈值=%d个参数, 定时=%d秒", 
-            config.getArjunRealtimeThreshold(), config.getArjunRealtimeInterval()
-        ));
-        
-        // ✅ Arjun配置（Java原生Arjun，配置在ArjunService中）
-        // 外部工具配置已废弃，使用Java原生实现
-        api.logging().raiseInfoEvent("✅ 使用Java原生Arjun（无需外部工具配置）");
-        
-        // ✅ 创建原始响应缓存（LRU，最多缓存2000条记录）
-        this.responseCache = new OriginalResponseCache(2000);
-        api.logging().raiseInfoEvent("✅ 原始响应缓存已创建（容量: 2000）");
-
-        // ✅ 创建ScannerFactory (需要RealtimeScanner和XProbeConfigManager以支持全局注入模式)
-        ScannerFactory scannerFactory = new ScannerFactory(api, realtimeScanner, xprobeConfigManager, responseCache);
-        
-        // ✅ 创建任务调度器（传入响应缓存）
-        taskScheduler = new TaskScheduler(api, scannerFactory, logModel, xprobeConfigManager, responseCache);
-        
-        // ✅ 建立RealtimeScanner和TaskScheduler的双向引用（用于Arjun→漏洞扫描）
-        realtimeScanner.setTaskScheduler(taskScheduler);
-        
-        // ✅ 设置响应缓存引用（用于缓存主动探测的原始响应，供被动扫描规则使用）
-        realtimeScanner.setResponseCache(responseCache);
-        
-        // ✅ 创建请求处理器 (需要RealtimeScanner和响应缓存)
-        RequestHandler requestHandler = new RequestHandler(api, configManager, requestFilter, taskScheduler, realtimeScanner, xprobeConfigManager, responseCache, globalFilter);
-        
-        // 注册HTTP处理器
-        api.http().registerHttpHandler(requestHandler);
-
-        // ✅ 创建并注册UI界面（传入 realtimeScanner 和 xprobeConfigManager）
-        api.userInterface().registerSuiteTab("XProbe", constructMainTab(api, logModel, configManager, requestFilter, globalFilter, realtimeScanner, responseCache));
-        
-        // ✅ 注册右键菜单：Send to XProbe
-        ScanTaskCollector scanTaskCollector = new ScanTaskCollector(api, configManager);
-        api.userInterface().registerContextMenuItemsProvider(
-            new com.xprobe.scanner.ui.XProbeContextMenuProvider(api, scanTaskCollector, taskScheduler, responseCache)
-        );
-
-        
-        // ✅ P0修复：注册完整的资源清理处理器
+        // ✅ 卸载清理处理器应尽早注册：避免初始化中途失败时无法注册卸载清理
         api.extension().registerUnloadingHandler(() -> {
             api.logging().raiseInfoEvent("🛑 正在关闭XProbe插件...");
+            performSafeCleanup(api);
+            api.logging().raiseInfoEvent("✅ XProbe插件已安全关闭");
+        });
+
+        try {
+            // 1. 初始化配置管理器
+            xprobeConfigManager = new XProbeConfigManager(new ConfigPersistence());
+            try {
+                xprobeConfigManager.initialize();
+                api.logging().raiseInfoEvent("✅ 配置管理器初始化成功: " + xprobeConfigManager.getConfigFilePath());
+            } catch (Exception e) {
+                api.logging().raiseErrorEvent("⚠️ 配置加载失败，尝试保存默认配置: " + e.getMessage());
+                XProbeConfig defaultConfig = new XProbeConfig();
+                xprobeConfigManager.saveConfig(defaultConfig);
+                api.logging().raiseInfoEvent("✅ 默认配置已保存");
+            }
+
+            // 2. 获取配置并初始化核心逻辑组件
+            XProbeConfig config = xprobeConfigManager.getConfig();
+            LogModel logModel = new LogModel();
+            ConfigurationManager configManager = new ConfigurationManager();
+
+            // 应用扫描规则
+            if (!config.getScanConfigurations().isEmpty()) {
+                for (Configuration scanConfig : config.getScanConfigurations()) {
+                    configManager.addConfiguration(scanConfig);
+                }
+                api.logging().raiseInfoEvent("✅ 加载了 " + config.getScanConfigurations().size() + " 条扫描规则");
+            }
+
+            GlobalFilter globalFilter = new GlobalFilter();
+            globalFilter.updateWhitelist(config.getWhitelist(), config.isWhitelistEnabled());
+            globalFilter.updateBlacklist(config.getBlacklist(), config.isBlacklistEnabled());
+
+            RequestFilter requestFilter = new RequestFilter(api, globalFilter);
+
+            // 3. 创建实时扫描器与任务调度器
+            realtimeScanner = new com.xprobe.scanner.active.RealtimeScannerRefactored(api, configManager, globalFilter, logModel, config);
             
-            // ✅ 修复：清理UI Tab资源
+            // 应用参数收集与Arjun配置
+            if ("PARAMETERS_AND_KEYWORDS".equals(config.getCollectionMode())) {
+                realtimeScanner.setCollectionMode(ParameterCollector.CollectionMode.PARAMETERS_AND_KEYWORDS);
+            }
+            if (!config.getGlobalParameters().isEmpty()) {
+                realtimeScanner.addGlobalCustomParameters(config.getGlobalParameters());
+            }
+            realtimeScanner.setMinParameterThreshold(config.getArjunRealtimeThreshold());
+            realtimeScanner.setCooldownSeconds(config.getArjunRealtimeInterval());
+
+            // 4. 创建响应缓存（容量 5000）
+            this.responseCache = new OriginalResponseCache(5000);
+
+            // 5. 创建工厂与调度器并建立引用
+            ScannerFactory scannerFactory = new ScannerFactory(api, realtimeScanner, xprobeConfigManager, responseCache);
+            taskScheduler = new TaskScheduler(api, scannerFactory, logModel, xprobeConfigManager, responseCache);
+            realtimeScanner.setTaskScheduler(taskScheduler);
+            realtimeScanner.setResponseCache(responseCache);
+
+            // 6. 注册处理器与UI
+            RequestHandler requestHandler = new RequestHandler(api, configManager, requestFilter, taskScheduler, realtimeScanner, xprobeConfigManager, responseCache, globalFilter);
+            api.http().registerHttpHandler(requestHandler);
+
+            api.userInterface().registerSuiteTab("XProbe", constructMainTab(api, logModel, configManager, requestFilter, globalFilter, realtimeScanner, responseCache));
+            
+            ScanTaskCollector scanTaskCollector = new ScanTaskCollector(api, configManager);
+            api.userInterface().registerContextMenuItemsProvider(new com.xprobe.scanner.ui.XProbeContextMenuProvider(api, scanTaskCollector, taskScheduler, responseCache));
+
+            api.logging().raiseInfoEvent("🚀 XProbe 插件初始化完成");
+
+        } catch (Exception e) {
+            api.logging().raiseErrorEvent("❌ XProbe 初始化致命错误: " + e.getMessage());
+            e.printStackTrace();
+            // 失败时清理资源
+            try {
+                performSafeCleanup(api);
+            } catch (Exception ignored) {}
+            // 抛出异常让 Burp 知道加载失败
+            throw new RuntimeException("XProbe 初始化失败", e);
+        }
+    }
+
+    private void performSafeCleanup(MontoyaApi api) {
+        try {
             if (dashboardTab != null) {
                 dashboardTab.cleanup();
             }
-            
+        } catch (Exception e) {
+            api.logging().raiseDebugEvent("清理 DashboardTab 失败: " + e.getMessage());
+        }
+
+        try {
             if (scanResultTab != null) {
                 scanResultTab.cleanup();
             }
-            
+        } catch (Exception e) {
+            api.logging().raiseDebugEvent("清理 ScanResultTab 失败: " + e.getMessage());
+        }
+
+        try {
             if (activeProbeTab != null) {
                 activeProbeTab.cleanup();
             }
-            
+        } catch (Exception e) {
+            api.logging().raiseDebugEvent("清理 ActiveProbeTab 失败: " + e.getMessage());
+        }
+
+        try {
             if (unifiedConfigTab != null) {
                 unifiedConfigTab.cleanup();
             }
-            
+        } catch (Exception e) {
+            api.logging().raiseDebugEvent("清理 UnifiedConfigTab 失败: " + e.getMessage());
+        }
+
+        try {
             if (taskScheduler != null) {
                 taskScheduler.shutdown();
             }
-            
+        } catch (Exception e) {
+            api.logging().raiseDebugEvent("关闭 TaskScheduler 失败: " + e.getMessage());
+        }
+
+        try {
             if (realtimeScanner != null) {
                 realtimeScanner.shutdown();
             }
-            
-            api.logging().raiseInfoEvent("✅ XProbe插件已安全关闭");
-        });
-        
-        api.logging().raiseInfoEvent("🚀 XProbe 插件初始化完成");
+        } catch (Exception e) {
+            api.logging().raiseDebugEvent("关闭 RealtimeScanner 失败: " + e.getMessage());
+        }
     }
 
     // 构造顶级选项卡的用户界面组件

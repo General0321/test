@@ -82,7 +82,11 @@ public class OriginalResponseCache {
     }
 
     /**
-     * 计算请求体的SHA-256哈希（无body时返回固定占位符）
+     * 计算请求体的哈希（无body时返回固定占位符）
+     * 
+     * 性能优化：
+     * 1) 小请求体使用 SHA-256（更稳定，降低碰撞）
+     * 2) 大请求体使用截断策略（如超过 5MB 仅取前 1MB 参与计算）并降级为快速 hash，避免 CPU 开销
      */
     private String computeBodyHash(HttpRequest request) {
         try {
@@ -90,8 +94,32 @@ public class OriginalResponseCache {
             if (body == null || body.isEmpty()) {
                 return "NOBODY";
             }
+
+            int fullLength = body.length();
+            
+            // ✅ 优化 1：如果请求体过大（如超过 5MB），只取前 1MB 进行计算
+            // 5MB 约为 5 * 1024 * 1024 字符（假设单字节字符为主）
+            final int MAX_BODY_FOR_CALC = 5 * 1024 * 1024;
+            final int TRUNCATE_LEN = 1024 * 1024;
+            
+            String bodyToHash = body;
+            boolean isTruncated = false;
+            
+            if (fullLength > MAX_BODY_FOR_CALC) {
+                bodyToHash = body.substring(0, TRUNCATE_LEN);
+                isTruncated = true;
+            }
+
+            // ✅ 优化 2：阈值分级处理
+            // 超过 4KB 就降级为 hashCode 以保证高并发下的吞吐率
+            final int SHA256_MAX_LEN = 4096;
+            if (fullLength > SHA256_MAX_LEN) {
+                String prefix = isTruncated ? "TRUNC-" : "FAST-";
+                return prefix + Integer.toHexString(bodyToHash.hashCode()) + "-L" + fullLength;
+            }
+
             MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(body.getBytes(StandardCharsets.UTF_8));
+            byte[] digest = md.digest(bodyToHash.getBytes(StandardCharsets.UTF_8));
             return toHex(digest);
         } catch (Exception e) {
             // 降级：使用请求字符串的hashCode
