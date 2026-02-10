@@ -9,6 +9,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.regex.Pattern;
 
 /**
@@ -502,34 +503,19 @@ public class ParameterCollector {
         if (domainData == null) {
             return false;
         }
-        
-        // 从hosts列表中移除
-        boolean hostRemoved = domainData.hosts.remove(host);
-        
-        // 从hostParameters中移除
-        domainData.hostParameters.remove(host);
-        
-        // 从endpointMap中移除该host的所有接口
-        domainData.endpointMap.entrySet().removeIf(entry -> {
-            EndpointInfo epInfo = entry.getValue();
-            if (epInfo.host.equals(host)) {
-                // 从allParameters中移除该接口的参数
-                epInfo.parameters.forEach(domainData.allParameters::remove);
-                return true;
-            }
-            return false;
-        });
-        
+
+        boolean hostRemoved = domainData.clearHost(host);
+
         // 如果主域名下没有host了，删除整个主域名
-        if (domainData.hosts.isEmpty()) {
+        if (hostRemoved && domainData.getAllHosts().isEmpty()) {
             domainDataMap.remove(mainDomain);
             domainKeywords.remove(mainDomain);
         }
-        
+
         if (hostRemoved) {
             api.logging().raiseInfoEvent(String.format("已清空子域名数据: %s (主域名: %s)", host, mainDomain));
         }
-        
+
         return hostRemoved;
     }
     
@@ -1134,18 +1120,19 @@ public class ParameterCollector {
      */
     private static class DomainData {
         private final String mainDomain;
+        private final ReentrantReadWriteLock domainLock = new ReentrantReadWriteLock();
         
         // 主域名下所有参数（合并所有子域名）
-        private final Set<String> allParameters = ConcurrentHashMap.newKeySet();
+        private final Set<String> allParameters = new HashSet<>();
         
         // 按 host 分组的参数
-        private final Map<String, Set<String>> hostParameters = new ConcurrentHashMap<>();
+        private final Map<String, Set<String>> hostParameters = new HashMap<>();
         
         // 接口信息
-        private final Map<String, EndpointInfo> endpointMap = new ConcurrentHashMap<>();
+        private final Map<String, EndpointInfo> endpointMap = new HashMap<>();
         
         // host 列表
-        private final Set<String> hosts = ConcurrentHashMap.newKeySet();
+        private final Set<String> hosts = new HashSet<>();
         
         // ✅ 最后更新时间（仅在数据实际变化时更新）
         private volatile long lastUpdateTime = System.currentTimeMillis();
@@ -1173,25 +1160,29 @@ public class ParameterCollector {
          * ✅ 修复：遍历查找匹配的EndpointInfo（因为完整key包含method和contentType）
          */
         public void addParameter(String host, String endpoint, String parameter) {
-            boolean isNew = allParameters.add(parameter);  // ✅ 检查是否是新参数
-            hosts.add(host);
-            
-            // 添加到 host 参数集合
-            hostParameters.computeIfAbsent(host, k -> ConcurrentHashMap.newKeySet())
-                         .add(parameter);
-            
-            // ✅ 修复：遍历endpointMap，找到匹配host和endpoint的EndpointInfo
-            for (Map.Entry<String, EndpointInfo> entry : endpointMap.entrySet()) {
-                EndpointInfo epInfo = entry.getValue();
-                if (epInfo.host.equals(host) && epInfo.endpoint.equals(endpoint)) {
-                    epInfo.addParameter(parameter);
-                    break;  // 找到第一个匹配的即可（同一host+endpoint可能有多个method/contentType组合）
+            domainLock.writeLock().lock();
+            try {
+                boolean isNew = allParameters.add(parameter);
+                hosts.add(host);
+                
+                // 添加到 host 参数集合
+                hostParameters.computeIfAbsent(host, k -> new HashSet<>())
+                             .add(parameter);
+                
+                // ✅ 修复：遍历endpointMap，找到匹配host和endpoint的EndpointInfo
+                for (Map.Entry<String, EndpointInfo> entry : endpointMap.entrySet()) {
+                    EndpointInfo epInfo = entry.getValue();
+                    if (epInfo.host.equals(host) && epInfo.endpoint.equals(endpoint)) {
+                        epInfo.addParameter(parameter);
+                        break;
+                    }
                 }
-            }
-            
-            // ✅ 如果是新参数，更新时间
-            if (isNew) {
-                updateLastUpdateTime();
+                
+                if (isNew) {
+                    updateLastUpdateTime();
+                }
+            } finally {
+                domainLock.writeLock().unlock();
             }
         }
         
@@ -1202,12 +1193,17 @@ public class ParameterCollector {
          * @param parameter 参数名
          */
         public void addParameterDirectly(String host, String parameter) {
-            boolean isNew = allParameters.add(parameter);
-            hosts.add(host);
-            hostParameters.computeIfAbsent(host, k -> ConcurrentHashMap.newKeySet())
-                         .add(parameter);
-            if (isNew) {
-                updateLastUpdateTime();
+            domainLock.writeLock().lock();
+            try {
+                boolean isNew = allParameters.add(parameter);
+                hosts.add(host);
+                hostParameters.computeIfAbsent(host, k -> new HashSet<>())
+                             .add(parameter);
+                if (isNew) {
+                    updateLastUpdateTime();
+                }
+            } finally {
+                domainLock.writeLock().unlock();
             }
         }
         
@@ -1217,29 +1213,28 @@ public class ParameterCollector {
         public void addEndpoint(String host, String endpoint, String method, 
                                String contentType, HttpRequest request) {
             String normalizedContentType = normalizeContentType(contentType);
-            // ✅ 修复：统一使用完整key（method|host|contentType|endpoint），与getEndpointTemplate保持一致
             String endpointKey = method + "|" + host + "|" + normalizedContentType + "|" + endpoint;
-            hosts.add(host);
             
-            // ✅ 修复：先检查是否存在，正确判断是否为新接口
-            boolean isNewEndpoint = !endpointMap.containsKey(endpointKey);
-            EndpointInfo epInfo = endpointMap.computeIfAbsent(endpointKey, 
-                k -> new EndpointInfo(host, endpoint, method, normalizedContentType, request));
-            
-            // ✅ 修复：如果接口已存在，更新模板请求以合并所有参数（确保包含所有见过的参数值）
-            if (!isNewEndpoint && epInfo != null) {
-                epInfo.updateTemplateRequest(request);
-            }
-            
-            // ✅ 修复：只在新接口时更新时间
-            if (isNewEndpoint) {
-                updateLastUpdateTime();
+            domainLock.writeLock().lock();
+            try {
+                hosts.add(host);
+                
+                boolean isNewEndpoint = !endpointMap.containsKey(endpointKey);
+                EndpointInfo epInfo = endpointMap.computeIfAbsent(endpointKey, 
+                    k -> new EndpointInfo(host, endpoint, method, normalizedContentType, request));
+                
+                if (!isNewEndpoint && epInfo != null) {
+                    epInfo.updateTemplateRequest(request);
+                }
+                
+                if (isNewEndpoint) {
+                    updateLastUpdateTime();
+                }
+            } finally {
+                domainLock.writeLock().unlock();
             }
         }
-        
-        /**
-         * 标准化 Content-Type
-         */
+
         private String normalizeContentType(String contentType) {
             if (contentType == null || contentType.isEmpty()) {
                 return "application/x-www-form-urlencoded";
@@ -1262,68 +1257,135 @@ public class ParameterCollector {
          * 检查是否有该参数
          */
         public boolean hasParameter(String parameter) {
-            return allParameters.contains(parameter);
+            domainLock.readLock().lock();
+            try {
+                return allParameters.contains(parameter);
+            } finally {
+                domainLock.readLock().unlock();
+            }
         }
         
         /**
          * 获取所有参数
          */
         public Set<String> getAllParameters() {
-            return new HashSet<>(allParameters);
+            domainLock.readLock().lock();
+            try {
+                return new HashSet<>(allParameters);
+            } finally {
+                domainLock.readLock().unlock();
+            }
         }
         
         /**
          * 获取特定 host 的参数
          */
         public Set<String> getHostParameters(String host) {
-            Set<String> params = hostParameters.get(host);
-            return params != null ? new HashSet<>(params) : new HashSet<>();
+            domainLock.readLock().lock();
+            try {
+                Set<String> params = hostParameters.get(host);
+                return params != null ? new HashSet<>(params) : new HashSet<>();
+            } finally {
+                domainLock.readLock().unlock();
+            }
         }
         
         /**
          * 获取所有 host
          */
         public Set<String> getAllHosts() {
-            return new HashSet<>(hosts);
+            domainLock.readLock().lock();
+            try {
+                return new HashSet<>(hosts);
+            } finally {
+                domainLock.readLock().unlock();
+            }
         }
         
         /**
          * 获取所有接口（仅路径）
          */
         public Set<String> getAllEndpoints() {
-            return endpointMap.values().stream()
-                .map(EndpointInfo::getEndpoint)
-                .collect(java.util.stream.Collectors.toSet());
+            domainLock.readLock().lock();
+            try {
+                return endpointMap.values().stream()
+                    .map(EndpointInfo::getEndpoint)
+                    .collect(java.util.stream.Collectors.toSet());
+            } finally {
+                domainLock.readLock().unlock();
+            }
         }
         
         /**
          * 获取所有接口Key（包含method、host、contentType、endpoint）
          */
         public Set<EndpointKey> getAllEndpointKeys() {
-            return endpointMap.values().stream()
-                .map(info -> new EndpointKey(info.method, info.host, info.contentType, info.endpoint))
-                .collect(java.util.stream.Collectors.toSet());
+            domainLock.readLock().lock();
+            try {
+                return endpointMap.values().stream()
+                    .map(info -> new EndpointKey(info.method, info.host, info.contentType, info.endpoint))
+                    .collect(java.util.stream.Collectors.toSet());
+            } finally {
+                domainLock.readLock().unlock();
+            }
         }
         
         /**
          * 获取接口的请求模板（仅通过endpoint查找）
          */
         public HttpRequest getEndpointTemplate(String endpoint) {
-            for (EndpointInfo epInfo : endpointMap.values()) {
-                if (epInfo.getEndpoint().equals(endpoint) && epInfo.getTemplateRequest() != null) {
-                    return epInfo.getTemplateRequest();
+            domainLock.readLock().lock();
+            try {
+                for (EndpointInfo epInfo : endpointMap.values()) {
+                    if (epInfo.getEndpoint().equals(endpoint) && epInfo.getTemplateRequest() != null) {
+                        return epInfo.getTemplateRequest();
+                    }
                 }
+                return null;
+            } finally {
+                domainLock.readLock().unlock();
             }
-            return null;
         }
         
         /**
          * 获取接口的请求模板（通过 EndpointKey 精确查找）
          */
         public HttpRequest getEndpointTemplate(EndpointKey epKey) {
-            String key = epKey.method + "|" + epKey.host + "|" + epKey.contentType + "|" + epKey.endpoint;
-            EndpointInfo epInfo = endpointMap.get(key);
-            return epInfo != null ? epInfo.getTemplateRequest() : null;
+            domainLock.readLock().lock();
+            try {
+                String key = epKey.method + "|" + epKey.host + "|" + epKey.contentType + "|" + epKey.endpoint;
+                EndpointInfo epInfo = endpointMap.get(key);
+                return epInfo != null ? epInfo.getTemplateRequest() : null;
+            } finally {
+                domainLock.readLock().unlock();
+            }
+        }
+
+        /**
+         * ✅ 清空指定子域名的数据
+         */
+        public boolean clearHost(String host) {
+            domainLock.writeLock().lock();
+            try {
+                boolean hostRemoved = hosts.remove(host);
+                hostParameters.remove(host);
+                
+                endpointMap.entrySet().removeIf(entry -> {
+                    EndpointInfo epInfo = entry.getValue();
+                    if (epInfo.host.equals(host)) {
+                        epInfo.parameters.forEach(allParameters::remove);
+                        return true;
+                    }
+                    return false;
+                });
+                
+                if (hostRemoved) {
+                    updateLastUpdateTime();
+                }
+                return hostRemoved;
+            } finally {
+                domainLock.writeLock().unlock();
+            }
         }
     }
     

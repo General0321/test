@@ -3664,7 +3664,7 @@ public class RealtimeScannerRefactored {
                 if (SwingUtilities.isEventDispatchThread()) {
                     activeProbeTab.addOrUpdateInterfaceDiscoveryResult(mainDomain, host, endpoint, method, contentType, exists, ts);
                 } else {
-                    SwingUtilities.invokeAndWait(() -> activeProbeTab.addOrUpdateInterfaceDiscoveryResult(mainDomain, host, endpoint, method, contentType, exists, ts));
+                    SwingUtilities.invokeLater(() -> activeProbeTab.addOrUpdateInterfaceDiscoveryResult(mainDomain, host, endpoint, method, contentType, exists, ts));
                 }
             } catch (Exception e) {
                 // 忽略错误
@@ -3680,7 +3680,7 @@ public class RealtimeScannerRefactored {
                 if (SwingUtilities.isEventDispatchThread()) {
                     activeProbeTab.addArjunProgress(mainDomain, host, endpoint, parameterType, ts);
                 } else {
-                    SwingUtilities.invokeAndWait(() -> activeProbeTab.addArjunProgress(mainDomain, host, endpoint, parameterType, ts));
+                    SwingUtilities.invokeLater(() -> activeProbeTab.addArjunProgress(mainDomain, host, endpoint, parameterType, ts));
                 }
             } catch (Exception e) {
                 // 忽略错误
@@ -3709,7 +3709,7 @@ public class RealtimeScannerRefactored {
                 if (SwingUtilities.isEventDispatchThread()) {
                     activeProbeTab.addInterfaceProgress(mainDomain, host, endpoint, method, contentType, ts);
                 } else {
-                    SwingUtilities.invokeAndWait(() -> activeProbeTab.addInterfaceProgress(mainDomain, host, endpoint, method, contentType, ts));
+                    SwingUtilities.invokeLater(() -> activeProbeTab.addInterfaceProgress(mainDomain, host, endpoint, method, contentType, ts));
                 }
             } catch (Exception e) {
                 // 忽略错误
